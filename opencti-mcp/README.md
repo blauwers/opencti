@@ -141,6 +141,57 @@ session start.  You can verify connectivity with a prompt such as:
 Use the opencti MCP tool to run a global_search for "Cobalt Strike".
 ```
 
+### OpenAI Codex CLI
+
+The [OpenAI Codex CLI](https://github.com/openai/codex) (`@openai/codex`) reads
+MCP server configuration from `~/.codex/config.toml`.  Add a
+`[mcp_servers.opencti]` section using either the SSE or stdio transport.
+
+**Install the CLI (once)**
+
+```bash
+npm install -g @openai/codex
+# or: brew install --cask codex
+```
+
+**Option A — SSE (Docker Compose endpoint)**
+
+Start the full stack first (`docker compose up -d` in `opencti-mcp/`), then
+add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.opencti]
+url = "http://localhost:8000/sse"
+```
+
+**Option B — stdio (no Docker, server launched on demand)**
+
+```toml
+[mcp_servers.opencti]
+command = "opencti-mcp"
+
+[mcp_servers.opencti.env]
+OPENCTI_URL  = "http://localhost:4000"
+OPENCTI_TOKEN = "your-api-token-here"
+```
+
+**Optional: auto-approve read-only tools**
+
+```toml
+[mcp_servers.opencti]
+url = "http://localhost:8000/sse"
+default_tools_approval_mode = "auto"
+
+[mcp_servers.opencti.tools.global_search]
+approval_mode = "auto"
+```
+
+Once the config is in place, start a Codex session and verify the connection:
+
+```bash
+codex "Use the opencti global_search tool to search for 'Cobalt Strike'"
+```
+
 ### SSE / HTTP transport (remote deployment)
 
 ```bash
