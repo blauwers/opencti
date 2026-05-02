@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager
 from unittest.mock import MagicMock, patch
 
 import opencti_mcp.client as client_module
@@ -62,7 +63,7 @@ def _mock_client() -> MagicMock:
     return mock
 
 
-def _patch_client(mock: MagicMock):
+def _patch_client(mock: MagicMock) -> AbstractContextManager[None]:
     return patch.object(client_module, "_client", mock)
 
 

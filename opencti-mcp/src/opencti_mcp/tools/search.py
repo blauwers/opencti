@@ -10,6 +10,13 @@ from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
 
+# Minimal attribute set for summary search results; keeps responses concise.
+_SEARCH_CUSTOM_ATTRIBUTES = (
+    "id standard_id entity_type "
+    "... on StixDomainObject { name } "
+    "... on StixCyberObservable { observable_value }"
+)
+
 
 def register(mcp: FastMCP) -> None:
     """Register all search tools onto *mcp*."""
@@ -33,8 +40,6 @@ def register(mcp: FastMCP) -> None:
         limit = max(1, min(limit, 200))
         results: list[dict[str, Any]] = []
 
-        custom_attributes = "id standard_id entity_type ... on StixDomainObject { name } ... on StixCyberObservable { observable_value }"
-
         if types:
             for entity_type in types:
                 try:
@@ -42,7 +47,7 @@ def register(mcp: FastMCP) -> None:
                         types=[entity_type],
                         search=query,
                         first=limit,
-                        customAttributes=custom_attributes,
+                        customAttributes=_SEARCH_CUSTOM_ATTRIBUTES,
                     )
                     results.extend(raw or [])
                 except Exception:
@@ -52,7 +57,7 @@ def register(mcp: FastMCP) -> None:
                 raw = client.stix_core_object.list(
                     search=query,
                     first=limit,
-                    customAttributes=custom_attributes,
+                    customAttributes=_SEARCH_CUSTOM_ATTRIBUTES,
                 )
                 results.extend(raw or [])
             except Exception:

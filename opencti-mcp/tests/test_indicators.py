@@ -4,9 +4,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import AbstractContextManager
 from unittest.mock import MagicMock, patch
-
-import pytest  # noqa: F401 — re-exported for test discovery
 
 import opencti_mcp.client as client_module
 from opencti_mcp.tools import indicators
@@ -39,7 +38,7 @@ def _mock_client() -> MagicMock:
     return mock
 
 
-def _patch_client(mock: MagicMock) -> "contextmanager":  # noqa: F821
+def _patch_client(mock: MagicMock) -> AbstractContextManager[None]:
     return patch.object(client_module, "_client", mock)
 
 

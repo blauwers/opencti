@@ -9,6 +9,31 @@ from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
 
+# GraphQL query used to retrieve recent works associated with a specific entity.
+_ENRICHMENT_WORKS_QUERY = """
+query EnrichmentWorks($filters: FilterGroup) {
+    works(first: 50, filters: $filters, orderBy: timestamp, orderMode: desc) {
+        edges {
+            node {
+                id
+                name
+                status
+                timestamp
+                completed_time
+                tracking {
+                    import_expected_number
+                    import_processed_number
+                }
+                errors {
+                    timestamp
+                    message
+                }
+            }
+        }
+    }
+}
+"""
+
 
 def register(mcp: FastMCP) -> None:
     """Register all enrichment tools onto *mcp*."""
@@ -124,30 +149,7 @@ def register(mcp: FastMCP) -> None:
                 "filters": [{"key": "event_source_id", "values": [standard_id]}],
                 "filterGroups": [],
             }
-            query = """
-            query EnrichmentWorks($filters: FilterGroup) {
-                works(first: 50, filters: $filters, orderBy: timestamp, orderMode: desc) {
-                    edges {
-                        node {
-                            id
-                            name
-                            status
-                            timestamp
-                            completed_time
-                            tracking {
-                                import_expected_number
-                                import_processed_number
-                            }
-                            errors {
-                                timestamp
-                                message
-                            }
-                        }
-                    }
-                }
-            }
-            """
-            result = client.query(query, {"filters": filters})
+            result = client.query(_ENRICHMENT_WORKS_QUERY, {"filters": filters})
             edges = result.get("data", {}).get("works", {}).get("edges", [])
             works = [e["node"] for e in edges]
             return json.dumps(works, default=str)
