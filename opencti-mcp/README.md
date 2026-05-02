@@ -95,6 +95,52 @@ Or run directly:
 OPENCTI_URL=http://localhost:4000 OPENCTI_TOKEN=<token> opencti-mcp
 ```
 
+### GitHub Copilot Coding Agent (Codex)
+
+The Codex agent supports MCP servers declared in a repository's
+`.github/copilot-mcp.json` (workspace scope) or in the user-level Copilot
+settings in `~/.config/github-copilot/mcp.json`.
+
+**Option A — point at the Docker Compose SSE endpoint**
+
+Start the full stack first (`docker compose up -d` in `opencti-mcp/`), then
+add this to `.github/copilot-mcp.json` in your repository:
+
+```json
+{
+  "servers": {
+    "opencti": {
+      "type": "sse",
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+**Option B — run via stdio (no Docker needed)**
+
+```json
+{
+  "servers": {
+    "opencti": {
+      "type": "stdio",
+      "command": "opencti-mcp",
+      "env": {
+        "OPENCTI_URL": "http://localhost:4000",
+        "OPENCTI_TOKEN": "your-api-token-here"
+      }
+    }
+  }
+}
+```
+
+Once the configuration is in place, Codex picks up the server on the next
+session start.  You can verify connectivity with a prompt such as:
+
+```
+Use the opencti MCP tool to run a global_search for "Cobalt Strike".
+```
+
 ### SSE / HTTP transport (remote deployment)
 
 ```bash
@@ -106,20 +152,68 @@ OPENCTI_TOKEN=<token> \
 opencti-mcp
 ```
 
-### Docker
+### Docker Compose (full stack)
 
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY . .
-RUN pip install -e .
-ENV MCP_TRANSPORT=sse MCP_SSE_HOST=0.0.0.0 MCP_SSE_PORT=8000
-EXPOSE 8000
-CMD ["opencti-mcp"]
-```
+The `opencti-mcp/` directory ships a `docker-compose.yml` that starts the complete OpenCTI platform (Elasticsearch, Redis, MinIO, RabbitMQ, OpenCTI platform, and worker) together with the MCP server in SSE mode.
+
+**1 — Prerequisites**
 
 ```bash
-docker run -e OPENCTI_URL=http://opencti:4000 -e OPENCTI_TOKEN=<token> -p 8000:8000 opencti-mcp
+# Increase the virtual-memory limit required by Elasticsearch (Linux / WSL2)
+sudo sysctl -w vm.max_map_count=262144
+```
+
+**2 — Configure secrets**
+
+```bash
+cd opencti-mcp
+cp .env.example .env
+# Edit .env: set OPENCTI_ADMIN_TOKEN to a random UUID v4, e.g.:
+#   python3 -c "import uuid; print(uuid.uuid4())"
+```
+
+**3 — Start**
+
+```bash
+docker compose up -d
+```
+
+The first start downloads images and initialises Elasticsearch — allow about **2 minutes** before the platform is ready.
+
+| Service | URL |
+|---|---|
+| OpenCTI UI | <http://localhost:4000> — `admin@opencti.io` / `ChangeMe` |
+| MCP SSE endpoint | <http://localhost:8000/sse> |
+| RabbitMQ management | <http://localhost:15672> — `guest` / `guest` |
+
+**4 — Rebuild after code changes**
+
+```bash
+docker compose build mcp
+docker compose up -d mcp
+```
+
+**5 — Tear down**
+
+```bash
+docker compose down -v   # -v removes named volumes (Elasticsearch index, S3 data)
+```
+
+### Docker (single container)
+
+```bash
+# Build
+docker build -t opencti-mcp .
+
+# Run (pointing at an existing OpenCTI instance)
+docker run --rm \
+  -e OPENCTI_URL=http://opencti:4000 \
+  -e OPENCTI_TOKEN=<token> \
+  -e MCP_TRANSPORT=sse \
+  -e MCP_SSE_HOST=0.0.0.0 \
+  -e MCP_SSE_PORT=8000 \
+  -p 8000:8000 \
+  opencti-mcp
 ```
 
 ---
@@ -173,6 +267,117 @@ flake8 src/ tests/
 
 # Type check
 mypy src/
+```
+
+### Testing
+
+#### Unit tests (no OpenCTI instance required)
+
+The test suite uses `unittest.mock` to stub all pycti API calls, so it runs
+fully offline.
+
+```bash
+cd opencti-mcp
+pip install -e ".[dev]"
+
+# Run all tests
+pytest tests/ -v
+
+# Run a specific module
+pytest tests/test_indicators.py -v
+
+# Run a specific test class or method
+pytest tests/test_cases.py::TestCreateIncidentCase -v
+pytest tests/test_cases.py::TestCreateIncidentCase::test_creates_case -v
+
+# Run with coverage
+pytest tests/ --cov=opencti_mcp --cov-report=term-missing -v
+```
+
+Expected output (all tests should pass, ~22 tests total):
+
+```
+tests/test_cases.py::TestCreateIncidentCase::test_creates_case PASSED
+tests/test_cases.py::TestCreateRFI::test_creates_rfi PASSED
+tests/test_enrichment.py::TestListConnectors::test_returns_list PASSED
+...
+22 passed in 0.XX s
+```
+
+#### Integration / smoke tests against a live instance
+
+Use the Docker Compose stack from `opencti-mcp/`:
+
+```bash
+# 1. Start the full stack
+cd opencti-mcp
+cp .env.example .env          # set OPENCTI_ADMIN_TOKEN to a UUID v4
+docker compose up -d
+
+# 2. Wait until the platform is ready (check health)
+docker compose logs -f opencti | grep "GraphQL server ready"
+# Ctrl-C once you see the ready message
+
+# 3. Set env vars pointing at the live instance
+export OPENCTI_URL=http://localhost:4000
+export OPENCTI_TOKEN=<value from your .env>
+
+# 4. Run a quick smoke test — install the package and call a tool directly
+pip install -e ".[dev]"
+python - <<'EOF'
+import opencti_mcp.client as cm
+from opencti_mcp.config import load_config
+from opencti_mcp.client import init_client
+
+cfg = load_config()
+init_client(cfg)
+client = cm.get_client()
+
+# List the first 5 indicators (returns [] on a fresh instance)
+result = client.indicator.list(first=5)
+print("indicators:", result)
+EOF
+```
+
+#### Manual end-to-end test with `mcp dev`
+
+[`mcp dev`](https://modelcontextprotocol.io/quickstart/server#test-your-server-with-the-mcp-inspector)
+launches the MCP Inspector, a web UI for calling tools interactively.
+
+```bash
+# Install the MCP CLI (once)
+pip install "mcp[cli]"
+
+# Start the inspector against the server
+cd opencti-mcp
+OPENCTI_URL=http://localhost:4000 OPENCTI_TOKEN=<token> \
+  mcp dev src/opencti_mcp/server.py
+
+# Open the Inspector in your browser:
+#   http://localhost:5173
+# Then call e.g. global_search with {"query": "Cobalt Strike"}
+```
+
+#### Manual test via curl (SSE transport)
+
+When the MCP server is running in SSE mode (e.g. from Docker Compose):
+
+```bash
+# Check the SSE endpoint is up
+curl -N http://localhost:8000/sse
+
+# Call a tool (JSON-RPC over HTTP POST)
+curl -s http://localhost:8000/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"tools/call",
+    "params":{
+      "name":"global_search",
+      "arguments":{"query":"Cobalt Strike","limit":5}
+    }
+  }' | python3 -m json.tool
 ```
 
 ---
