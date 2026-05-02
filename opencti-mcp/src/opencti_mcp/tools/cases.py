@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
@@ -127,7 +130,7 @@ def register(mcp: FastMCP) -> None:
                 if result is not None:
                     return json.dumps(result, default=str)
             except Exception:
-                pass
+                logger.debug('"lookup_case: ID read attempt failed"', exc_info=True)
 
         # Fall back to search across all types
         results = []
@@ -140,7 +143,7 @@ def register(mcp: FastMCP) -> None:
                 found = lister(search=name_or_id, first=limit)
                 results.extend(found or [])
             except Exception:
-                pass
+                logger.debug('"lookup_case: search attempt failed"', exc_info=True)
         return json.dumps(results[:limit], default=str)
 
     @mcp.tool()
@@ -172,7 +175,7 @@ def register(mcp: FastMCP) -> None:
                 found = lister(search=search, first=limit)
                 results.extend(found or [])
             except Exception:
-                pass
+                logger.debug('"list_cases: lister call failed"', exc_info=True)
         return json.dumps(results[:limit], default=str)
 
     @mcp.tool()
@@ -188,6 +191,7 @@ def register(mcp: FastMCP) -> None:
         :return: JSON with ``{"success": true}`` or ``{"error": …}``.
         """
         client = get_client()
+        last_error: str = ""
         for adder_type in (client.case_incident, client.case_rfi, client.case_rft):
             try:
                 adder_type.add_stix_object_or_stix_relationship(
@@ -195,10 +199,16 @@ def register(mcp: FastMCP) -> None:
                     stixObjectOrStixRelationshipId=object_id,
                 )
                 return json.dumps({"success": True})
-            except Exception:
-                pass
+            except Exception as exc:
+                last_error = str(exc)
+                logger.debug('"add_object_to_case: attempt failed"', exc_info=True)
         return json.dumps(
-            {"error": "Could not add object — case ID may be invalid or inaccessible"}
+            {
+                "error": (
+                    f"Could not add object to case — case ID may be invalid or inaccessible"
+                    f" (last error: {last_error})"
+                )
+            }
         )
 
     @mcp.tool()

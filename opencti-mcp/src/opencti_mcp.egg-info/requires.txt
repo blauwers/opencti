@@ -1,6 +1,8 @@
 mcp>=1.0
 pycti>=6.0.0
 python-dotenv>=1.0
+uvicorn>=0.20
+starlette>=0.27
 
 [dev]
 black
@@ -9,4 +11,5 @@ flake8
 mypy
 pytest
 pytest-asyncio
+pytest-cov
 pytest-mock

@@ -15,6 +15,9 @@ Usage::
     MCP_TRANSPORT=sse MCP_SSE_HOST=0.0.0.0 MCP_SSE_PORT=8000 \\
         OPENCTI_URL=http://opencti:4000 OPENCTI_TOKEN=<token> \\
         python -m opencti_mcp.server
+
+    # SSE with Bearer token authentication:
+    MCP_TRANSPORT=sse MCP_API_KEY=<secret> ... python -m opencti_mcp.server
 """
 
 from __future__ import annotations
@@ -48,6 +51,51 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
 logger = logging.getLogger("opencti_mcp")
+
+
+def _run_sse(mcp: FastMCP, cfg: Config) -> None:
+    """Start SSE transport, optionally with Bearer token authentication.
+
+    When ``MCP_API_KEY`` is set every incoming SSE request must carry an
+    ``Authorization: Bearer <key>`` header; requests without it are rejected
+    with HTTP 401.
+
+    Falls back to the built-in ``mcp.run`` runner if ``mcp.sse_app()`` is not
+    available (older mcp library versions), in which case auth is disabled.
+    """
+    try:
+        app = mcp.sse_app()
+    except AttributeError:
+        logger.warning('"mcp.sse_app() not available — running without authentication middleware"')
+        if cfg.api_key:
+            logger.warning('"MCP_API_KEY is set but cannot be enforced without sse_app() support"')
+        mcp.run(transport="sse")
+        return
+
+    if cfg.api_key:
+        import uvicorn
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.responses import Response
+
+        _key = cfg.api_key
+
+        class _BearerAuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):  # type: ignore[override]
+                auth = request.headers.get("Authorization", "")
+                if not (auth.startswith("Bearer ") and auth[7:] == _key):
+                    return Response(
+                        content="Unauthorized",
+                        status_code=401,
+                        media_type="text/plain",
+                    )
+                return await call_next(request)
+
+        app.add_middleware(_BearerAuthMiddleware)
+        logger.info('"SSE transport: Bearer token authentication enabled"')
+        uvicorn.run(app, host=cfg.sse_host, port=cfg.sse_port, log_level="warning")
+    else:
+        logger.warning('"SSE transport: MCP_API_KEY is not set — the endpoint is unauthenticated"')
+        mcp.run(transport="sse")
 
 
 def build_server() -> tuple[FastMCP, Config]:
@@ -99,7 +147,7 @@ def main() -> None:
 
     if cfg.transport == "sse":
         logger.info(f'"Starting SSE transport on {cfg.sse_host}:{cfg.sse_port}"')
-        mcp.run(transport="sse")
+        _run_sse(mcp, cfg)
     else:
         logger.info('"Starting stdio transport"')
         mcp.run(transport="stdio")

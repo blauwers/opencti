@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:

@@ -12,7 +12,7 @@
 #     -p 8000:8000 \
 #     opencti-mcp
 
-FROM python:3.12-slim
+FROM python:3.12.7-slim
 
 WORKDIR /app
 
@@ -33,7 +33,17 @@ ENV MCP_TRANSPORT=sse \
 
 EXPOSE 8000
 
+# Health check: open an HTTP connection to the SSE endpoint and verify that
+# the server responds with 200.  http.client.getresponse() reads only the
+# status line and headers — it does not block on the infinite event stream.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/sse')" || exit 1
+    CMD python -c "\
+import http.client, sys; \
+try: \
+    c = http.client.HTTPConnection('localhost', 8000, timeout=5); \
+    c.request('GET', '/sse'); \
+    sys.exit(0 if c.getresponse().status == 200 else 1); \
+except Exception: \
+    sys.exit(1)"
 
 CMD ["opencti-mcp"]

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
@@ -68,6 +71,10 @@ def register(mcp: FastMCP) -> None:
     ) -> str:
         """List relationships attached to an entity.
 
+        The *limit* applies independently per direction, so up to
+        ``2 × limit`` relationships may be returned when *direction* is
+        ``"both"``.
+
         :param entity_id: OpenCTI internal ID or STIX standard ID.
         :param relationship_type: optional filter on relationship type (e.g.
             ``"uses"``, ``"indicates"``).
@@ -93,7 +100,7 @@ def register(mcp: FastMCP) -> None:
                     first=limit,
                 )
                 results.extend(to_rels or [])
-            return json.dumps(results[:limit], default=str)
+            return json.dumps(results, default=str)
         except Exception as exc:
             return json.dumps({"error": str(exc)})
 

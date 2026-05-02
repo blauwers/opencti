@@ -20,10 +20,10 @@ class Config:
     opencti_token: str
     ssl_verify: bool | str
     log_level: str
-    max_results: int
     transport: str  # "stdio" | "sse"
     sse_host: str
     sse_port: int
+    api_key: str  # empty string means no SSE authentication required
 
 
 def load_config() -> Config:
@@ -36,10 +36,10 @@ def load_config() -> Config:
     Optional environment variables:
         OPENCTI_SSL_VERIFY  — ``"true"``/``"false"`` or path to CA bundle (default: ``"true"``)
         LOG_LEVEL           — Python log level name (default: ``"info"``)
-        MAX_RESULTS         — maximum entities returned per list call (default: ``100``)
         MCP_TRANSPORT       — ``"stdio"`` (default) or ``"sse"``
         MCP_SSE_HOST        — bind host for SSE transport (default: ``"127.0.0.1"``)
         MCP_SSE_PORT        — bind port for SSE transport (default: ``8000``)
+        MCP_API_KEY         — bearer token required on every SSE request (default: unset/disabled)
 
     :raises ValueError: if a required variable is missing.
     :return: populated :class:`Config` instance.
@@ -52,13 +52,16 @@ def load_config() -> Config:
     if not opencti_token:
         raise ValueError("OPENCTI_TOKEN environment variable is required")
 
-    ssl_raw = os.getenv("OPENCTI_SSL_VERIFY", "true").strip().lower()
-    if ssl_raw in ("false", "0", "no"):
+    # Preserve the original value for the CA-bundle path case; only lowercase
+    # for the boolean comparison so that file-system paths are not corrupted.
+    ssl_raw = os.getenv("OPENCTI_SSL_VERIFY", "true").strip()
+    ssl_lower = ssl_raw.lower()
+    if ssl_lower in ("false", "0", "no"):
         ssl_verify: bool | str = False
-    elif ssl_raw in ("true", "1", "yes"):
+    elif ssl_lower in ("true", "1", "yes"):
         ssl_verify = True
     else:
-        # Treat as a path to a CA bundle file
+        # Treat as a path to a CA bundle file — preserve original case
         ssl_verify = ssl_raw
 
     return Config(
@@ -66,8 +69,8 @@ def load_config() -> Config:
         opencti_token=opencti_token,
         ssl_verify=ssl_verify,
         log_level=os.getenv("LOG_LEVEL", "info"),
-        max_results=int(os.getenv("MAX_RESULTS", "100")),
         transport=os.getenv("MCP_TRANSPORT", "stdio").lower(),
         sse_host=os.getenv("MCP_SSE_HOST", "127.0.0.1"),
         sse_port=int(os.getenv("MCP_SSE_PORT", "8000")),
+        api_key=os.getenv("MCP_API_KEY", ""),
     )

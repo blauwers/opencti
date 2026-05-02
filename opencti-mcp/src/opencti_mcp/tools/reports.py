@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
@@ -32,7 +35,7 @@ def register(mcp: FastMCP) -> None:
             if result is not None:
                 return json.dumps(result, default=str)
         except Exception:
-            pass
+            logger.debug('"lookup_report: ID read failed, falling back to search"', exc_info=True)
         # Fall back to free-text search
         try:
             results = client.report.list(search=name_or_id, first=limit)
@@ -98,7 +101,8 @@ def register(mcp: FastMCP) -> None:
         :param author_id: OpenCTI ID of the authoring identity.
         :param object_ids: list of entity IDs to include in the report's
             object list from the start.
-        :return: JSON-encoded created report object, or ``{"error": …}``.
+        :return: JSON-encoded created report object (with a ``failed_objects``
+            key listing any IDs that could not be linked), or ``{"error": …}``.
         """
         client = get_client()
         try:
@@ -111,6 +115,7 @@ def register(mcp: FastMCP) -> None:
                 objectMarking=markings,
                 createdBy=author_id,
             )
+            failed_objects: list[str] = []
             if result and object_ids:
                 for oid in object_ids:
                     try:
@@ -119,7 +124,13 @@ def register(mcp: FastMCP) -> None:
                             stixObjectOrStixRelationshipId=oid,
                         )
                     except Exception:
-                        pass
+                        logger.debug(
+                            f'"create_report: failed to add object {oid!r}"', exc_info=True
+                        )
+                        failed_objects.append(oid)
+            if failed_objects:
+                result = dict(result or {})
+                result["failed_objects"] = failed_objects
             return json.dumps(result, default=str)
         except Exception as exc:
             return json.dumps({"error": str(exc)})

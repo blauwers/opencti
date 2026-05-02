@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 # GraphQL query used to retrieve recent works associated with a specific entity.
 _ENRICHMENT_WORKS_QUERY = """
@@ -79,32 +82,28 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def enrich_entity(entity_id: str, connector_id: str | None = None) -> str:
-        """Trigger enrichment connectors for any STIX entity.
+        """Trigger enrichment connectors for a STIX cyber observable.
+
+        This tool operates on **STIX Cyber Observables** (SCOs) only — e.g.
+        IP addresses, domain names, file hashes, URLs.  To enrich other
+        entity types (Malware, Threat Actor, etc.) use the enrichment
+        connectors' native interfaces.
 
         When *connector_id* is omitted all compatible enrichment connectors
-        for the entity's type are triggered automatically.
+        for the observable's type are triggered automatically.
 
         :param entity_id: OpenCTI internal ID or STIX standard ID of the
-            entity to enrich.
+            STIX Cyber Observable to enrich.
         :param connector_id: optional ID of a specific connector.  Use
             ``list_enrichment_connectors`` to discover valid IDs.
-        :return: JSON object with ``work_id`` (single) or ``work_ids`` (list
-            when triggering multiple connectors automatically), or
-            ``{"error": …}``.
+        :return: JSON object with ``work_id`` returned by the enrichment
+            request, or ``{"error": …}``.
         """
         client = get_client()
         try:
-            if connector_id:
-                work_id = client.stix_cyber_observable.ask_for_enrichment(
-                    id=entity_id,
-                    connector_id=connector_id,
-                )
-                return json.dumps({"work_id": work_id}, default=str)
-
-            # Trigger all compatible connectors via the platform's askEnrich mechanism
             work_id = client.stix_cyber_observable.ask_for_enrichment(
                 id=entity_id,
-                connector_id=None,
+                connector_id=connector_id,
             )
             return json.dumps({"work_id": work_id}, default=str)
         except Exception as exc:

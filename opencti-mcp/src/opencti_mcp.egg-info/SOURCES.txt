@@ -1,7 +1,9 @@
+README.md
 pyproject.toml
 src/opencti_mcp/__init__.py
 src/opencti_mcp/client.py
 src/opencti_mcp/config.py
+src/opencti_mcp/py.typed
 src/opencti_mcp/server.py
 src/opencti_mcp.egg-info/PKG-INFO
 src/opencti_mcp.egg-info/SOURCES.txt
@@ -21,5 +23,12 @@ src/opencti_mcp/tools/relationships.py
 src/opencti_mcp/tools/reports.py
 src/opencti_mcp/tools/search.py
 tests/test_cases.py
+tests/test_config.py
 tests/test_enrichment.py
 tests/test_indicators.py
+tests/test_investigations.py
+tests/test_observables.py
+tests/test_relationships.py
+tests/test_reports.py
+tests/test_search.py
+tests/test_stix_export.py

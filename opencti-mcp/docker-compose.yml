@@ -73,7 +73,7 @@ services:
   # OpenCTI platform
   # --------------------------------------------------------------------------
   opencti:
-    image: filigran/platform:${OPENCTI_VERSION:-latest}
+    image: filigran/platform:${OPENCTI_VERSION:-6.6}
     container_name: opencti-mcp-platform
     restart: unless-stopped
     environment:
@@ -113,7 +113,7 @@ services:
   # OpenCTI worker
   # --------------------------------------------------------------------------
   worker:
-    image: filigran/worker:${OPENCTI_VERSION:-latest}
+    image: filigran/worker:${OPENCTI_VERSION:-6.6}
     container_name: opencti-mcp-worker
     restart: unless-stopped
     environment:

@@ -24,6 +24,8 @@ dependencies = [
     "mcp>=1.0",
     "pycti>=6.0.0",
     "python-dotenv>=1.0",
+    "uvicorn>=0.20",
+    "starlette>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +36,7 @@ dev = [
     "mypy",
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "pytest-mock",
 ]
 
@@ -61,3 +64,11 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["opencti_mcp"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

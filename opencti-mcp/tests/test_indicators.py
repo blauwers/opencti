@@ -47,7 +47,9 @@ def _patch_client(mock: MagicMock) -> AbstractContextManager[None]:
 # ---------------------------------------------------------------------------
 
 
-class TestLookupIndicator:
+class TestListIndicators:
+    """list_indicators replaces the former lookup_indicator and list_indicators."""
+
     def test_returns_json_list(self) -> None:
         mock = _mock_client()
         with _patch_client(mock):
@@ -55,12 +57,23 @@ class TestLookupIndicator:
 
             mcp = FastMCP("test")
             indicators.register(mcp)
-            # Access registered tools via mcp._tool_manager
-            tool_fn = mcp._tool_manager._tools["lookup_indicator"].fn
-            result = tool_fn(value="1.2.3.4")
+            tool_fn = mcp._tool_manager._tools["list_indicators"].fn
+            result = tool_fn(search="1.2.3.4")
             data = json.loads(result)
             assert isinstance(data, list)
             assert data[0]["id"] == "indicator--abc123"
+
+    def test_no_search_returns_list(self) -> None:
+        mock = _mock_client()
+        with _patch_client(mock):
+            from mcp.server.fastmcp import FastMCP
+
+            mcp = FastMCP("test")
+            indicators.register(mcp)
+            tool_fn = mcp._tool_manager._tools["list_indicators"].fn
+            result = tool_fn()
+            data = json.loads(result)
+            assert isinstance(data, list)
 
     def test_clamps_limit(self) -> None:
         mock = _mock_client()
@@ -69,8 +82,8 @@ class TestLookupIndicator:
 
             mcp = FastMCP("test")
             indicators.register(mcp)
-            tool_fn = mcp._tool_manager._tools["lookup_indicator"].fn
-            tool_fn(value="test", limit=9999)
+            tool_fn = mcp._tool_manager._tools["list_indicators"].fn
+            tool_fn(search="test", limit=9999)
             mock.indicator.list.assert_called_once()
             _, kwargs = mock.indicator.list.call_args
             assert kwargs["first"] == 200
@@ -83,10 +96,22 @@ class TestLookupIndicator:
 
             mcp = FastMCP("test")
             indicators.register(mcp)
-            tool_fn = mcp._tool_manager._tools["lookup_indicator"].fn
-            result = tool_fn(value="bad")
+            tool_fn = mcp._tool_manager._tools["list_indicators"].fn
+            result = tool_fn(search="bad")
             data = json.loads(result)
             assert "error" in data
+
+    def test_pattern_type_filter_applied(self) -> None:
+        mock = _mock_client()
+        with _patch_client(mock):
+            from mcp.server.fastmcp import FastMCP
+
+            mcp = FastMCP("test")
+            indicators.register(mcp)
+            tool_fn = mcp._tool_manager._tools["list_indicators"].fn
+            tool_fn(pattern_type="yara")
+            _, kwargs = mock.indicator.list.call_args
+            assert kwargs["filters"] is not None
 
 
 class TestGetIndicator:
@@ -150,6 +175,20 @@ class TestUpdateIndicator:
             data = json.loads(result)
             assert "error" not in data
             mock.indicator.update_field.assert_called_once()
+
+    def test_revoked_passed_as_bool(self) -> None:
+        mock = _mock_client()
+        with _patch_client(mock):
+            from mcp.server.fastmcp import FastMCP
+
+            mcp = FastMCP("test")
+            indicators.register(mcp)
+            tool_fn = mcp._tool_manager._tools["update_indicator"].fn
+            tool_fn(indicator_id="indicator--abc123", revoked=True)
+            _, kwargs = mock.indicator.update_field.call_args
+            revoked_input = next(i for i in kwargs["input"] if i["key"] == "revoked")
+            # Value must be the Python bool True, not the string "true"
+            assert revoked_input["value"] == [True]
 
     def test_no_fields_returns_error(self) -> None:
         mock = _mock_client()

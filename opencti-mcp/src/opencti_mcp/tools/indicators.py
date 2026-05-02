@@ -4,35 +4,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
 
+logger = logging.getLogger(__name__)
+
 
 def register(mcp: FastMCP) -> None:
     """Register all indicator tools onto *mcp*."""
-
-    @mcp.tool()
-    def lookup_indicator(value: str, limit: int = 20) -> str:
-        """Search for indicators by pattern value or name.
-
-        Returns matching indicators with their id, pattern, pattern_type,
-        score, valid_from, valid_until, and decay details.
-
-        :param value: the search term — can be an IP, domain, hash, URL,
-            indicator name, or any partial STIX pattern fragment.
-        :param limit: maximum number of results to return (1–200, default 20).
-        :return: JSON-encoded list of indicator objects.
-        """
-        client = get_client()
-        limit = max(1, min(limit, 200))
-        try:
-            results = client.indicator.list(search=value, first=limit)
-            return json.dumps(results or [], default=str)
-        except Exception as exc:
-            return json.dumps({"error": str(exc)})
 
     @mcp.tool()
     def list_indicators(
@@ -40,9 +23,13 @@ def register(mcp: FastMCP) -> None:
         pattern_type: str | None = None,
         limit: int = 50,
     ) -> str:
-        """List indicators with optional filtering.
+        """Search and list indicators with optional filtering.
 
-        :param search: optional free-text search keyword.
+        Covers all use cases from a simple value look-up to a filtered list.
+
+        :param search: optional free-text search keyword — can be an IP,
+            domain, hash, URL, indicator name, or any partial STIX pattern
+            fragment.
         :param pattern_type: optional filter on pattern type (e.g. ``"stix"``,
             ``"sigma"``, ``"yara"``).
         :param limit: maximum number of results to return (1–200, default 50).
@@ -162,7 +149,8 @@ def register(mcp: FastMCP) -> None:
         if valid_until is not None:
             inputs.append({"key": "valid_until", "value": [valid_until]})
         if revoked is not None:
-            inputs.append({"key": "revoked", "value": [str(revoked).lower()]})
+            # Pass the Python bool directly — do NOT convert to a string.
+            inputs.append({"key": "revoked", "value": [revoked]})
         if description is not None:
             inputs.append({"key": "description", "value": [description]})
         if not inputs:

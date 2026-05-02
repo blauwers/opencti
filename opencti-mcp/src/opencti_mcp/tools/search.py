@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 # Minimal attribute set for summary search results; keeps responses concise.
 _SEARCH_CUSTOM_ATTRIBUTES = (
@@ -34,6 +37,8 @@ def register(mcp: FastMCP) -> None:
             (e.g. ``["Indicator", "Malware", "Report"]``).  When omitted all
             types are searched.
         :param limit: maximum number of results to return (1–200, default 20).
+            When *types* is provided the budget is distributed evenly across
+            each type so the combined result does not exceed *limit*.
         :return: JSON-encoded list of matching entity summaries.
         """
         client = get_client()
@@ -41,17 +46,22 @@ def register(mcp: FastMCP) -> None:
         results: list[dict[str, Any]] = []
 
         if types:
+            # Distribute the result budget evenly so total ≤ limit.
+            per_type = max(1, limit // len(types))
             for entity_type in types:
                 try:
                     raw = client.stix_core_object.list(
                         types=[entity_type],
                         search=query,
-                        first=limit,
+                        first=per_type,
                         customAttributes=_SEARCH_CUSTOM_ATTRIBUTES,
                     )
                     results.extend(raw or [])
                 except Exception:
-                    pass
+                    logger.debug(
+                        f'"global_search: failed for type {entity_type!r}"',
+                        exc_info=True,
+                    )
         else:
             try:
                 raw = client.stix_core_object.list(
@@ -61,7 +71,7 @@ def register(mcp: FastMCP) -> None:
                 )
                 results.extend(raw or [])
             except Exception:
-                pass
+                logger.debug('"global_search: list call failed"', exc_info=True)
 
         return json.dumps(results[:limit], default=str)
 

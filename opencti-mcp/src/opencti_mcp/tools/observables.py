@@ -4,29 +4,36 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
 
+logger = logging.getLogger(__name__)
+
 
 def register(mcp: FastMCP) -> None:
     """Register all observable tools onto *mcp*."""
 
     @mcp.tool()
-    def lookup_observable(value: str, observable_type: str | None = None, limit: int = 20) -> str:
-        """Search for STIX cyber observables by value.
+    def list_observables(
+        search: str | None = None,
+        observable_type: str | None = None,
+        limit: int = 50,
+    ) -> str:
+        """Search and list STIX cyber observables with optional filtering.
 
         Covers all observable types: IP addresses, domain names, URLs, file
         hashes, email addresses, hostnames, cryptocurrency wallets, and more.
 
-        :param value: the observable value to search for (e.g. ``"1.2.3.4"``,
-            ``"evil.example.com"``, a SHA-256 hash, etc.).
+        :param search: optional free-text search keyword — can be an IP,
+            domain, hash, URL, or any observable value fragment.
         :param observable_type: optional STIX type filter (e.g.
             ``"IPv4-Addr"``, ``"Domain-Name"``, ``"StixFile"``,
             ``"Email-Addr"``).  When omitted all types are searched.
-        :param limit: maximum number of results to return (1–200, default 20).
+        :param limit: maximum number of results to return (1–200, default 50).
         :return: JSON-encoded list of observable objects.
         """
         client = get_client()
@@ -34,7 +41,7 @@ def register(mcp: FastMCP) -> None:
         try:
             results = client.stix_cyber_observable.list(
                 types=[observable_type] if observable_type else None,
-                search=value,
+                search=search,
                 first=limit,
             )
             return json.dumps(results or [], default=str)
@@ -151,11 +158,17 @@ def register(mcp: FastMCP) -> None:
             return json.dumps({"error": str(exc)})
 
     @mcp.tool()
-    def get_observable_relationships(observable_id: str, limit: int = 50) -> str:
+    def get_observable_relationships(
+        observable_id: str,
+        limit: int = 50,
+    ) -> str:
         """List all relationships attached to a STIX cyber observable.
 
+        The *limit* applies independently to each direction (from / to), so
+        the response may contain up to ``2 × limit`` relationships in total.
+
         :param observable_id: OpenCTI internal ID or STIX standard ID.
-        :param limit: maximum number of relationships to return (default 50).
+        :param limit: maximum number of relationships per direction (default 50).
         :return: JSON-encoded list of relationship objects.
         """
         client = get_client()
@@ -165,32 +178,6 @@ def register(mcp: FastMCP) -> None:
             combined: list[Any] = []
             combined.extend(from_rels or [])
             combined.extend(to_rels or [])
-            return json.dumps(combined[:limit], default=str)
-        except Exception as exc:
-            return json.dumps({"error": str(exc)})
-
-    @mcp.tool()
-    def list_observables(
-        search: str | None = None,
-        observable_type: str | None = None,
-        limit: int = 50,
-    ) -> str:
-        """List STIX cyber observables with optional filtering.
-
-        :param search: optional free-text search keyword.
-        :param observable_type: optional STIX type filter (e.g.
-            ``"IPv4-Addr"``, ``"Domain-Name"``).
-        :param limit: maximum number of results to return (1–200, default 50).
-        :return: JSON-encoded list of observable objects.
-        """
-        client = get_client()
-        limit = max(1, min(limit, 200))
-        try:
-            results = client.stix_cyber_observable.list(
-                types=[observable_type] if observable_type else None,
-                search=search,
-                first=limit,
-            )
-            return json.dumps(results or [], default=str)
+            return json.dumps(combined, default=str)
         except Exception as exc:
             return json.dumps({"error": str(exc)})

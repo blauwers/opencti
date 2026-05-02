@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
@@ -21,8 +24,11 @@ def register(mcp: FastMCP) -> None:
         :return: JSON-encoded indicator object.
         """
         client = get_client()
-        result = client.indicator.read(id=indicator_id)
-        return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
+        try:
+            result = client.indicator.read(id=indicator_id)
+            return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
 
     @mcp.resource("opencti://observable/{observable_id}")
     def observable_resource(observable_id: str) -> str:
@@ -32,8 +38,11 @@ def register(mcp: FastMCP) -> None:
         :return: JSON-encoded observable object.
         """
         client = get_client()
-        result = client.stix_cyber_observable.read(id=observable_id)
-        return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
+        try:
+            result = client.stix_cyber_observable.read(id=observable_id)
+            return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
 
     @mcp.resource("opencti://report/{report_id}")
     def report_resource(report_id: str) -> str:
@@ -43,8 +52,11 @@ def register(mcp: FastMCP) -> None:
         :return: JSON-encoded report object.
         """
         client = get_client()
-        result = client.report.read(id=report_id)
-        return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
+        try:
+            result = client.report.read(id=report_id)
+            return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
 
     @mcp.resource("opencti://case/{case_id}")
     def case_resource(case_id: str) -> str:
@@ -64,7 +76,7 @@ def register(mcp: FastMCP) -> None:
                 if result:
                     return json.dumps(result, default=str)
             except Exception:
-                pass
+                logger.debug('"case_resource: reader attempt failed"', exc_info=True)
         return json.dumps({"error": "Case not found"})
 
     @mcp.resource("opencti://investigation/{investigation_id}")
