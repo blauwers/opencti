@@ -1,0 +1,2 @@
+[console_scripts]
+opencti-mcp = opencti_mcp.server:main

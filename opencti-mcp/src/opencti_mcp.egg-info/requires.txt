@@ -1,0 +1,12 @@
+mcp>=1.0
+pycti>=6.0.0
+python-dotenv>=1.0
+
+[dev]
+black
+isort
+flake8
+mypy
+pytest
+pytest-asyncio
+pytest-mock

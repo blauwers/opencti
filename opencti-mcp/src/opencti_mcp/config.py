@@ -1,0 +1,73 @@
+# coding: utf-8
+"""Configuration loader for the OpenCTI MCP server.
+
+Reads connection settings from environment variables or a .env file.
+"""
+
+import os
+from dataclasses import dataclass
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass
+class Config:
+    """Runtime configuration derived from environment variables."""
+
+    opencti_url: str
+    opencti_token: str
+    ssl_verify: bool | str
+    log_level: str
+    max_results: int
+    transport: str  # "stdio" | "sse"
+    sse_host: str
+    sse_port: int
+
+
+def load_config() -> Config:
+    """Load and validate configuration from the environment.
+
+    Required environment variables:
+        OPENCTI_URL   — base URL of the OpenCTI instance (e.g. ``http://localhost:4000``)
+        OPENCTI_TOKEN — API bearer token
+
+    Optional environment variables:
+        OPENCTI_SSL_VERIFY  — ``"true"``/``"false"`` or path to CA bundle (default: ``"true"``)
+        LOG_LEVEL           — Python log level name (default: ``"info"``)
+        MAX_RESULTS         — maximum entities returned per list call (default: ``100``)
+        MCP_TRANSPORT       — ``"stdio"`` (default) or ``"sse"``
+        MCP_SSE_HOST        — bind host for SSE transport (default: ``"127.0.0.1"``)
+        MCP_SSE_PORT        — bind port for SSE transport (default: ``8000``)
+
+    :raises ValueError: if a required variable is missing.
+    :return: populated :class:`Config` instance.
+    """
+    opencti_url = os.getenv("OPENCTI_URL", "").strip()
+    if not opencti_url:
+        raise ValueError("OPENCTI_URL environment variable is required")
+
+    opencti_token = os.getenv("OPENCTI_TOKEN", "").strip()
+    if not opencti_token:
+        raise ValueError("OPENCTI_TOKEN environment variable is required")
+
+    ssl_raw = os.getenv("OPENCTI_SSL_VERIFY", "true").strip().lower()
+    if ssl_raw in ("false", "0", "no"):
+        ssl_verify: bool | str = False
+    elif ssl_raw in ("true", "1", "yes"):
+        ssl_verify = True
+    else:
+        # Treat as a path to a CA bundle file
+        ssl_verify = ssl_raw
+
+    return Config(
+        opencti_url=opencti_url,
+        opencti_token=opencti_token,
+        ssl_verify=ssl_verify,
+        log_level=os.getenv("LOG_LEVEL", "info"),
+        max_results=int(os.getenv("MAX_RESULTS", "100")),
+        transport=os.getenv("MCP_TRANSPORT", "stdio").lower(),
+        sse_host=os.getenv("MCP_SSE_HOST", "127.0.0.1"),
+        sse_port=int(os.getenv("MCP_SSE_PORT", "8000")),
+    )
