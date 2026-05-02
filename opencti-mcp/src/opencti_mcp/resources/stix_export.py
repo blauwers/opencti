@@ -76,7 +76,7 @@ def register(mcp: FastMCP) -> None:
                 if result:
                     return json.dumps(result, default=str)
             except Exception:
-                logger.debug('"case_resource: reader attempt failed"', exc_info=True)
+                logger.debug("case_resource: reader attempt failed", exc_info=True)
         return json.dumps({"error": "Case not found"})
 
     @mcp.resource("opencti://investigation/{investigation_id}")

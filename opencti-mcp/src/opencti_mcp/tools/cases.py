@@ -130,7 +130,7 @@ def register(mcp: FastMCP) -> None:
                 if result is not None:
                     return json.dumps(result, default=str)
             except Exception:
-                logger.debug('"lookup_case: ID read attempt failed"', exc_info=True)
+                logger.debug("lookup_case: ID read attempt failed", exc_info=True)
 
         # Fall back to search across all types
         results = []
@@ -143,7 +143,7 @@ def register(mcp: FastMCP) -> None:
                 found = lister(search=name_or_id, first=limit)
                 results.extend(found or [])
             except Exception:
-                logger.debug('"lookup_case: search attempt failed"', exc_info=True)
+                logger.debug("lookup_case: search attempt failed", exc_info=True)
         return json.dumps(results[:limit], default=str)
 
     @mcp.tool()
@@ -175,7 +175,7 @@ def register(mcp: FastMCP) -> None:
                 found = lister(search=search, first=limit)
                 results.extend(found or [])
             except Exception:
-                logger.debug('"list_cases: lister call failed"', exc_info=True)
+                logger.debug("list_cases: lister call failed", exc_info=True)
         return json.dumps(results[:limit], default=str)
 
     @mcp.tool()
@@ -201,7 +201,7 @@ def register(mcp: FastMCP) -> None:
                 return json.dumps({"success": True})
             except Exception as exc:
                 last_error = str(exc)
-                logger.debug('"add_object_to_case: attempt failed"', exc_info=True)
+                logger.debug("add_object_to_case: attempt failed", exc_info=True)
         return json.dumps(
             {
                 "error": (

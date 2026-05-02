@@ -66,9 +66,9 @@ def _run_sse(mcp: FastMCP, cfg: Config) -> None:
     try:
         app = mcp.sse_app()
     except AttributeError:
-        logger.warning('"mcp.sse_app() not available — running without authentication middleware"')
+        logger.warning("mcp.sse_app() not available — running without authentication middleware")
         if cfg.api_key:
-            logger.warning('"MCP_API_KEY is set but cannot be enforced without sse_app() support"')
+            logger.warning("MCP_API_KEY is set but cannot be enforced without sse_app() support")
         mcp.run(transport="sse")
         return
 
@@ -91,10 +91,10 @@ def _run_sse(mcp: FastMCP, cfg: Config) -> None:
                 return await call_next(request)
 
         app.add_middleware(_BearerAuthMiddleware)
-        logger.info('"SSE transport: Bearer token authentication enabled"')
+        logger.info("SSE transport: Bearer token authentication enabled")
         uvicorn.run(app, host=cfg.sse_host, port=cfg.sse_port, log_level="warning")
     else:
-        logger.warning('"SSE transport: MCP_API_KEY is not set — the endpoint is unauthenticated"')
+        logger.warning("SSE transport: MCP_API_KEY is not set — the endpoint is unauthenticated")
         mcp.run(transport="sse")
 
 
@@ -110,7 +110,7 @@ def build_server() -> tuple[FastMCP, Config]:
     """
     cfg = load_config()
     logger.setLevel(cfg.log_level.upper())
-    logger.info('"Initialising OpenCTI MCP server"')
+    logger.info("Initialising OpenCTI MCP server")
 
     init_client(cfg)
 
@@ -137,7 +137,7 @@ def build_server() -> tuple[FastMCP, Config]:
     # Register resources (read-only context)
     stix_export.register(mcp)
 
-    logger.info('"OpenCTI MCP server ready"')
+    logger.info("OpenCTI MCP server ready")
     return mcp, cfg
 
 
@@ -146,10 +146,10 @@ def main() -> None:
     mcp, cfg = build_server()
 
     if cfg.transport == "sse":
-        logger.info(f'"Starting SSE transport on {cfg.sse_host}:{cfg.sse_port}"')
+        logger.info(f"Starting SSE transport on {cfg.sse_host}:{cfg.sse_port}")
         _run_sse(mcp, cfg)
     else:
-        logger.info('"Starting stdio transport"')
+        logger.info("Starting stdio transport")
         mcp.run(transport="stdio")
 
 

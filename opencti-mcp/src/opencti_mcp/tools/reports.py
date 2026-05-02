@@ -35,7 +35,7 @@ def register(mcp: FastMCP) -> None:
             if result is not None:
                 return json.dumps(result, default=str)
         except Exception:
-            logger.debug('"lookup_report: ID read failed, falling back to search"', exc_info=True)
+            logger.debug("lookup_report: ID read failed, falling back to search", exc_info=True)
         # Fall back to free-text search
         try:
             results = client.report.list(search=name_or_id, first=limit)

@@ -71,7 +71,7 @@ def register(mcp: FastMCP) -> None:
                 )
                 results.extend(raw or [])
             except Exception:
-                logger.debug('"global_search: list call failed"', exc_info=True)
+                logger.debug("global_search: list call failed", exc_info=True)
 
         return json.dumps(results[:limit], default=str)
 
