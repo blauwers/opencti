@@ -10,6 +10,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ def register(mcp: FastMCP) -> None:
                 return json.dumps({"error": "Not found"})
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def find_by_external_reference(source_name: str, external_id: str) -> str:
@@ -119,4 +120,4 @@ def register(mcp: FastMCP) -> None:
             results = client.stix_core_object.list(filters=filters, first=50)
             return json.dumps(results or [], default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

@@ -9,6 +9,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     # -------------------------------------------------------------------------
     # Request for Information (RFI)
@@ -101,7 +102,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     # -------------------------------------------------------------------------
     # Generic case operations
@@ -200,7 +201,7 @@ def register(mcp: FastMCP) -> None:
                 )
                 return json.dumps({"success": True})
             except Exception as exc:
-                last_error = str(exc)
+                last_error = "Failed to link object to case"
                 logger.debug("add_object_to_case: attempt failed", exc_info=True)
         return json.dumps(
             {
@@ -231,7 +232,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     # -------------------------------------------------------------------------
     # Tasks
@@ -266,7 +267,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def complete_task(task_id: str) -> str:
@@ -283,4 +284,4 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

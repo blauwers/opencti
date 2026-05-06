@@ -9,6 +9,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def register(mcp: FastMCP) -> None:
             ]
             return json.dumps(summaries, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def enrich_entity(entity_id: str, connector_id: str | None = None) -> str:
@@ -107,7 +108,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps({"work_id": work_id}, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_enrichment_status(work_id: str) -> str:
@@ -124,7 +125,7 @@ def register(mcp: FastMCP) -> None:
             result = client.work.get_work(work_id=work_id)
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_entity_connectors(entity_id: str) -> str:
@@ -153,4 +154,4 @@ def register(mcp: FastMCP) -> None:
             works = [e["node"] for e in edges]
             return json.dumps(works, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

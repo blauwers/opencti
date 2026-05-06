@@ -9,6 +9,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_investigation(investigation_id: str) -> str:
@@ -59,7 +60,7 @@ def register(mcp: FastMCP) -> None:
                 return json.dumps({"error": "Investigation not found"})
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def list_investigations(search: str | None = None, limit: int = 50) -> str:
@@ -80,7 +81,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(results or [], default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def add_to_investigation(investigation_id: str, object_id: str) -> str:
@@ -99,7 +100,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps({"success": True})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def export_investigation_as_report(investigation_id: str) -> str:
@@ -117,7 +118,7 @@ def register(mcp: FastMCP) -> None:
             bundle = client.workspace.to_stix_bundle(id=investigation_id)
             return bundle if bundle else json.dumps({"error": "Export failed"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def start_investigation_from_container(container_id: str) -> str:
@@ -136,4 +137,4 @@ def register(mcp: FastMCP) -> None:
             result = client.workspace.add_from_container(id=container_id)
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

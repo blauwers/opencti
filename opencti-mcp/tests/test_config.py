@@ -91,3 +91,33 @@ class TestApiKey:
         monkeypatch.delenv("MCP_API_KEY", raising=False)
         cfg = load_config()
         assert cfg.api_key == ""
+
+
+class TestTransportValidation:
+    def test_invalid_transport_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENCTI_URL", "http://localhost:4000")
+        monkeypatch.setenv("OPENCTI_TOKEN", "tok")
+        monkeypatch.setenv("MCP_TRANSPORT", "http")
+        with pytest.raises(ValueError, match="MCP_TRANSPORT"):
+            load_config()
+
+    def test_invalid_port_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENCTI_URL", "http://localhost:4000")
+        monkeypatch.setenv("OPENCTI_TOKEN", "tok")
+        monkeypatch.setenv("MCP_SSE_PORT", "invalid")
+        with pytest.raises(ValueError, match="MCP_SSE_PORT"):
+            load_config()
+
+    def test_port_out_of_range_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENCTI_URL", "http://localhost:4000")
+        monkeypatch.setenv("OPENCTI_TOKEN", "tok")
+        monkeypatch.setenv("MCP_SSE_PORT", "70000")
+        with pytest.raises(ValueError, match="MCP_SSE_PORT"):
+            load_config()
+
+    def test_unauthenticated_sse_flag_defaults_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENCTI_URL", "http://localhost:4000")
+        monkeypatch.setenv("OPENCTI_TOKEN", "tok")
+        monkeypatch.delenv("MCP_ALLOW_UNAUTHENTICATED_SSE", raising=False)
+        cfg = load_config()
+        assert cfg.allow_unauthenticated_sse is False

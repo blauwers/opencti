@@ -9,6 +9,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def lookup_relationships(
@@ -102,7 +103,7 @@ def register(mcp: FastMCP) -> None:
                 results.extend(to_rels or [])
             return json.dumps(results, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def create_sighting(
@@ -147,4 +148,4 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

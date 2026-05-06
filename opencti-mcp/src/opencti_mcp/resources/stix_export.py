@@ -9,6 +9,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def register(mcp: FastMCP) -> None:
             result = client.indicator.read(id=indicator_id)
             return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.resource("opencti://observable/{observable_id}")
     def observable_resource(observable_id: str) -> str:
@@ -42,7 +43,7 @@ def register(mcp: FastMCP) -> None:
             result = client.stix_cyber_observable.read(id=observable_id)
             return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.resource("opencti://report/{report_id}")
     def report_resource(report_id: str) -> str:
@@ -56,7 +57,7 @@ def register(mcp: FastMCP) -> None:
             result = client.report.read(id=report_id)
             return json.dumps(result, default=str) if result else json.dumps({"error": "Not found"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.resource("opencti://case/{case_id}")
     def case_resource(case_id: str) -> str:
@@ -91,4 +92,4 @@ def register(mcp: FastMCP) -> None:
             bundle = client.workspace.to_stix_bundle(id=investigation_id)
             return bundle if bundle else json.dumps({"error": "Export failed"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

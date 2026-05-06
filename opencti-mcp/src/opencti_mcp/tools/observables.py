@@ -10,6 +10,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(results or [], default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_observable(observable_id: str) -> str:
@@ -62,7 +63,7 @@ def register(mcp: FastMCP) -> None:
                 return json.dumps({"error": "Observable not found"})
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def add_observable(
@@ -110,7 +111,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def enrich_observable(observable_id: str, connector_id: str | None = None) -> str:
@@ -133,7 +134,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps({"work_id": work_id}, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_observable_indicators(observable_id: str, limit: int = 50) -> str:
@@ -155,7 +156,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(results or [], default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_observable_relationships(
@@ -180,4 +181,4 @@ def register(mcp: FastMCP) -> None:
             combined.extend(to_rels or [])
             return json.dumps(combined, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

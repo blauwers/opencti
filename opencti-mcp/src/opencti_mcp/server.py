@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from secrets import compare_digest
 
 from mcp.server.fastmcp import FastMCP
 
@@ -45,11 +46,7 @@ from opencti_mcp.tools import (
 # Logging — write structured output to stderr so it does not pollute the
 # MCP stdio protocol stream.
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    stream=sys.stderr,
-    format='{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","msg":%(message)s}',
-    datefmt="%Y-%m-%dT%H:%M:%SZ",
-)
+logging.basicConfig(stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ")
 logger = logging.getLogger("opencti_mcp")
 
 
@@ -66,9 +63,11 @@ def _run_sse(mcp: FastMCP, cfg: Config) -> None:
     try:
         app = mcp.sse_app()
     except AttributeError:
-        logger.warning("mcp.sse_app() not available — running without authentication middleware")
         if cfg.api_key:
-            logger.warning("MCP_API_KEY is set but cannot be enforced without sse_app() support")
+            raise RuntimeError("MCP_API_KEY is set but cannot be enforced: mcp.sse_app() is unavailable")
+        if not cfg.allow_unauthenticated_sse:
+            raise RuntimeError("Refusing unauthenticated SSE: set MCP_API_KEY or MCP_ALLOW_UNAUTHENTICATED_SSE=true")
+        logger.warning("Running unauthenticated SSE due to legacy mcp library and explicit override")
         mcp.run(transport="sse")
         return
 
@@ -82,7 +81,7 @@ def _run_sse(mcp: FastMCP, cfg: Config) -> None:
         class _BearerAuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):  # type: ignore[override]
                 auth = request.headers.get("Authorization", "")
-                if not (auth.startswith("Bearer ") and auth[7:] == _key):
+                if not (auth.startswith("Bearer ") and compare_digest(auth[7:], _key)):
                     return Response(
                         content="Unauthorized",
                         status_code=401,
@@ -94,7 +93,9 @@ def _run_sse(mcp: FastMCP, cfg: Config) -> None:
         logger.info("SSE transport: Bearer token authentication enabled")
         uvicorn.run(app, host=cfg.sse_host, port=cfg.sse_port, log_level="warning")
     else:
-        logger.warning("SSE transport: MCP_API_KEY is not set — the endpoint is unauthenticated")
+        if not cfg.allow_unauthenticated_sse:
+            raise RuntimeError("Refusing unauthenticated SSE: set MCP_API_KEY or MCP_ALLOW_UNAUTHENTICATED_SSE=true")
+        logger.warning("SSE transport: running unauthenticated because MCP_ALLOW_UNAUTHENTICATED_SSE=true")
         mcp.run(transport="sse")
 
 

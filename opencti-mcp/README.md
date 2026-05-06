@@ -66,6 +66,8 @@ All settings are controlled via environment variables (or a `.env` file in the w
 | `MCP_TRANSPORT` | | `stdio` | `stdio` or `sse` |
 | `MCP_SSE_HOST` | | `127.0.0.1` | Bind host for SSE transport |
 | `MCP_SSE_PORT` | | `8000` | Bind port for SSE transport |
+| `MCP_API_KEY` | | — | Bearer token required for SSE requests (recommended/required in production) |
+| `MCP_ALLOW_UNAUTHENTICATED_SSE` | | `false` | Explicit override to allow SSE without `MCP_API_KEY` |
 
 ---
 
@@ -437,6 +439,8 @@ curl -s http://localhost:8000/messages \
 
 - **Token protection**: the API token is read from an environment variable and is never written to disk or logged.
 - **Least privilege**: create a dedicated OpenCTI API token with only the permissions required (typically `KNOWLEDGE_READ`, `KNOWLEDGE_KNUPDATE`, `EXPLORE`).
+- **SSE authentication default**: unauthenticated SSE is disabled by default. Set `MCP_API_KEY` for authenticated SSE.
+- **Explicit unauthenticated opt-in**: to run SSE without auth (development only), set `MCP_ALLOW_UNAUTHENTICATED_SSE=true`.
 - **Network exposure**: when using `sse` transport, bind to `127.0.0.1` unless you have a reverse proxy with authentication in front.
 - **TLS**: set `OPENCTI_SSL_VERIFY=true` (default) in production.  Provide a CA bundle path when using a self-signed certificate.
 - **Rate limiting**: all list tools cap results at 200 per call to avoid overwhelming the API.  Adjust `MAX_RESULTS` if needed.

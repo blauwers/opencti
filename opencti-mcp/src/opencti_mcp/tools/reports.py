@@ -9,6 +9,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from opencti_mcp.client import get_client
+from opencti_mcp.errors import safe_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def register(mcp: FastMCP) -> None:
             results = client.report.list(search=name_or_id, first=limit)
             return json.dumps(results or [], default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def list_reports(
@@ -75,7 +76,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps(results or [], default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def create_report(
@@ -133,7 +134,7 @@ def register(mcp: FastMCP) -> None:
                 result["failed_objects"] = failed_objects
             return json.dumps(result, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def add_object_to_report(report_id: str, object_id: str) -> str:
@@ -153,7 +154,7 @@ def register(mcp: FastMCP) -> None:
             )
             return json.dumps({"success": True})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def get_report_objects(report_id: str) -> str:
@@ -171,7 +172,7 @@ def register(mcp: FastMCP) -> None:
             objects = report.get("objects", [])
             return json.dumps(objects, default=str)
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)
 
     @mcp.tool()
     def export_report_stix(report_id: str) -> str:
@@ -188,4 +189,4 @@ def register(mcp: FastMCP) -> None:
             stix = client.report.to_stix2(id=report_id)
             return stix if stix else json.dumps({"error": "Export failed"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return safe_error_response(logger, __name__, exc)

@@ -24,6 +24,7 @@ class Config:
     sse_host: str
     sse_port: int
     api_key: str  # empty string means no SSE authentication required
+    allow_unauthenticated_sse: bool
 
 
 def load_config() -> Config:
@@ -64,13 +65,32 @@ def load_config() -> Config:
         # Treat as a path to a CA bundle file — preserve original case
         ssl_verify = ssl_raw
 
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower().strip()
+    if transport not in {"stdio", "sse"}:
+        raise ValueError("MCP_TRANSPORT must be either 'stdio' or 'sse'")
+
+    sse_port_raw = os.getenv("MCP_SSE_PORT", "8000").strip()
+    try:
+        sse_port = int(sse_port_raw)
+    except ValueError as exc:
+        raise ValueError("MCP_SSE_PORT must be an integer") from exc
+    if not (1 <= sse_port <= 65535):
+        raise ValueError("MCP_SSE_PORT must be in range 1..65535")
+
+    allow_unauthenticated_sse = os.getenv("MCP_ALLOW_UNAUTHENTICATED_SSE", "false").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
     return Config(
         opencti_url=opencti_url,
         opencti_token=opencti_token,
         ssl_verify=ssl_verify,
         log_level=os.getenv("LOG_LEVEL", "info"),
-        transport=os.getenv("MCP_TRANSPORT", "stdio").lower(),
+        transport=transport,
         sse_host=os.getenv("MCP_SSE_HOST", "127.0.0.1"),
-        sse_port=int(os.getenv("MCP_SSE_PORT", "8000")),
+        sse_port=sse_port,
         api_key=os.getenv("MCP_API_KEY", ""),
+        allow_unauthenticated_sse=allow_unauthenticated_sse,
     )
