@@ -1255,6 +1255,16 @@ const indexCreatedElement = async (
   user: AuthUser,
   { element, relations }: { element: Record<string, any>; relations: Record<string, any>[] },
 ) => {
+  for (let i = 0; i < (relations ?? []).length; i += 1) {
+    const relation = relations[i];
+    const isCreatedElementSource = relation.fromId === element.internal_id;
+    const isSourceImpacted = isImpactedTypeAndSide(relation.entity_type, relation.fromType, relation.toType, ROLE_FROM);
+    if (isCreatedElementSource && isSourceImpacted && relation.to?.internal_id) {
+      const relationField = buildRefRelationKey(relation.entity_type);
+      const existingRefs = Array.isArray(element[relationField]) ? element[relationField] : [];
+      element[relationField] = R.uniq([...existingRefs, relation.to.internal_id]);
+    }
+  }
   // Continue the creation of the element and the connected relations
   const indexPromise = elIndexElements(context, user, element.entity_type, [element, ...(relations ?? [])]);
   const taskPromise = createContainerSharingTask(context, ACTION_TYPE_SHARE, element, relations);

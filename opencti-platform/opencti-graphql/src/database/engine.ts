@@ -4781,6 +4781,15 @@ export const elIndexElements = async (
     }
     // 02. If relation, generate impacts for from and to sides
     const cache: Record<string, BasicStoreBase | null | undefined> = {};
+    const indexedElementsById = new Map(elements.map((element) => [element.internal_id, element]));
+    const isRelationImpactAlreadyIndexed = (elementId: string, relationshipType: string, refField: string, targetId: string | undefined) => {
+      if (!targetId) {
+        return false;
+      }
+      const indexedElement = indexedElementsById.get(elementId);
+      const relationRefs = indexedElement?.[buildRefRelationKey(relationshipType, refField)];
+      return Array.isArray(relationRefs) ? relationRefs.includes(targetId) : relationRefs === targetId;
+    };
     const impactedEntities = R.pipe(
       R.filter((e: BasicStoreBase) => e.base_type === BASE_TYPE_RELATION),
       R.map((e: StoreRelation) => {
@@ -4792,7 +4801,8 @@ export const elIndexElements = async (
         cache[e.toId] = e.to;
         const refField = isStixRefRelationship(e.entity_type) && isInferredIndex(e._index) ? ID_INFERRED : ID_INTERNAL;
         const relationshipType = e.entity_type;
-        if (isImpactedRole(relationshipType, fromType, toType, fromRole)) {
+        if (isImpactedRole(relationshipType, fromType, toType, fromRole)
+          && !isRelationImpactAlreadyIndexed(e.fromId, relationshipType, refField, e.to?.internal_id)) {
           if (relationshipType === RELATION_IN_PIR) {
             const { pir_score } = e as any;
             impacts.push({ refField, from: e.fromId, relationshipType, to: e.to, type: e.from?.entity_type, side: 'from', pir_score });
@@ -4800,7 +4810,8 @@ export const elIndexElements = async (
             impacts.push({ refField, from: e.fromId, relationshipType, to: e.to, type: e.from?.entity_type, side: 'from' });
           }
         }
-        if (isImpactedRole(relationshipType, fromType, toType, toRole)) {
+        if (isImpactedRole(relationshipType, fromType, toType, toRole)
+          && !isRelationImpactAlreadyIndexed(e.toId, relationshipType, refField, e.from?.internal_id)) {
           impacts.push({ refField, from: e.toId, relationshipType, to: e.from, type: e.to?.entity_type, side: 'to' });
         }
         return impacts;

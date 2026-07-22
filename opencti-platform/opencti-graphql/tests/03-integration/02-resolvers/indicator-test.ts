@@ -3,11 +3,16 @@ import gql from 'graphql-tag';
 import { queryAsAdmin } from '../../utils/testQueryHelper';
 import { ENTITY_DOMAIN_NAME } from '../../../src/schema/stixCyberObservable';
 import { MARKING_TLP_GREEN } from '../../../src/schema/identifier';
-import type { BasicNodeEdge } from '../../../src/types/store';
-import type { BasicStoreEntityIndicator } from '../../../src/modules/indicator/indicator-types';
+import type { BasicNodeEdge, BasicStoreEntity } from '../../../src/types/store';
+import { ENTITY_TYPE_INDICATOR, type BasicStoreEntityIndicator } from '../../../src/modules/indicator/indicator-types';
 import { queryAsAdminWithSuccess } from '../../utils/testQueryHelper';
 import type { DecayHistory } from '../../../src/modules/decayRule/decayRule-domain';
 import { BUILT_IN_DECAY_RULE_DOMAIN_NAME } from '../../../src/modules/decayRule/decayRule-domain';
+import { internalLoadById } from '../../../src/database/middleware-loader';
+import { ADMIN_USER, testContext } from '../../utils/testQuery';
+import { buildRefRelationKey } from '../../../src/schema/general';
+import { RELATION_OBJECT_MARKING } from '../../../src/schema/stixRefRelationship';
+import { ENTITY_TYPE_MARKING_DEFINITION } from '../../../src/schema/stixMetaObject';
 
 const LIST_QUERY = gql`
     query indicators(
@@ -211,6 +216,7 @@ describe('Indicator resolver standard behavior', () => {
             pattern: "[domain-name:value = 'bulk-one.test']",
             pattern_type: 'stix',
             x_opencti_main_observable_type: ENTITY_DOMAIN_NAME,
+            objectMarking: [MARKING_TLP_GREEN],
           },
           {
             name: 'Bulk indicator two',
@@ -218,6 +224,7 @@ describe('Indicator resolver standard behavior', () => {
             pattern: "[domain-name:value = 'bulk-two.test']",
             pattern_type: 'stix',
             x_opencti_main_observable_type: ENTITY_DOMAIN_NAME,
+            objectMarking: [MARKING_TLP_GREEN],
           },
         ],
       },
@@ -237,6 +244,19 @@ describe('Indicator resolver standard behavior', () => {
       'bulk-two.test',
     ]);
     bulkIndicatorInternalIds.push(...bulkIndicators.map((indicator) => indicator.id));
+    const storedBulkIndicator = await internalLoadById<BasicStoreEntityIndicator>(
+      testContext,
+      ADMIN_USER,
+      bulkIndicators[0].id,
+      { type: ENTITY_TYPE_INDICATOR },
+    );
+    const storedMarking = await internalLoadById<BasicStoreEntity>(
+      testContext,
+      ADMIN_USER,
+      MARKING_TLP_GREEN,
+      { type: ENTITY_TYPE_MARKING_DEFINITION },
+    );
+    expect((storedBulkIndicator as any)[buildRefRelationKey(RELATION_OBJECT_MARKING)]).toContain(storedMarking.internal_id);
   });
 
   it('should indicator with same pattern be upsert (not created)', async () => {
