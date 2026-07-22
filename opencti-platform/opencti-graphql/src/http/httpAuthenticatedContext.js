@@ -3,7 +3,7 @@ import { ENTITY_TYPE_SETTINGS } from '../schema/internalObject';
 import { authenticateUserFromRequest, userWithOrigin, batchCreator, batchCreators, batchRolesForUsers, batchUserEffectiveConfidenceLevel, batchUserTokens } from '../domain/user';
 import { isNotEmptyField } from '../database/utils';
 import { logApp } from '../config/conf';
-import { batchLoader } from '../database/middleware';
+import { batchLoader, inputResolveRefsBatchLoader } from '../database/middleware';
 import { batchInternalRels, batchMarkingDefinitions } from '../domain/stixCoreObject';
 import { elBatchIds, elBatchIdsWithRelCount } from '../database/engine';
 import { batchStixDomainObjects } from '../domain/stixDomainObject';
@@ -23,6 +23,7 @@ export const computeLoaders = (executeContext, user) => {
     creatorBatchLoader: batchLoader(batchCreator, executeContext, user),
     idsBatchLoader: batchLoader(elBatchIds, executeContext, user),
     idsBatchLoaderWithCount: batchLoader(elBatchIdsWithRelCount, executeContext, user),
+    inputResolveRefsBatchLoader: inputResolveRefsBatchLoader(executeContext, user),
     markingsBatchLoader: batchLoader(batchMarkingDefinitions, executeContext, user),
     // Specific loaders
     domainsBatchLoader: batchLoader(batchStixDomainObjects, executeContext, user), // Could be change to use idsBatchLoader?

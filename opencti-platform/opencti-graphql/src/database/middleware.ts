@@ -332,6 +332,37 @@ export const batchLoader = (
   };
 };
 
+export const inputResolveRefsBatchLoader = (context: AuthContext, user: AuthUser) => {
+  const loadFn = async (ids: ReadonlyArray<string>): Promise<BasicStoreObject[][]> => {
+    const expectedIds = new Set(ids.filter((id) => isNotEmptyField(id)));
+    if (expectedIds.size === 0) {
+      return ids.map(() => []);
+    }
+    const resolvedElements = await internalFindByIds<BasicStoreObject>(context, user, Array.from(expectedIds)) as BasicStoreObject[];
+    const elementsById = new Map<string, BasicStoreObject[]>();
+    for (let index = 0; index < resolvedElements.length; index += 1) {
+      const resolvedElement = resolvedElements[index];
+      const instanceIds = getInstanceIds(resolvedElement);
+      for (let idIndex = 0; idIndex < instanceIds.length; idIndex += 1) {
+        const instanceId = instanceIds[idIndex];
+        if (expectedIds.has(instanceId)) {
+          const matchingElements = elementsById.get(instanceId);
+          if (matchingElements) {
+            matchingElements.push(resolvedElement);
+          } else {
+            elementsById.set(instanceId, [resolvedElement]);
+          }
+        }
+      }
+    }
+    return ids.map((id) => elementsById.get(id) ?? []);
+  };
+  const dataLoader = new DataLoader<string, BasicStoreObject[]>(loadFn, { maxBatchSize: MAX_BATCH_SIZE, cache: false });
+  return {
+    load: (id: string) => dataLoader.load(id),
+  };
+};
+
 const checkIfInferenceOperationIsValid = (user: AuthUser, element: BasicStoreBase) => {
   const isRuleManaged = isRuleUser(user);
   const ifElementInferred = isInferredIndex(element._index);
@@ -1066,7 +1097,21 @@ export const inputResolveRefs = async (
     // TODO Improve type restriction from targeted ref inferred types
     // This information must be added in the model
     const idsToFetch = Array.from(fetchingIdsMap.keys());
-    const simpleResolutionsPromise = internalFindByIds(context, user, idsToFetch);
+    const resolveSimpleRefs = async () => {
+      const batchLoader = context.batch?.inputResolveRefsBatchLoader;
+      if (!batchLoader) {
+        return internalFindByIds(context, user, idsToFetch);
+      }
+      const resolutionGroups = await BluePromise.all(
+        idsToFetch.map((id) => batchLoader.load(id)),
+      );
+      const resolvedElements: BasicStoreObject[] = [];
+      for (let index = 0; index < resolutionGroups.length; index += 1) {
+        pushAll(resolvedElements, resolutionGroups[index]);
+      }
+      return R.uniqBy((element) => element.internal_id, resolvedElements);
+    };
+    const simpleResolutionsPromise = resolveSimpleRefs();
     let embeddedFromPromise;
     if (embeddedFromResolution) {
       fetchingIdsMap.set(embeddedFromResolution, [{ id: embeddedFromResolution, destKey: 'from', multiple: false }]);
