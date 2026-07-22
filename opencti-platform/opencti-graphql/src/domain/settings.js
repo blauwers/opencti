@@ -27,6 +27,7 @@ import { getXtmOneRegistrationVersion } from '../modules/xtm/one/xtm-one';
 
 export const API_FEATURE_BULK_REF_RELATION_VALIDATION = 'BULK_REF_RELATION_VALIDATION';
 export const API_FEATURE_BULK_REF_RELATION_DELETE = 'BULK_REF_RELATION_DELETE';
+export const API_FEATURE_BULK_INDICATOR_ADD = 'BULK_INDICATOR_ADD';
 
 export const getMemoryStatistics = () => {
   return { ...process.memoryUsage(), ...getHeapStatistics() };
@@ -34,7 +35,7 @@ export const getMemoryStatistics = () => {
 
 export const getApplicationInfo = () => ({
   version: PLATFORM_VERSION,
-  api_features: [API_FEATURE_BULK_REF_RELATION_VALIDATION, API_FEATURE_BULK_REF_RELATION_DELETE],
+  api_features: [API_FEATURE_BULK_REF_RELATION_VALIDATION, API_FEATURE_BULK_REF_RELATION_DELETE, API_FEATURE_BULK_INDICATOR_ADD],
   debugStats: {}, // Lazy loaded
 });
 

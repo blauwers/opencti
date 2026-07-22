@@ -73,6 +73,8 @@ EXPORT_PREFETCH_BATCH_SIZE: int = 1000
 IMPORT_PREFETCH_BATCH_SIZE: int = 1000
 NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE: int = 100
 REPORT_OBJECT_REF_CREATE_BATCH_SIZE: int = 100
+INDICATOR_CREATE_BATCH_SIZE: int = 25
+BULK_INDICATOR_ADD_API_FEATURE = "BULK_INDICATOR_ADD"
 _EXPORT_OBJECT_REF_EXCLUDED_ENTITY_TYPES: Dict[str, frozenset[str]] = {
     "report": frozenset({"Note", "Report", "Opinion"}),
     "note": frozenset({"Note", "Opinion"}),
@@ -2433,39 +2435,28 @@ class OpenCTIStix2:
         if not isinstance(stix_object_results, list):
             stix_object_results = [stix_object_results]
 
+        self._cache_imported_object_results(
+            stix_object, stix_object_results, external_references_ids, reports
+        )
+        return stix_object_results
+
+    def _cache_imported_object_results(
+        self, stix_object, stix_object_results, external_references_ids, reports
+    ):
         for stix_object_result in stix_object_results:
-            self.set_in_cache(
-                stix_object["id"],
-                {
-                    "id": stix_object_result["id"],
-                    "type": stix_object_result["entity_type"],
-                    "observables": (
-                        stix_object_result["observables"]
-                        if "observables" in stix_object_result
-                        else []
-                    ),
-                },
-            )
-            self.set_in_cache(
-                stix_object_result["id"],
-                {
-                    "id": stix_object_result["id"],
-                    "type": stix_object_result["entity_type"],
-                    "observables": (
-                        stix_object_result["observables"]
-                        if "observables" in stix_object_result
-                        else []
-                    ),
-                },
-            )
-            # Add reports from external references
+            cache_entry = {
+                "id": stix_object_result["id"],
+                "type": stix_object_result["entity_type"],
+                "observables": stix_object_result.get("observables", []),
+            }
+            self.set_in_cache(stix_object["id"], cache_entry)
+            self.set_in_cache(stix_object_result["id"], cache_entry.copy())
             for external_reference_id in external_references_ids:
                 if external_reference_id in reports:
                     self._add_report_object_ref_once(
                         reports[external_reference_id]["id"],
                         stix_object_result["id"],
                     )
-        return stix_object_results
 
     @staticmethod
     def _artifact_payload_is_already_in_files(
@@ -5492,6 +5483,103 @@ class OpenCTIStix2:
         }
         return item
 
+    def _can_batch_indicator_import(self, types, objects_max_refs):
+        if objects_max_refs > 0:
+            return False
+        if types is not None and len(types) > 0 and "indicator" not in types:
+            return False
+        supports_api_feature = getattr(self.opencti, "supports_api_feature", None)
+        indicator = getattr(self.opencti, "indicator", None)
+        if (
+            supports_api_feature is None
+            or indicator is None
+            or getattr(indicator, "import_many_from_stix2", None) is None
+            or not supports_api_feature(BULK_INDICATOR_ADD_API_FEATURE)
+        ):
+            return False
+        return True
+
+    def _can_batch_indicator_item(self, item):
+        return item.get("type") == "indicator" and not (
+            item.get("external_references")
+            or item.get("kill_chain_phases")
+            or item.get("x_opencti_files")
+            or item.get("opencti_upsert_operations")
+            or item.get("x_opencti_create_observables")
+            or item.get("opencti_operation")
+            or self.opencti.get_attribute_in_extension("is_inferred", item)
+            or self.opencti.get_attribute_in_extension("opencti_operation", item)
+            or self.opencti.get_attribute_in_extension("files", item)
+            or self.opencti.get_attribute_in_extension(
+                "opencti_upsert_operations", item
+            )
+        )
+
+    def _import_indicator_items(self, bundles, update, types, work_id):
+        imported_elements = []
+        failed_items = []
+        worker_logger = self.opencti.logger_class("worker")
+        for start_index in range(0, len(bundles), INDICATOR_CREATE_BATCH_SIZE):
+            batch_bundles = bundles[
+                start_index : start_index + INDICATOR_CREATE_BATCH_SIZE
+            ]
+            batch_items = [bundle["objects"][0] for bundle in batch_bundles]
+            extras = []
+            for item in batch_items:
+                embedded_relationships = self.extract_embedded_relationships(
+                    item, types
+                )
+                extras.append(
+                    {
+                        "created_by_id": embedded_relationships["created_by"],
+                        "object_marking_ids": embedded_relationships["object_marking"],
+                        "object_label_ids": embedded_relationships["object_label"],
+                        "external_references_ids": embedded_relationships[
+                            "external_references"
+                        ],
+                        "kill_chain_phases_ids": embedded_relationships[
+                            "kill_chain_phases"
+                        ],
+                        "reports": embedded_relationships["reports"],
+                    }
+                )
+            try:
+                results = self.opencti.indicator.import_many_from_stix2(
+                    batch_items, extras, update=update
+                )
+                if results is None or len(results) != len(batch_items):
+                    raise ValueError(
+                        "Bulk indicator import returned an unexpected result count"
+                    )
+            except Exception as ex:  # pylint: disable=broad-except
+                worker_logger.warning(
+                    "Bulk indicator import failed, falling back to sequential import",
+                    {"error": str(ex)},
+                )
+                for bundle, item in zip(batch_bundles, batch_items):
+                    failed_item = self.import_item_with_retries(
+                        item, update, types, work_id, bundle["id"]
+                    )
+                    if failed_item is not None:
+                        failed_items.append(failed_item)
+                    else:
+                        imported_elements.append(
+                            {"id": item["id"], "type": item["type"]}
+                        )
+                continue
+            for item, item_extras, result in zip(batch_items, extras, results):
+                self._cache_imported_object_results(
+                    item,
+                    [result],
+                    item_extras["external_references_ids"],
+                    item_extras["reports"],
+                )
+                if work_id is not None:
+                    self.opencti.work.report_expectation(work_id, None)
+                bundles_success_counter.add(1)
+                imported_elements.append({"id": item["id"], "type": item["type"]})
+        return imported_elements, failed_items
+
     @_reuse_missing_import_label_values
     @_reuse_missing_import_vocabulary_values
     @_reuse_external_reference_file_reuse_cache
@@ -5581,8 +5669,45 @@ class OpenCTIStix2:
             too_large_elements_bundles = []
             # Report relation mutations can repeat heavily within one imported bundle.
             with self._report_object_ref_dedupe_scope():
-                for bundle in bundles:
+                can_batch_indicators = self._can_batch_indicator_import(
+                    types, objects_max_refs
+                )
+                bundle_index = 0
+                while bundle_index < len(bundles):
+                    bundle = bundles[bundle_index]
                     bundle_id = bundle["id"]
+                    if (
+                        can_batch_indicators
+                        and len(bundle["objects"]) == 1
+                        and self._can_batch_indicator_item(bundle["objects"][0])
+                    ):
+                        indicator_bundles = []
+                        indicator_ids = set()
+                        next_bundle_index = bundle_index
+                        while next_bundle_index < len(bundles):
+                            candidate_bundle = bundles[next_bundle_index]
+                            if len(candidate_bundle["objects"]) != 1:
+                                break
+                            candidate_item = candidate_bundle["objects"][0]
+                            if (
+                                not self._can_batch_indicator_item(candidate_item)
+                                or candidate_item["id"] in indicator_ids
+                            ):
+                                break
+                            indicator_bundles.append(candidate_bundle)
+                            indicator_ids.add(candidate_item["id"])
+                            next_bundle_index += 1
+                        if len(indicator_bundles) > 1:
+                            (
+                                imported_indicator_elements,
+                                failed_indicator_items,
+                            ) = self._import_indicator_items(
+                                indicator_bundles, update, types, work_id
+                            )
+                            imported_elements.extend(imported_indicator_elements)
+                            too_large_elements_bundles.extend(failed_indicator_items)
+                            bundle_index = next_bundle_index
+                            continue
                     for item in bundle["objects"]:
                         # If item is considered too large, meaning that it has a number of refs higher than inputted objects_max_refs, do not import it
                         if (
@@ -5616,6 +5741,7 @@ class OpenCTIStix2:
                                 imported_elements.append(
                                     {"id": item["id"], "type": item["type"]}
                                 )
+                    bundle_index += 1
 
         return imported_elements, too_large_elements_bundles
 

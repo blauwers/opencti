@@ -71,3 +71,39 @@ def test_indicator_import_bulk_copies_ordinary_extension_fields():
     assert result["x_opencti_workflow_id"] == "workflow--indicator"
     assert len(opencti.bulk_lookup_keys) == 1
     assert ("x_opencti_score", "score") in opencti.bulk_lookup_keys[0]
+
+
+def test_indicator_import_many_builds_inputs_for_each_stix_object():
+    opencti = _OpenCTI()
+    indicator = Indicator(opencti)
+    indicator.create_many = lambda items: items
+    stix_objects = [
+        {
+            "id": "indicator--1",
+            "type": "indicator",
+            "pattern": "[ipv4-addr:value = '192.0.2.1']",
+            "pattern_type": "stix",
+            "extensions": {
+                _OPENCTI_EXTENSION: {"main_observable_type": "IPv4-Addr"},
+            },
+        },
+        {
+            "id": "indicator--2",
+            "type": "indicator",
+            "pattern": "[domain-name:value = 'example.test']",
+            "pattern_type": "stix",
+            "x_opencti_main_observable_type": "Domain-Name",
+        },
+    ]
+
+    result = indicator.import_many_from_stix2(
+        stix_objects,
+        [{"object_marking_ids": ["marking--1"]}, {}],
+        update=True,
+    )
+
+    assert [item["stix_id"] for item in result] == ["indicator--1", "indicator--2"]
+    assert result[0]["x_opencti_main_observable_type"] == "IPv4-Addr"
+    assert result[0]["objectMarking"] == ["marking--1"]
+    assert result[1]["x_opencti_main_observable_type"] == "Domain-Name"
+    assert all(item["update"] is True for item in result)

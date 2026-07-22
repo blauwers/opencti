@@ -102,6 +102,19 @@ const CREATE_QUERY = gql`
     }
 `;
 
+const BULK_CREATE_QUERY = gql`
+    mutation IndicatorsAdd($inputs: [IndicatorAddInput!]!) {
+        indicatorsAdd(inputs: $inputs) {
+            id
+            name
+            x_opencti_observable_values {
+              type
+              value
+            }
+        }
+    }
+`;
+
 const UPDATE_QUERY = gql`
   mutation IndicatorFieldPatch($id: ID!, $input: [EditInput!]!) {
     indicatorFieldPatch(id: $id, input: $input) {
@@ -116,6 +129,7 @@ const UPDATE_QUERY = gql`
 describe('Indicator resolver standard behavior', () => {
   let firstIndicatorInternalId: string;
   let secondIndicatorInternalId: string;
+  const bulkIndicatorInternalIds: string[] = [];
   let indicatorStixId = 'indicator--f6ad652c-166a-43e6-98b8-8ff078e2349f';
   const indicatorForTestName = 'Indicator in indicator-test';
 
@@ -184,6 +198,45 @@ describe('Indicator resolver standard behavior', () => {
     expect(observablesValues?.[0].value).toEqual('www.test2.rest');
     expect(indicator.data?.indicatorAdd.id, 'A new indicator should be created, if not it is an upsert and it is a bug').not.toEqual(firstIndicatorInternalId);
     secondIndicatorInternalId = indicator.data?.indicatorAdd.id;
+  });
+
+  it('should indicators be created in bulk', async () => {
+    const indicators = await queryAsAdminWithSuccess({
+      query: BULK_CREATE_QUERY,
+      variables: {
+        inputs: [
+          {
+            name: 'Bulk indicator one',
+            stix_id: 'indicator--adca84c8-843e-4366-aa7d-8e05954351f4',
+            pattern: "[domain-name:value = 'bulk-one.test']",
+            pattern_type: 'stix',
+            x_opencti_main_observable_type: ENTITY_DOMAIN_NAME,
+          },
+          {
+            name: 'Bulk indicator two',
+            stix_id: 'indicator--31809b50-a340-43bf-9126-813f36d85058',
+            pattern: "[domain-name:value = 'bulk-two.test']",
+            pattern_type: 'stix',
+            x_opencti_main_observable_type: ENTITY_DOMAIN_NAME,
+          },
+        ],
+      },
+    });
+    const bulkIndicators = indicators.data?.indicatorsAdd as Array<{
+      id: string;
+      name: string;
+      x_opencti_observable_values: Array<{ value: string }>;
+    }>;
+
+    expect(bulkIndicators.map((indicator) => indicator.name)).toEqual([
+      'Bulk indicator one',
+      'Bulk indicator two',
+    ]);
+    expect(bulkIndicators.map((indicator) => indicator.x_opencti_observable_values[0].value)).toEqual([
+      'bulk-one.test',
+      'bulk-two.test',
+    ]);
+    bulkIndicatorInternalIds.push(...bulkIndicators.map((indicator) => indicator.id));
   });
 
   it('should indicator with same pattern be upsert (not created)', async () => {
@@ -379,6 +432,12 @@ describe('Indicator resolver standard behavior', () => {
       query: DELETE_QUERY,
       variables: { id: secondIndicatorInternalId },
     });
+    for (const bulkIndicatorInternalId of bulkIndicatorInternalIds) {
+      await queryAsAdminWithSuccess({
+        query: DELETE_QUERY,
+        variables: { id: bulkIndicatorInternalId },
+      });
+    }
 
     // Verify is no longer found
     const queryResult = await queryAsAdmin({ query: READ_QUERY, variables: { id: indicatorStixId } });

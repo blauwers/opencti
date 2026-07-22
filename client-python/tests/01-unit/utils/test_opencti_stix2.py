@@ -9,6 +9,7 @@ import pytest
 from pycti.api.opencti_api_client import OpenCTIApiClient
 from pycti.utils.opencti_file_utils import BASE64_FILE_MEMORY_THRESHOLD
 from pycti.utils.opencti_stix2 import (
+    BULK_INDICATOR_ADD_API_FEATURE,
     IMPORT_PREFETCH_BATCH_SIZE,
     NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE,
     REPORT_OBJECT_REF_CREATE_BATCH_SIZE,
@@ -1653,6 +1654,129 @@ def _import_bundle_extracting_relationships(opencti_stix2, objects):
             "objects": objects,
         }
     )
+
+
+class _IndicatorBulkRecorder:
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+
+    def import_many_from_stix2(self, stix_objects, extras, update=False):
+        self.calls.append(
+            {
+                "stix_objects": stix_objects,
+                "extras": extras,
+                "update": update,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return [
+            {"id": f"internal-{item['id']}", "entity_type": "Indicator"}
+            for item in stix_objects
+        ]
+
+
+def _bulk_indicator_opencti(error=None):
+    opencti = _external_reference_opencti()
+    opencti.indicator = _IndicatorBulkRecorder(error=error)
+    opencti.supports_api_feature = (
+        lambda feature: feature == BULK_INDICATOR_ADD_API_FEATURE
+    )
+    return opencti
+
+
+def _indicator_bundle_objects(count):
+    return [
+        {
+            "id": f"indicator--{index}",
+            "type": "indicator",
+            "pattern_type": "stix",
+            "pattern": f"[domain-name:value = 'benchmark-{index}.invalid']",
+        }
+        for index in range(count)
+    ]
+
+
+def _prepare_bulk_indicator_import(monkeypatch, opencti_stix2):
+    monkeypatch.setattr(
+        opencti_stix2,
+        "extract_embedded_relationships",
+        lambda *_args, **_kwargs: {
+            "created_by": None,
+            "object_marking": [],
+            "object_label": [],
+            "external_references": [],
+            "kill_chain_phases": [],
+            "reports": {},
+        },
+    )
+
+
+def test_import_bundle_batches_consecutive_indicators(monkeypatch):
+    opencti = _bulk_indicator_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    _prepare_bulk_indicator_import(monkeypatch, opencti_stix2)
+    sequential_calls = []
+    opencti_stix2.import_item_with_retries = (
+        lambda item, *_args, **_kwargs: sequential_calls.append(item["id"]) or None
+    )
+
+    imported, failed = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--bulk-indicators",
+            "objects": _indicator_bundle_objects(3),
+        },
+        update=True,
+    )
+
+    assert sequential_calls == []
+    assert len(opencti.indicator.calls) == 1
+    assert [item["id"] for item in opencti.indicator.calls[0]["stix_objects"]] == [
+        "indicator--0",
+        "indicator--1",
+        "indicator--2",
+    ]
+    assert opencti.indicator.calls[0]["update"] is True
+    assert imported == [
+        {"id": "indicator--0", "type": "indicator"},
+        {"id": "indicator--1", "type": "indicator"},
+        {"id": "indicator--2", "type": "indicator"},
+    ]
+    assert failed == []
+
+
+def test_import_bundle_falls_back_to_sequential_indicator_import_on_bulk_failure(
+    monkeypatch,
+):
+    opencti = _bulk_indicator_opencti(error=ValueError("bulk failed"))
+    opencti_stix2 = OpenCTIStix2(opencti)
+    _prepare_bulk_indicator_import(monkeypatch, opencti_stix2)
+    sequential_calls = []
+
+    def import_item_with_retries(item, _update, _types, _work_id, bundle_id):
+        sequential_calls.append((item["id"], bundle_id))
+        return item if item["id"] == "indicator--1" else None
+
+    opencti_stix2.import_item_with_retries = import_item_with_retries
+
+    imported, failed = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--bulk-indicators-fallback",
+            "objects": _indicator_bundle_objects(2),
+        }
+    )
+
+    assert len(opencti.indicator.calls) == 1
+    assert [item_id for item_id, _bundle_id in sequential_calls] == [
+        "indicator--0",
+        "indicator--1",
+    ]
+    assert all(bundle_id is not None for _item_id, bundle_id in sequential_calls)
+    assert imported == [{"id": "indicator--0", "type": "indicator"}]
+    assert [item["id"] for item in failed] == ["indicator--1"]
 
 
 def test_import_bundle_reuses_exact_file_upload_external_reference_across_items():

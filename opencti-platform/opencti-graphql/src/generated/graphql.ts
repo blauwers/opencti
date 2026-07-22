@@ -17199,6 +17199,7 @@ export type Mutation = {
   indicatorFieldPatch?: Maybe<Indicator>;
   indicatorRelationAdd?: Maybe<StixRefRelationship>;
   indicatorRelationDelete?: Maybe<Indicator>;
+  indicatorsAdd: Array<Indicator>;
   individualAdd?: Maybe<Individual>;
   individualEdit?: Maybe<IndividualEditMutations>;
   infrastructureAdd?: Maybe<Infrastructure>;
@@ -18504,6 +18505,11 @@ export type MutationIndicatorRelationDeleteArgs = {
   id: Scalars['ID']['input'];
   relationship_type: Scalars['String']['input'];
   toId: Scalars['StixRef']['input'];
+};
+
+
+export type MutationIndicatorsAddArgs = {
+  inputs: Array<IndicatorAddInput>;
 };
 
 
@@ -47678,6 +47684,7 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   indicatorFieldPatch?: Resolver<Maybe<ResolversTypes['Indicator']>, ParentType, ContextType, RequireFields<MutationIndicatorFieldPatchArgs, 'id' | 'input'>>;
   indicatorRelationAdd?: Resolver<Maybe<ResolversTypes['StixRefRelationship']>, ParentType, ContextType, RequireFields<MutationIndicatorRelationAddArgs, 'id' | 'input'>>;
   indicatorRelationDelete?: Resolver<Maybe<ResolversTypes['Indicator']>, ParentType, ContextType, RequireFields<MutationIndicatorRelationDeleteArgs, 'id' | 'relationship_type' | 'toId'>>;
+  indicatorsAdd?: Resolver<Array<ResolversTypes['Indicator']>, ParentType, ContextType, RequireFields<MutationIndicatorsAddArgs, 'inputs'>>;
   individualAdd?: Resolver<Maybe<ResolversTypes['Individual']>, ParentType, ContextType, RequireFields<MutationIndividualAddArgs, 'input'>>;
   individualEdit?: Resolver<Maybe<ResolversTypes['IndividualEditMutations']>, ParentType, ContextType, RequireFields<MutationIndividualEditArgs, 'id'>>;
   infrastructureAdd?: Resolver<Maybe<ResolversTypes['Infrastructure']>, ParentType, ContextType, RequireFields<MutationInfrastructureAddArgs, 'input'>>;

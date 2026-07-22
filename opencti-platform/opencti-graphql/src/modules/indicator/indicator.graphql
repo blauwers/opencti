@@ -308,6 +308,7 @@ type Query {
 
 type Mutation {
   indicatorAdd(input: IndicatorAddInput!): Indicator @auth(for: [KNOWLEDGE_KNUPDATE])
+  indicatorsAdd(inputs: [IndicatorAddInput!]!): [Indicator!]! @auth(for: [KNOWLEDGE_KNUPDATE])
   indicatorDelete(id: ID!): ID @auth(for: [KNOWLEDGE_KNUPDATE_KNDELETE])
   indicatorFieldPatch(id: ID!, input: [EditInput!]!, commitMessage: String, references: [String]): Indicator @auth(for: [KNOWLEDGE_KNUPDATE])
   indicatorContextPatch(id: ID!, input: EditContext): Indicator @auth(for: [KNOWLEDGE_KNUPDATE])

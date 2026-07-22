@@ -1,5 +1,6 @@
 import {
   addIndicator,
+  addIndicators,
   findIndicatorPaginated,
   findById,
   getDecayChartData,
@@ -58,6 +59,7 @@ const indicatorResolvers: Resolvers = {
   },
   Mutation: {
     indicatorAdd: (_, { input }, context) => addIndicator(context, context.user, input),
+    indicatorsAdd: (_, { inputs }, context) => addIndicators(context, context.user, inputs),
     indicatorDelete: (_, { id }, context) => {
       return stixDomainObjectDelete(context, context.user, id, ENTITY_TYPE_INDICATOR);
     },

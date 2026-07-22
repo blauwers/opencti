@@ -303,119 +303,125 @@ class Indicator:
         :return: Indicator object
         :rtype: dict or None
         """
-        stix_id = kwargs.get("stix_id", None)
-        created_by = kwargs.get("createdBy", None)
-        object_marking = kwargs.get("objectMarking", None)
-        object_label = kwargs.get("objectLabel", None)
-        external_references = kwargs.get("externalReferences", None)
-        revoked = kwargs.get("revoked", None)
-        confidence = kwargs.get("confidence", None)
-        lang = kwargs.get("lang", None)
-        created = kwargs.get("created", None)
-        modified = kwargs.get("modified", None)
-        pattern_type = kwargs.get("pattern_type", None)
-        pattern_version = kwargs.get("pattern_version", None)
-        pattern = kwargs.get("pattern", None)
-        name = kwargs.get("name", kwargs.get("pattern", None))
-        description = kwargs.get("description", None)
-        indicator_types = kwargs.get("indicator_types", None)
-        valid_from = kwargs.get("valid_from", None)
-        valid_until = kwargs.get("valid_until", None)
-        x_opencti_score = kwargs.get("x_opencti_score", 50)
-        x_opencti_detection = kwargs.get("x_opencti_detection", False)
-        x_opencti_main_observable_type = kwargs.get(
-            "x_opencti_main_observable_type", None
-        )
-        x_mitre_platforms = kwargs.get("x_mitre_platforms", None)
-        kill_chain_phases = kwargs.get("killChainPhases", None)
-        x_opencti_stix_ids = kwargs.get("x_opencti_stix_ids", None)
-        create_observables = kwargs.get("x_opencti_create_observables", False)
-        granted_refs = kwargs.get("objectOrganization", None)
-        x_opencti_workflow_id = kwargs.get("x_opencti_workflow_id", None)
-        x_opencti_modified_at = kwargs.get("x_opencti_modified_at", None)
-        update = kwargs.get("update", False)
-        files = kwargs.get("files", None)
-        files_markings = kwargs.get("filesMarkings", None)
-        no_trigger_import = kwargs.get("noTriggerImport", None)
-        embedded = kwargs.get("embedded", None)
-        upsert_operations = kwargs.get("upsert_operations", None)
-
-        if (
-            name is not None
-            and pattern is not None
-            and pattern_type is not None
-            and x_opencti_main_observable_type is not None
-        ):
-            if x_opencti_main_observable_type == "File":
-                x_opencti_main_observable_type = "StixFile"
-            self.opencti.app_logger.info("Creating Indicator", {"name": name})
-            query = """
-                mutation IndicatorAdd($input: IndicatorAddInput!) {
-                    indicatorAdd(input: $input) {
-                        id
-                        standard_id
-                        entity_type
-                        parent_types
-                        observables {
-                            edges {
-                                node {
-                                    id
-                                    standard_id
-                                    entity_type
-                                }
-                            }
-                        }
-                    }
-                }
-            """
-            result = self.opencti.query(
-                query,
-                {
-                    "input": {
-                        "stix_id": stix_id,
-                        "createdBy": created_by,
-                        "objectMarking": object_marking,
-                        "objectLabel": object_label,
-                        "objectOrganization": granted_refs,
-                        "externalReferences": external_references,
-                        "revoked": revoked,
-                        "confidence": confidence,
-                        "lang": lang,
-                        "created": created,
-                        "modified": modified,
-                        "pattern_type": pattern_type,
-                        "pattern_version": pattern_version,
-                        "pattern": pattern,
-                        "name": name,
-                        "description": description,
-                        "indicator_types": indicator_types,
-                        "valid_until": valid_until,
-                        "valid_from": valid_from,
-                        "x_opencti_score": x_opencti_score,
-                        "x_opencti_detection": x_opencti_detection,
-                        "x_opencti_main_observable_type": x_opencti_main_observable_type,
-                        "x_mitre_platforms": x_mitre_platforms,
-                        "x_opencti_stix_ids": x_opencti_stix_ids,
-                        "killChainPhases": kill_chain_phases,
-                        "createObservables": create_observables,
-                        "x_opencti_workflow_id": x_opencti_workflow_id,
-                        "x_opencti_modified_at": x_opencti_modified_at,
-                        "update": update,
-                        "files": files,
-                        "filesMarkings": files_markings,
-                        "noTriggerImport": no_trigger_import,
-                        "embedded": embedded,
-                        "upsertOperations": upsert_operations,
-                    }
-                },
-            )
-            return self.opencti.process_multiple_fields(result["data"]["indicatorAdd"])
-        else:
+        input_variables = self._build_create_input(**kwargs)
+        if input_variables is None:
             self.opencti.app_logger.error(
                 "[opencti_indicator] Missing parameters: "
                 "name or pattern or pattern_type or x_opencti_main_observable_type"
             )
             return None
+        self.opencti.app_logger.info(
+            "Creating Indicator", {"name": input_variables["name"]}
+        )
+        query = """
+            mutation IndicatorAdd($input: IndicatorAddInput!) {
+                indicatorAdd(input: $input) {
+                    id
+                    standard_id
+                    entity_type
+                    parent_types
+                    observables {
+                        edges {
+                            node {
+                                id
+                                standard_id
+                                entity_type
+                            }
+                        }
+                    }
+                }
+            }
+        """
+        result = self.opencti.query(query, {"input": input_variables})
+        return self.opencti.process_multiple_fields(result["data"]["indicatorAdd"])
+
+    def _build_create_input(self, **kwargs):
+        name = kwargs.get("name", kwargs.get("pattern", None))
+        pattern = kwargs.get("pattern", None)
+        pattern_type = kwargs.get("pattern_type", None)
+        x_opencti_main_observable_type = kwargs.get(
+            "x_opencti_main_observable_type", None
+        )
+        if (
+            name is None
+            or pattern is None
+            or pattern_type is None
+            or x_opencti_main_observable_type is None
+        ):
+            return None
+        if x_opencti_main_observable_type == "File":
+            x_opencti_main_observable_type = "StixFile"
+        return {
+            "stix_id": kwargs.get("stix_id", None),
+            "createdBy": kwargs.get("createdBy", None),
+            "objectMarking": kwargs.get("objectMarking", None),
+            "objectLabel": kwargs.get("objectLabel", None),
+            "objectOrganization": kwargs.get("objectOrganization", None),
+            "externalReferences": kwargs.get("externalReferences", None),
+            "revoked": kwargs.get("revoked", None),
+            "confidence": kwargs.get("confidence", None),
+            "lang": kwargs.get("lang", None),
+            "created": kwargs.get("created", None),
+            "modified": kwargs.get("modified", None),
+            "pattern_type": pattern_type,
+            "pattern_version": kwargs.get("pattern_version", None),
+            "pattern": pattern,
+            "name": name,
+            "description": kwargs.get("description", None),
+            "indicator_types": kwargs.get("indicator_types", None),
+            "valid_until": kwargs.get("valid_until", None),
+            "valid_from": kwargs.get("valid_from", None),
+            "x_opencti_score": kwargs.get("x_opencti_score", 50),
+            "x_opencti_detection": kwargs.get("x_opencti_detection", False),
+            "x_opencti_main_observable_type": x_opencti_main_observable_type,
+            "x_mitre_platforms": kwargs.get("x_mitre_platforms", None),
+            "x_opencti_stix_ids": kwargs.get("x_opencti_stix_ids", None),
+            "killChainPhases": kwargs.get("killChainPhases", None),
+            "createObservables": kwargs.get("x_opencti_create_observables", False),
+            "x_opencti_workflow_id": kwargs.get("x_opencti_workflow_id", None),
+            "x_opencti_modified_at": kwargs.get("x_opencti_modified_at", None),
+            "update": kwargs.get("update", False),
+            "files": kwargs.get("files", None),
+            "filesMarkings": kwargs.get("filesMarkings", None),
+            "noTriggerImport": kwargs.get("noTriggerImport", None),
+            "embedded": kwargs.get("embedded", None),
+            "upsertOperations": kwargs.get("upsert_operations", None),
+        }
+
+    def create_many(self, items):
+        input_variables = [self._build_create_input(**item) for item in items]
+        if any(input_variable is None for input_variable in input_variables):
+            self.opencti.app_logger.error(
+                "[opencti_indicator] Missing parameters in bulk create input"
+            )
+            return None
+        self.opencti.app_logger.info(
+            "Creating Indicator batch", {"count": len(input_variables)}
+        )
+        query = """
+            mutation IndicatorsAdd($inputs: [IndicatorAddInput!]!) {
+                indicatorsAdd(inputs: $inputs) {
+                    id
+                    standard_id
+                    entity_type
+                    parent_types
+                    observables {
+                        edges {
+                            node {
+                                id
+                                standard_id
+                                entity_type
+                            }
+                        }
+                    }
+                }
+            }
+        """
+        result = self.opencti.query(query, {"inputs": input_variables})
+        return [
+            self.opencti.process_multiple_fields(indicator)
+            for indicator in result["data"]["indicatorsAdd"]
+        ]
 
     def update_field(self, **kwargs):
         """Update an Indicator object field.
@@ -511,162 +517,84 @@ class Indicator:
             )
             return False
 
+    def _build_import_kwargs(self, stix_object, extras, update):
+        self.opencti.copy_attributes_from_extension(
+            _INDICATOR_EXTENSION_FIELDS, stix_object
+        )
+        if "x_opencti_main_observable_type" not in stix_object:
+            extension_main_observable_type = self.opencti.get_attribute_in_extension(
+                "main_observable_type", stix_object
+            )
+            if extension_main_observable_type is not None:
+                stix_object["x_opencti_main_observable_type"] = (
+                    extension_main_observable_type
+                )
+        if "x_mitre_platforms" not in stix_object:
+            stix_object["x_mitre_platforms"] = (
+                self.opencti.get_attribute_in_mitre_extension("platforms", stix_object)
+            )
+        return {
+            "stix_id": stix_object["id"],
+            "createdBy": extras.get("created_by_id"),
+            "objectMarking": extras.get("object_marking_ids"),
+            "objectLabel": extras.get("object_label_ids"),
+            "externalReferences": extras.get("external_references_ids"),
+            "revoked": stix_object.get("revoked"),
+            "confidence": stix_object.get("confidence"),
+            "lang": stix_object.get("lang"),
+            "created": stix_object.get("created"),
+            "modified": stix_object.get("modified"),
+            "pattern_type": stix_object.get("pattern_type"),
+            "pattern_version": stix_object.get("pattern_version"),
+            "pattern": stix_object.get("pattern", ""),
+            "name": stix_object.get("name", stix_object.get("pattern")),
+            "description": (
+                self.opencti.stix2.convert_markdown(stix_object["description"])
+                if "description" in stix_object
+                else None
+            ),
+            "indicator_types": stix_object.get("indicator_types"),
+            "valid_from": stix_object.get("valid_from"),
+            "valid_until": stix_object.get("valid_until"),
+            "x_opencti_score": stix_object.get("x_opencti_score", 50),
+            "x_opencti_detection": stix_object.get("x_opencti_detection", False),
+            "x_mitre_platforms": stix_object.get("x_mitre_platforms"),
+            "x_opencti_main_observable_type": stix_object.get(
+                "x_opencti_main_observable_type", "Unknown"
+            ),
+            "killChainPhases": extras.get("kill_chain_phases_ids"),
+            "x_opencti_stix_ids": stix_object.get("x_opencti_stix_ids"),
+            "x_opencti_create_observables": stix_object.get(
+                "x_opencti_create_observables", False
+            ),
+            "objectOrganization": stix_object.get("x_opencti_granted_refs"),
+            "x_opencti_workflow_id": stix_object.get("x_opencti_workflow_id"),
+            "x_opencti_modified_at": stix_object.get("x_opencti_modified_at"),
+            "update": update,
+            "files": extras.get("files"),
+            "filesMarkings": extras.get("filesMarkings"),
+            "noTriggerImport": extras.get("noTriggerImport"),
+            "embedded": extras.get("embedded"),
+            "upsert_operations": stix_object.get("opencti_upsert_operations"),
+        }
+
     def import_from_stix2(self, **kwargs):
-        """Import an Indicator object from a STIX2 object.
-
-        :param stixObject: the Stix-Object Indicator
-        :type stixObject: dict
-        :param extras: extra dict
-        :type extras: dict
-        :param update: set the update flag on import
-        :type update: bool
-        :return: Indicator object
-        :rtype: dict or None
-        """
+        """Import an Indicator object from a STIX2 object."""
         stix_object = kwargs.get("stixObject", None)
-        extras = kwargs.get("extras", {})
-        update = kwargs.get("update", False)
-        if stix_object is not None:
-            self.opencti.copy_attributes_from_extension(
-                _INDICATOR_EXTENSION_FIELDS, stix_object
-            )
-            if "x_opencti_main_observable_type" not in stix_object:
-                extension_main_observable_type = (
-                    self.opencti.get_attribute_in_extension(
-                        "main_observable_type", stix_object
-                    )
-                )
-                if extension_main_observable_type is not None:
-                    stix_object["x_opencti_main_observable_type"] = (
-                        extension_main_observable_type
-                    )
-            if "x_mitre_platforms" not in stix_object:
-                stix_object["x_mitre_platforms"] = (
-                    self.opencti.get_attribute_in_mitre_extension(
-                        "platforms", stix_object
-                    )
-                )
-
-            return self.create(
-                stix_id=stix_object["id"],
-                createdBy=(
-                    extras["created_by_id"] if "created_by_id" in extras else None
-                ),
-                objectMarking=(
-                    extras["object_marking_ids"]
-                    if "object_marking_ids" in extras
-                    else None
-                ),
-                objectLabel=(
-                    extras["object_label_ids"] if "object_label_ids" in extras else None
-                ),
-                externalReferences=(
-                    extras["external_references_ids"]
-                    if "external_references_ids" in extras
-                    else None
-                ),
-                revoked=stix_object["revoked"] if "revoked" in stix_object else None,
-                confidence=(
-                    stix_object["confidence"] if "confidence" in stix_object else None
-                ),
-                lang=stix_object["lang"] if "lang" in stix_object else None,
-                created=stix_object["created"] if "created" in stix_object else None,
-                modified=stix_object["modified"] if "modified" in stix_object else None,
-                pattern_type=(
-                    stix_object["pattern_type"]
-                    if "pattern_type" in stix_object
-                    else None
-                ),
-                pattern_version=(
-                    stix_object["pattern_version"]
-                    if "pattern_version" in stix_object
-                    else None
-                ),
-                pattern=stix_object["pattern"] if "pattern" in stix_object else "",
-                name=(
-                    stix_object["name"]
-                    if "name" in stix_object
-                    else stix_object["pattern"]
-                ),
-                description=(
-                    self.opencti.stix2.convert_markdown(stix_object["description"])
-                    if "description" in stix_object
-                    else None
-                ),
-                indicator_types=(
-                    stix_object["indicator_types"]
-                    if "indicator_types" in stix_object
-                    else None
-                ),
-                valid_from=(
-                    stix_object["valid_from"] if "valid_from" in stix_object else None
-                ),
-                valid_until=(
-                    stix_object["valid_until"] if "valid_until" in stix_object else None
-                ),
-                x_opencti_score=(
-                    stix_object["x_opencti_score"]
-                    if "x_opencti_score" in stix_object
-                    else 50
-                ),
-                x_opencti_detection=(
-                    stix_object["x_opencti_detection"]
-                    if "x_opencti_detection" in stix_object
-                    else False
-                ),
-                x_mitre_platforms=(
-                    stix_object["x_mitre_platforms"]
-                    if "x_mitre_platforms" in stix_object
-                    else None
-                ),
-                x_opencti_main_observable_type=(
-                    stix_object["x_opencti_main_observable_type"]
-                    if "x_opencti_main_observable_type" in stix_object
-                    else "Unknown"
-                ),
-                killChainPhases=(
-                    extras["kill_chain_phases_ids"]
-                    if "kill_chain_phases_ids" in extras
-                    else None
-                ),
-                x_opencti_stix_ids=(
-                    stix_object["x_opencti_stix_ids"]
-                    if "x_opencti_stix_ids" in stix_object
-                    else None
-                ),
-                x_opencti_create_observables=(
-                    stix_object["x_opencti_create_observables"]
-                    if "x_opencti_create_observables" in stix_object
-                    else False
-                ),
-                objectOrganization=(
-                    stix_object["x_opencti_granted_refs"]
-                    if "x_opencti_granted_refs" in stix_object
-                    else None
-                ),
-                x_opencti_workflow_id=(
-                    stix_object["x_opencti_workflow_id"]
-                    if "x_opencti_workflow_id" in stix_object
-                    else None
-                ),
-                x_opencti_modified_at=(
-                    stix_object["x_opencti_modified_at"]
-                    if "x_opencti_modified_at" in stix_object
-                    else None
-                ),
-                update=update,
-                files=extras.get("files"),
-                filesMarkings=extras.get("filesMarkings"),
-                noTriggerImport=extras.get("noTriggerImport", None),
-                embedded=extras.get("embedded", None),
-                upsert_operations=(
-                    stix_object["opencti_upsert_operations"]
-                    if "opencti_upsert_operations" in stix_object
-                    else None
-                ),
-            )
-        else:
+        if stix_object is None:
             self.opencti.app_logger.error(
                 "[opencti_indicator] Missing parameters: stixObject"
             )
             return None
+        extras = kwargs.get("extras", {})
+        update = kwargs.get("update", False)
+        return self.create(**self._build_import_kwargs(stix_object, extras, update))
+
+    def import_many_from_stix2(self, stix_objects, extras, update=False):
+        if len(stix_objects) != len(extras):
+            raise ValueError("stix_objects and extras must have the same length")
+        items = [
+            self._build_import_kwargs(stix_object, item_extras, update)
+            for stix_object, item_extras in zip(stix_objects, extras)
+        ]
+        return self.create_many(items)

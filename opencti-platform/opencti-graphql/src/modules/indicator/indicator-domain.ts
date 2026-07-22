@@ -60,6 +60,7 @@ import { checkDecayExclusionRules, getActiveDecayExclusionRules } from '../decay
 import { getEntitySettingFromCache } from '../../modules/entitySetting/entitySetting-utils';
 import { pushAll } from '../../utils/arrayUtil';
 import type { BasicStoreEntityEntitySetting } from '../entitySetting/entitySetting-types';
+import { promiseMap } from '../../utils/promiseUtils';
 
 export const NO_DECAY_DEFAULT_VALID_PERIOD: number = dayToMs(90);
 export const NO_DECAY_DEFAULT_REVOKED_SCORE: number = 0;
@@ -373,6 +374,12 @@ export const addIndicator = async (context: AuthContext, user: AuthUser, indicat
     await createObservablesFromIndicator(context, user, indicator, created);
   }
   return notify(BUS_TOPICS[ABSTRACT_STIX_DOMAIN_OBJECT].ADDED_TOPIC, created, user);
+};
+
+const INDICATOR_ADD_BATCH_CONCURRENCY = 10;
+
+export const addIndicators = async (context: AuthContext, user: AuthUser, indicators: IndicatorAddInput[]) => {
+  return promiseMap(indicators, (indicator) => addIndicator(context, user, indicator), INDICATOR_ADD_BATCH_CONCURRENCY);
 };
 
 export const MAX_DECAY_HISTORY_POINTS = 50;
