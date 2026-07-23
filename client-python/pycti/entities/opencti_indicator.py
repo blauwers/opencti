@@ -388,7 +388,7 @@ class Indicator:
             "upsertOperations": kwargs.get("upsert_operations", None),
         }
 
-    def create_many(self, items):
+    def create_many(self, items, with_observables=True):
         input_variables = [self._build_create_input(**item) for item in items]
         if any(input_variable is None for input_variable in input_variables):
             self.opencti.app_logger.error(
@@ -398,13 +398,8 @@ class Indicator:
         self.opencti.app_logger.info(
             "Creating Indicator batch", {"count": len(input_variables)}
         )
-        query = """
-            mutation IndicatorsAdd($inputs: [IndicatorAddInput!]!) {
-                indicatorsAdd(inputs: $inputs) {
-                    id
-                    standard_id
-                    entity_type
-                    parent_types
+        observables_selection = (
+            """
                     observables {
                         edges {
                             node {
@@ -414,9 +409,25 @@ class Indicator:
                             }
                         }
                     }
+            """
+            if with_observables
+            else ""
+        )
+        query = (
+            """
+            mutation IndicatorsAdd($inputs: [IndicatorAddInput!]!) {
+                indicatorsAdd(inputs: $inputs) {
+                    id
+                    standard_id
+                    entity_type
+                    parent_types
+            """
+            + observables_selection
+            + """
                 }
             }
         """
+        )
         result = self.opencti.query(query, {"inputs": input_variables})
         return [
             self.opencti.process_multiple_fields(indicator)
@@ -597,4 +608,6 @@ class Indicator:
             self._build_import_kwargs(stix_object, item_extras, update)
             for stix_object, item_extras in zip(stix_objects, extras)
         ]
-        return self.create_many(items)
+        # Batched STIX imports are only used for indicators that cannot create linked
+        # observables, so avoid resolving the relation-backed response field.
+        return self.create_many(items, with_observables=False)
