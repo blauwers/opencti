@@ -102,4 +102,52 @@ describe('createEntityAutoEnrichment', () => {
       stix_objects: '[{"id":"indicator--test"}]',
     });
   });
+
+  it('skips server-side STIX payload loading for deferred connectors', async () => {
+    vi.mocked(getEntitiesListFromCache).mockResolvedValue(
+      connectors.map((connector) => ({ ...connector, enrichment_resolution: 'deferred' })) as never,
+    );
+    const stixLoaders = {
+      loadById: vi.fn().mockResolvedValue('{"id":"indicator--test"}'),
+      bundleById: vi.fn().mockResolvedValue('[{"id":"indicator--test"}]'),
+    };
+
+    await createEntityAutoEnrichment(testContext, testUser, element, element.entity_type, stixLoaders);
+
+    expect(stixLoaders.loadById).not.toHaveBeenCalled();
+    expect(stixLoaders.bundleById).not.toHaveBeenCalled();
+    expect(pushToConnector).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(pushToConnector).mock.calls[0][1].event).toMatchObject({
+      stix_entity: null,
+      stix_objects: null,
+    });
+    expect(vi.mocked(pushToConnector).mock.calls[1][1].event).toMatchObject({
+      stix_entity: null,
+      stix_objects: null,
+    });
+  });
+
+  it('keeps the legacy entity-only payload for existing none connectors', async () => {
+    vi.mocked(getEntitiesListFromCache).mockResolvedValue(
+      connectors.map((connector) => ({ ...connector, enrichment_resolution: 'none' })) as never,
+    );
+    const stixLoaders = {
+      loadById: vi.fn().mockResolvedValue('{"id":"indicator--test"}'),
+      bundleById: vi.fn().mockResolvedValue('[{"id":"indicator--test"}]'),
+    };
+
+    await createEntityAutoEnrichment(testContext, testUser, element, element.entity_type, stixLoaders);
+
+    expect(stixLoaders.loadById).toHaveBeenCalledTimes(1);
+    expect(stixLoaders.bundleById).not.toHaveBeenCalled();
+    expect(pushToConnector).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(pushToConnector).mock.calls[0][1].event).toMatchObject({
+      stix_entity: '{"id":"indicator--test"}',
+      stix_objects: null,
+    });
+    expect(vi.mocked(pushToConnector).mock.calls[1][1].event).toMatchObject({
+      stix_entity: '{"id":"indicator--test"}',
+      stix_objects: null,
+    });
+  });
 });
