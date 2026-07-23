@@ -29,6 +29,7 @@ import {
 } from '../../schema/general';
 import { elCount } from '../../database/engine';
 import { isEmptyField, READ_INDEX_STIX_DOMAIN_OBJECTS } from '../../database/utils';
+import { createdWorksIndexBatchLoader } from '../../domain/work';
 import { cleanupIndicatorPattern, extractObservablesFromIndicatorPattern, extractValidObservablesFromIndicatorPattern } from '../../utils/syntax';
 import { computeValidPeriod, hasSameSourceAlreadyUpdateThisScore, INDICATOR_DEFAULT_SCORE, isDecayEnabled } from './indicator-utils';
 import { addFilter } from '../../utils/filtering/filtering-utils';
@@ -392,7 +393,9 @@ export const addIndicators = async (context: AuthContext, user: AuthUser, indica
   context.batch = batch;
   // Keep singular create semantics, but let same-tick indicator documents share one final index refresh.
   const previousIndexBatchLoader = batch.createdIndicatorsIndexBatchLoader;
+  const previousWorkIndexBatchLoader = batch.createdWorksIndexBatchLoader;
   batch.createdIndicatorsIndexBatchLoader = createdIndicatorsIndexBatchLoader(context, user);
+  batch.createdWorksIndexBatchLoader = createdWorksIndexBatchLoader(context);
   try {
     return await promiseMap(indicators, (indicator) => addIndicator(context, user, indicator), INDICATOR_ADD_BATCH_CONCURRENCY);
   } finally {
@@ -400,6 +403,11 @@ export const addIndicators = async (context: AuthContext, user: AuthUser, indica
       batch.createdIndicatorsIndexBatchLoader = previousIndexBatchLoader;
     } else {
       delete batch.createdIndicatorsIndexBatchLoader;
+    }
+    if (previousWorkIndexBatchLoader) {
+      batch.createdWorksIndexBatchLoader = previousWorkIndexBatchLoader;
+    } else {
+      delete batch.createdWorksIndexBatchLoader;
     }
   }
 };

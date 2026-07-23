@@ -1,9 +1,21 @@
 import moment from 'moment';
 import * as R from 'ramda';
+import DataLoader from 'dataloader';
 import { logApp } from '../config/conf';
 import { AlreadyDeletedError, DatabaseError, FunctionalError } from '../config/errors';
 import { IMPORT_CSV_CONNECTOR, IMPORT_CSV_CONNECTOR_ID } from '../connector/importCsv/importCsv';
-import { elDeleteInstances, elIndex, elLoadById, elPaginate, elRawDeleteByQuery, elUpdate, ES_MINIMUM_FIXED_PAGINATION } from '../database/engine';
+import {
+  BULK_TIMEOUT,
+  elBulk,
+  elDeleteInstances,
+  elIndex,
+  elLoadById,
+  elPaginate,
+  elRawDeleteByQuery,
+  elUpdate,
+  ES_MINIMUM_FIXED_PAGINATION,
+  MAX_BULK_OPERATIONS,
+} from '../database/engine';
 import { internalLoadById } from '../database/middleware-loader';
 import {
   redisAcquireWorkCompletionFlag,
@@ -212,6 +224,21 @@ export const deleteWorkForSource = async (sourceId) => {
   });
 };
 
+export const createdWorksIndexBatchLoader = (context) => {
+  const loadFn = async (works) => {
+    const workGroups = R.splitEvery(MAX_BULK_OPERATIONS, works);
+    for (let index = 0; index < workGroups.length; index += 1) {
+      const body = workGroups[index].flatMap((work) => [
+        { index: { _index: INDEX_HISTORY, _id: work.internal_id } },
+        R.dissoc('_index', work),
+      ]);
+      await elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body });
+    }
+    return works.map(() => true);
+  };
+  return new DataLoader(loadFn, { cache: false });
+};
+
 export const createWork = async (context, user, connector, friendlyName, sourceId, args = {}) => {
   // Create the new work
   const {
@@ -251,7 +278,12 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   if (draftContext) {
     work.draft_context = draftContext;
   }
-  await elIndex(INDEX_HISTORY, work);
+  const workIndexBatchLoader = context.batch?.createdWorksIndexBatchLoader;
+  if (workIndexBatchLoader) {
+    await workIndexBatchLoader.load(work);
+  } else {
+    await elIndex(INDEX_HISTORY, work);
+  }
   const createdWork = await loadWorkById(context, user, workId);
   // If work was created, initialize work on redis
   if (createdWork) {
