@@ -363,6 +363,27 @@ export const inputResolveRefsBatchLoader = (context: AuthContext, user: AuthUser
   };
 };
 
+type CreatedIndicatorIndexInput = {
+  element: Record<string, any>;
+  relations: Record<string, any>[];
+};
+
+export const createdIndicatorsIndexBatchLoader = (context: AuthContext, user: AuthUser) => {
+  const loadFn = async (inputs: ReadonlyArray<CreatedIndicatorIndexInput>): Promise<boolean[]> => {
+    const elements: Record<string, any>[] = [];
+    for (let index = 0; index < inputs.length; index += 1) {
+      const { element, relations } = inputs[index];
+      elements.push(element, ...(relations ?? []));
+    }
+    await elIndexElements(context, user, ENTITY_TYPE_INDICATOR, elements);
+    return inputs.map(() => true);
+  };
+  const dataLoader = new DataLoader<CreatedIndicatorIndexInput, boolean>(loadFn, { maxBatchSize: MAX_BATCH_SIZE, cache: false });
+  return {
+    load: (input: CreatedIndicatorIndexInput) => dataLoader.load(input),
+  };
+};
+
 const checkIfInferenceOperationIsValid = (user: AuthUser, element: BasicStoreBase) => {
   const isRuleManaged = isRuleUser(user);
   const ifElementInferred = isInferredIndex(element._index);
@@ -1311,7 +1332,12 @@ const indexCreatedElement = async (
     }
   }
   // Continue the creation of the element and the connected relations
-  const indexPromise = elIndexElements(context, user, element.entity_type, [element, ...(relations ?? [])]);
+  const indicatorIndexBatchLoader = element.entity_type === ENTITY_TYPE_INDICATOR
+    ? context.batch?.createdIndicatorsIndexBatchLoader
+    : undefined;
+  const indexPromise = indicatorIndexBatchLoader
+    ? indicatorIndexBatchLoader.load({ element, relations: relations ?? [] })
+    : elIndexElements(context, user, element.entity_type, [element, ...(relations ?? [])]);
   const taskPromise = createContainerSharingTask(context, ACTION_TYPE_SHARE, element, relations);
   await BluePromise.all([taskPromise, indexPromise]);
 };

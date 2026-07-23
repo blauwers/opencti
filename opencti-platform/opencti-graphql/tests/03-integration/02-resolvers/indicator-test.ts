@@ -259,6 +259,28 @@ describe('Indicator resolver standard behavior', () => {
     expect((storedBulkIndicator as any)[buildRefRelationKey(RELATION_OBJECT_MARKING)]).toContain(storedMarking.internal_id);
   });
 
+  it('should duplicate indicators in one bulk request resolve to one entity', async () => {
+    const duplicateInput = {
+      name: 'Bulk duplicate indicator',
+      stix_id: 'indicator--36bcd7a9-cd7b-4949-b7ea-b21b247a2217',
+      pattern: "[domain-name:value = 'bulk-duplicate.test']",
+      pattern_type: 'stix',
+      x_opencti_main_observable_type: ENTITY_DOMAIN_NAME,
+      objectMarking: [MARKING_TLP_GREEN],
+    };
+    const indicators = await queryAsAdminWithSuccess({
+      query: BULK_CREATE_QUERY,
+      variables: {
+        inputs: [duplicateInput, duplicateInput],
+      },
+    });
+    const duplicateIndicators = indicators.data?.indicatorsAdd as Array<{ id: string }>;
+
+    expect(duplicateIndicators).toHaveLength(2);
+    expect(duplicateIndicators[0].id).toEqual(duplicateIndicators[1].id);
+    bulkIndicatorInternalIds.push(duplicateIndicators[0].id);
+  });
+
   it('should indicator with same pattern be upsert (not created)', async () => {
     // Create the indicator
     const INDICATOR_TO_CREATE = {

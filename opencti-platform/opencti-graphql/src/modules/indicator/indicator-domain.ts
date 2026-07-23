@@ -1,6 +1,15 @@
 import * as R from 'ramda';
 import moment from 'moment/moment';
-import { createEntity, createRelation, distributionEntities, inputResolveRefs, patchAttribute, storeLoadByIdWithRefs, timeSeriesEntities } from '../../database/middleware';
+import {
+  createEntity,
+  createdIndicatorsIndexBatchLoader,
+  createRelation,
+  distributionEntities,
+  inputResolveRefs,
+  patchAttribute,
+  storeLoadByIdWithRefs,
+  timeSeriesEntities,
+} from '../../database/middleware';
 import { type EntityOptions, fullEntitiesList, pageEntitiesConnection, pageRegardingEntitiesConnection, storeLoadById } from '../../database/middleware-loader';
 import { BUS_TOPICS, extendedErrors, logApp } from '../../config/conf';
 import { notify } from '../../database/redis';
@@ -379,7 +388,20 @@ export const addIndicator = async (context: AuthContext, user: AuthUser, indicat
 const INDICATOR_ADD_BATCH_CONCURRENCY = 10;
 
 export const addIndicators = async (context: AuthContext, user: AuthUser, indicators: IndicatorAddInput[]) => {
-  return promiseMap(indicators, (indicator) => addIndicator(context, user, indicator), INDICATOR_ADD_BATCH_CONCURRENCY);
+  const batch = context.batch ?? {};
+  context.batch = batch;
+  // Keep singular create semantics, but let same-tick indicator documents share one final index refresh.
+  const previousIndexBatchLoader = batch.createdIndicatorsIndexBatchLoader;
+  batch.createdIndicatorsIndexBatchLoader = createdIndicatorsIndexBatchLoader(context, user);
+  try {
+    return await promiseMap(indicators, (indicator) => addIndicator(context, user, indicator), INDICATOR_ADD_BATCH_CONCURRENCY);
+  } finally {
+    if (previousIndexBatchLoader) {
+      batch.createdIndicatorsIndexBatchLoader = previousIndexBatchLoader;
+    } else {
+      delete batch.createdIndicatorsIndexBatchLoader;
+    }
+  }
 };
 
 export const MAX_DECAY_HISTORY_POINTS = 50;
