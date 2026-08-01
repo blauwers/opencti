@@ -401,6 +401,7 @@ class OpenCTIStix2:
         work_id: str = None,
         objects_max_refs: int = 0,
         cleanup_inconsistent_bundle: bool = False,
+        report_expectations: bool = True,
     ) -> Tuple[list, list]:
         """Import a STIX2 bundle from JSON data.
 
@@ -417,6 +418,9 @@ class OpenCTIStix2:
         :param cleanup_inconsistent_bundle: Whether to remove missing references while
             preparing the bundle for import
         :type cleanup_inconsistent_bundle: bool, optional
+        :param report_expectations: Whether to report Work progress per imported item.
+            The batch worker disables this and reports once for the original bundle.
+        :type report_expectations: bool, optional
         :return: Tuple of (imported objects, objects with too many dependencies)
         :rtype: Tuple[list, list]
         """
@@ -428,6 +432,7 @@ class OpenCTIStix2:
             work_id,
             objects_max_refs,
             cleanup_inconsistent_bundle,
+            report_expectations,
         )
 
     def resolve_author(self, title: str) -> Optional[Identity]:
@@ -3395,6 +3400,7 @@ class OpenCTIStix2:
         types: List = None,
         work_id: str = None,
         bundle_id: str = None,
+        report_expectation: bool = True,
     ):
         """Import a single STIX2 item into OpenCTI.
 
@@ -3406,6 +3412,9 @@ class OpenCTIStix2:
         :type types: List, optional
         :param work_id: Work ID for tracking import progress, defaults to None
         :type work_id: str, optional
+        :param report_expectation: Whether to report this item as one Work
+            expectation, defaults to True
+        :type report_expectation: bool, optional
         :return: True on success
         :rtype: bool
         """
@@ -3531,7 +3540,7 @@ class OpenCTIStix2:
                             in types
                         ):
                             self.import_object(item, update, types)
-        if work_id is not None:
+        if work_id is not None and report_expectation:
             self.opencti.work.report_expectation(work_id, None)
         bundles_success_counter.add(1)
         return True
@@ -3543,6 +3552,7 @@ class OpenCTIStix2:
         types: List = None,
         work_id: str = None,
         bundle_id: str = None,
+        report_expectation: bool = True,
     ):
         """Import a single STIX2 item with automatic retry on failures.
 
@@ -3557,6 +3567,9 @@ class OpenCTIStix2:
         :type types: List, optional
         :param work_id: Work ID for tracking import progress, defaults to None
         :type work_id: str, optional
+        :param report_expectation: Whether to report this item as one Work
+            expectation, defaults to True
+        :type report_expectation: bool, optional
         :return: None on success, the failed item on permanent failure
         :rtype: dict or None
         """
@@ -3566,7 +3579,9 @@ class OpenCTIStix2:
         while processing_count <= MAX_PROCESSING_COUNT:
             try:
                 self.opencti.set_retry_number(processing_count)
-                self.import_item(item, update, types, work_id, bundle_id)
+                self.import_item(
+                    item, update, types, work_id, bundle_id, report_expectation
+                )
                 return None
             except (RequestException, Timeout):
                 bundles_timeout_error_counter.add(1)
@@ -3613,7 +3628,7 @@ class OpenCTIStix2:
                 # A draft lock error occurs
                 elif ERROR_TYPE_DRAFT_LOCK in error_msg:
                     bundles_technical_error_counter.add(1)
-                    if work_id is not None:
+                    if work_id is not None and report_expectation:
                         self.opencti.work.api.set_draft_id("")
                         self.opencti.work.report_expectation(
                             work_id,
@@ -3636,7 +3651,7 @@ class OpenCTIStix2:
                     worker_logger.error(
                         "Unrecognized error during bundle import", {"error": error}
                     )
-                    if work_id is not None:
+                    if work_id is not None and report_expectation:
                         item_str = json.dumps(item)
                         self.opencti.work.report_expectation(
                             work_id,
@@ -3653,7 +3668,7 @@ class OpenCTIStix2:
 
         max_retry_error_message = "Max number of retries reached, please see error logs of workers for more details. Bundle will be sent to dead letter queue."
         worker_logger.error(max_retry_error_message)
-        if work_id is not None:
+        if work_id is not None and report_expectation:
             item_str = json.dumps(item)
             self.opencti.work.report_expectation(
                 work_id,
@@ -3678,6 +3693,7 @@ class OpenCTIStix2:
         work_id: str = None,
         objects_max_refs: int = 0,
         cleanup_inconsistent_bundle: bool = False,
+        report_expectations: bool = True,
     ) -> Tuple[list, list]:
         """Import a complete STIX2 bundle into OpenCTI.
 
@@ -3695,6 +3711,9 @@ class OpenCTIStix2:
         :param cleanup_inconsistent_bundle: Whether to remove missing references while
             preparing the bundle for import
         :type cleanup_inconsistent_bundle: bool, optional
+        :param report_expectations: Whether to report Work progress per imported item.
+            The batch worker disables this and reports once for the original bundle.
+        :type report_expectations: bool, optional
         :return: Tuple of (list of successfully imported elements, list of failed/too-large elements)
         :rtype: Tuple[list, list]
         :raises ValueError: If the bundle is not properly formatted or empty
@@ -3722,10 +3741,10 @@ class OpenCTIStix2:
         )
 
         # Report every element ignored during bundle preparation.
-        if work_id is not None:
+        if work_id is not None and report_expectations:
             # Import preparation can collapse duplicate STIX ids into one item.
-            # The intact transport path still adds expectations per submitted
-            # object, so acknowledge those suppressed duplicates here.
+            # Legacy per-item Work accounting still adds expectations per
+            # submitted object, so acknowledge suppressed duplicates here.
             for _ in range(ignored_elements_count):
                 self.opencti.work.report_expectation(work_id, None)
             for incompatible_element in incompatible_elements:
@@ -3752,19 +3771,25 @@ class OpenCTIStix2:
                     "reject_reason": "ELEMENT_TOO_LARGE",
                     "objects_max_refs": objects_max_refs,
                 }
-                self.opencti.work.report_expectation(
-                    work_id,
-                    {
-                        "error": too_large_element_message,
-                        "source": "Element "
-                        + item["id"]
-                        + " is too large and couldn't be processed",
-                    },
-                )
+                if work_id is not None and report_expectations:
+                    self.opencti.work.report_expectation(
+                        work_id,
+                        {
+                            "error": too_large_element_message,
+                            "source": "Element "
+                            + item["id"]
+                            + " is too large and couldn't be processed",
+                        },
+                    )
                 too_large_elements_bundles.append(item)
             else:
                 failed_item = self.import_item_with_retries(
-                    item, update, types, work_id, bundle_id
+                    item,
+                    update,
+                    types,
+                    work_id,
+                    bundle_id,
+                    report_expectations,
                 )
                 if failed_item is not None:
                     too_large_elements_bundles.append(failed_item)

@@ -3,7 +3,7 @@ import datetime
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import pika
 from pika.adapters.blocking_connection import BlockingChannel
@@ -25,6 +25,21 @@ def should_add_legacy_default_split_expectations(
         and "split_bundles" not in data
         and data.get("no_split") is not True
     )
+
+
+def should_report_batch_expectation(data: Dict[str, Any]) -> bool:
+    return data.get("split_bundles") is False
+
+
+def build_batch_expectation_error(
+    content: Dict[str, Any], rejected_items: List[Dict[str, Any]]
+) -> Optional[Dict[str, str]]:
+    if len(rejected_items) == 0:
+        return None
+    return {
+        "error": f"{len(rejected_items)} element(s) failed during batch import",
+        "source": f"Bundle {content.get('id', 'unknown')}",
+    }
 
 
 @dataclass(unsafe_hash=True)
@@ -111,6 +126,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             return "nack"
 
         imported_items = []
+        too_large_items_bundles = []
         start_processing = datetime.datetime.now()
         try:
             # Set the API headers
@@ -138,6 +154,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 if "objects" not in content or len(content["objects"]) == 0:
                     raise ValueError("JSON data type is not a STIX2 bundle")
                 if not should_split_bundles(data, content):
+                    report_batch_expectation = (
+                        work_id is not None and should_report_batch_expectation(data)
+                    )
                     if (
                         work_id is not None
                         and should_add_legacy_default_split_expectations(data, content)
@@ -156,8 +175,16 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                             work_id,
                             self.objects_max_refs,
                             data.get("cleanup_inconsistent_bundle", False),
+                            report_expectations=not report_batch_expectation,
                         )
                     )
+                    if report_batch_expectation:
+                        self.api.work.report_expectation(
+                            work_id,
+                            build_batch_expectation_error(
+                                content, too_large_items_bundles
+                            ),
+                        )
                     if len(too_large_items_bundles) > 0:
                         with pika.BlockingConnection(
                             self.pika_parameters

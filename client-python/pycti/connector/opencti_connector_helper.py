@@ -3727,9 +3727,9 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                     bundle_data["x_opencti_event_version"] = event_version
                 bundle = json.dumps(bundle_data)
                 bundles = [bundle]
-                # The current importer still reports progress per submitted object,
-                # including objects collapsed during import preparation.
-                expectations_number = len(bundle_data["objects"])
+                # The unsplit path is one admitted batch and reports one Work
+                # expectation when the worker finishes the original bundle.
+                expectations_number = 1
 
         if len(bundles) == 0:
             self.metric.inc("error_count")

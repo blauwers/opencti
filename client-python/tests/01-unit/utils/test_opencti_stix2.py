@@ -152,7 +152,9 @@ def test_import_bundle_keeps_original_bundle_id_without_legacy_split(
 
     imported_calls = []
 
-    def fake_import_item_with_retries(item, update, types, work_id, bundle_id):
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
         imported_calls.append((item["id"], bundle_id))
         return None
 
@@ -198,7 +200,9 @@ def test_import_bundle_reports_duplicate_objects_suppressed_during_preparation(
 
     imported_calls = []
 
-    def fake_import_item_with_retries(item, update, types, work_id, bundle_id):
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
         imported_calls.append((item["id"], bundle_id))
         return None
 
@@ -233,6 +237,47 @@ def test_import_bundle_reports_duplicate_objects_suppressed_during_preparation(
         ("indicator--11111111-1111-4111-8111-111111111111", bundle_id)
     ]
     opencti.work.report_expectation.assert_called_once_with("work--1", None)
+
+
+def test_import_bundle_can_defer_expectation_reporting_to_batch_boundary(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    observed_expectation_flags = []
+
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
+        observed_expectation_flags.append(report_expectation)
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    imported, rejected = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--11111111-1111-4111-8111-111111111111",
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                },
+            ],
+        },
+        work_id="work--1",
+        report_expectations=False,
+    )
+
+    assert rejected == []
+    assert imported == [
+        {"id": "indicator--11111111-1111-4111-8111-111111111111", "type": "indicator"}
+    ]
+    assert observed_expectation_flags == [False]
+    opencti.work.report_expectation.assert_not_called()
 
 
 def test_extract_embedded_storage_path_ignores_query_string(

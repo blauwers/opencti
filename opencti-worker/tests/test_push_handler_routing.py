@@ -5,7 +5,9 @@ from unittest.mock import MagicMock
 from src import push_handler
 from src.push_handler import (
     PushHandler,
+    build_batch_expectation_error,
     should_add_legacy_default_split_expectations,
+    should_report_batch_expectation,
     should_split_bundles,
 )
 
@@ -86,6 +88,19 @@ def test_old_multi_object_messages_get_expectations_without_splitting():
     )
 
 
+def test_new_unsplit_messages_report_one_batch_expectation():
+    assert should_report_batch_expectation({"split_bundles": False}) is True
+    assert should_report_batch_expectation({"split_bundles": True}) is False
+    assert should_report_batch_expectation({}) is False
+    assert build_batch_expectation_error({"id": "bundle--1"}, []) is None
+    assert build_batch_expectation_error(
+        {"id": "bundle--1"}, [{"id": "indicator--1"}]
+    ) == {
+        "error": "1 element(s) failed during batch import",
+        "source": "Bundle bundle--1",
+    }
+
+
 def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch):
     handler = build_handler()
 
@@ -107,6 +122,24 @@ def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch
         "bundle--11111111-1111-4111-8111-111111111111"
     )
     assert len(json.loads(imported_raw_content)["objects"]) == 2
+
+
+def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
+    handler = build_handler()
+
+    result = handler.handle_message(
+        build_message(split_bundles=False, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.api.stix2.import_bundle_from_json.assert_called_once()
+    assert (
+        handler.api.stix2.import_bundle_from_json.call_args.kwargs[
+            "report_expectations"
+        ]
+        is False
+    )
+    handler.api.work.report_expectation.assert_called_once_with("work--1", None)
 
 
 def test_handler_requeues_child_bundles_only_for_explicit_split(monkeypatch):

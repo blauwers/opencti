@@ -201,7 +201,7 @@ describe('submitStixBundle', () => {
       executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
       waitUntil: BatchWaitUntil.Materialized,
     });
-    expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-1', 3);
+    expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-1', 1);
     expect(pushToWorkerForConnector).toHaveBeenCalledWith(
       'connector-1',
       expect.objectContaining({
@@ -220,6 +220,6 @@ describe('submitStixBundle', () => {
 
     expect(createWork).toHaveBeenCalledTimes(1);
     expect(admission.workId).toBe('work-created');
-    expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-created', 3);
+    expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-created', 1);
   });
 });

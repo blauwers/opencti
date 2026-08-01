@@ -78,7 +78,7 @@ export const submitStixBundle = async (
   }
   const admission = buildBatchAdmission(connectorId, target_work_id, preparedBundle);
   if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
-    await updateExpectationsNumber(context, user, target_work_id, admission.objectCount);
+    await updateExpectationsNumber(context, user, target_work_id, 1);
   }
   await pushToWorkerForConnector(connectorId, buildBatchQueueMessage(admission, user.internal_id));
   return admission;
