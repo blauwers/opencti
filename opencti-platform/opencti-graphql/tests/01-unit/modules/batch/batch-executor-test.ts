@@ -4,7 +4,11 @@ import {
   BatchSideEffectKind,
   executeBatchMutations,
   executeSingleBatchMutation,
+  getBatchExecutionMetadata,
+  isBatchWriteBoundaryOpen,
+  registerBatchCommitter,
   registerBatchSideEffect,
+  setBatchExecutionMetadata,
   waitForPendingBatchMaterializations,
 } from '../../../../src/modules/batch/batch-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
@@ -129,6 +133,80 @@ describe('batch executor', () => {
       BatchSideEffectKind.AutoEnrichment,
       BatchSideEffectKind.AutoEnrichment,
     ]);
+  });
+
+  it('commits buffered writes once before materialization', async () => {
+    const calls: string[] = [];
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          calls.push('first-write');
+          setBatchExecutionMetadata('buffered-values', ['first']);
+          registerBatchCommitter({
+            key: 'buffered-write',
+            execute: async () => {
+              calls.push(`commit:${getBatchExecutionMetadata<string[]>('buffered-values')?.join(',')}`);
+            },
+          });
+          return 'first-result';
+        },
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => {
+          calls.push('second-write');
+          getBatchExecutionMetadata<string[]>('buffered-values')?.push('second');
+          registerBatchCommitter({
+            key: 'buffered-write',
+            execute: async () => {
+              calls.push(`commit:${getBatchExecutionMetadata<string[]>('buffered-values')?.join(',')}`);
+            },
+          });
+          return 'second-result';
+        },
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.CompatibilityProjection,
+          execute: async () => {
+            calls.push('side-effect');
+          },
+        }],
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'first-write',
+      'second-write',
+      'commit:first,second',
+      'side-effect',
+    ]);
+  });
+
+  it('closes the write boundary before committers and side effects run', async () => {
+    const boundaryStates: boolean[] = [];
+
+    await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        boundaryStates.push(isBatchWriteBoundaryOpen());
+        registerBatchCommitter({
+          key: 'boundary-state',
+          execute: async () => {
+            boundaryStates.push(isBatchWriteBoundaryOpen());
+          },
+        });
+        return 'result';
+      },
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.CompatibilityProjection,
+        execute: async () => {
+          boundaryStates.push(isBatchWriteBoundaryOpen());
+        },
+      }],
+    });
+
+    expect(boundaryStates).toEqual([true, false, false]);
   });
 
   it('defers side effects registered inside raw write helpers', async () => {

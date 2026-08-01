@@ -95,7 +95,7 @@ import {
 import { isBasicObject, isStixCoreObject, isStixObject } from '../schema/stixCoreObject';
 import { isBasicRelationship, isStixRelationship } from '../schema/stixRelationship';
 import { isStixCoreRelationship, RELATION_INDICATES, RELATION_LOCATED_AT, RELATION_PUBLISHES, RELATION_RELATED_TO, STIX_CORE_RELATIONSHIPS } from '../schema/stixCoreRelationship';
-import { generateInternalId, INTERNAL_FROM_FIELD, INTERNAL_TO_FIELD } from '../schema/identifier';
+import { generateInternalId, getInstanceIds, INTERNAL_FROM_FIELD, INTERNAL_TO_FIELD } from '../schema/identifier';
 import {
   BYPASS,
   computeUserMemberAccessIds,
@@ -197,6 +197,7 @@ import { getRoleAssumerWithWebIdentity } from '../utils/awsSdk';
 import { elConvertHits, elConvertHitsToMap, INNER_HITS_WINDOWS_SIZE } from './engine-data-converter';
 import { isEsScriptFilterEnabled } from './engine-config';
 import { AbortError } from 'node-fetch';
+import { getBatchExecutionMetadata, isBatchWriteBoundaryOpen, registerBatchCommitter, setBatchExecutionMetadata } from '../modules/batch/batch-executor';
 
 const ELK_ENGINE = 'elk';
 const OPENSEARCH_ENGINE = 'opensearch';
@@ -228,6 +229,18 @@ export const ES_RETRY_ON_CONFLICT = 30;
 export const BULK_TIMEOUT = '1h';
 const ES_MAX_MAPPINGS = 3000;
 const MAX_AGGREGATION_SIZE = 100;
+const BATCH_INDEX_ELEMENTS_METADATA_KEY = 'engine.index-elements';
+
+type BufferedIndexWrite = {
+  context: AuthContext;
+  user: AuthUser;
+  indexingType: string | undefined;
+  elements: Record<string, any>[];
+};
+
+type BufferedIndexState = {
+  writes: BufferedIndexWrite[];
+};
 
 export const ROLE_FROM = 'from';
 export const ROLE_TO = 'to';
@@ -1885,6 +1898,42 @@ export type ElFindByIdsOpts = {
   historyFiltering?: boolean;
 };
 
+const getBufferedIndexState = (): BufferedIndexState | undefined => {
+  return getBatchExecutionMetadata<BufferedIndexState>(BATCH_INDEX_ELEMENTS_METADATA_KEY);
+};
+
+const getBufferedIndexElements = (): Record<string, any>[] => {
+  return getBufferedIndexState()?.writes.flatMap((write) => write.elements) ?? [];
+};
+
+const matchesBufferedIndexElement = (
+  element: Record<string, any>,
+  ids: string[],
+  types: string | string[] | null | undefined,
+): boolean => {
+  const elementIds = getInstanceIds(element);
+  if (!elementIds.some((id) => ids.includes(id))) {
+    return false;
+  }
+  const typeList = Array.isArray(types) ? types : (types ? [types] : []);
+  if (typeList.length === 0) {
+    return true;
+  }
+  return typeList.includes(element.entity_type) || (element.parent_types ?? []).some((type: string) => typeList.includes(type));
+};
+
+const mergeBufferedIndexElements = <T extends BasicStoreBase>(
+  hits: T[],
+  ids: string[],
+  types: string | string[] | null | undefined,
+): T[] => {
+  const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
+  getBufferedIndexElements()
+    .filter((element) => matchesBufferedIndexElement(element, ids, types))
+    .forEach((element) => mergedHits.set(element.internal_id, element as T));
+  return Array.from(mergedHits.values());
+};
+
 // elFindByIds is not defined to use ordering or sorting (ordering is forced by creation date)
 // It's a way to load a bunch of ids and use in list or map
 export const elFindByIds = async <T extends BasicStoreBase>(
@@ -2007,10 +2056,11 @@ export const elFindByIds = async <T extends BasicStoreBase>(
       pushAll(hits, convertedHits);
     }
   }
+  const mergedHits = mergeBufferedIndexElements(hits, processIds, types);
   if (toMap) {
-    return elConvertHitsToMap<T>(hits, { mapWithAllIds });
+    return elConvertHitsToMap<T>(mergedHits, { mapWithAllIds });
   }
-  return hits;
+  return mergedHits;
 };
 export const elLoadById = async <T extends BasicStoreBase>(
   context: AuthContext,
@@ -4760,7 +4810,53 @@ const validateElementsToIndex = (context: AuthContext, user: AuthUser, elements:
     throw UnsupportedError('Cannot index unsupported element in draft context');
   }
 };
-export const elIndexElements = async (
+
+const flushBufferedIndexElements = async (state: BufferedIndexState) => {
+  const groups: BufferedIndexWrite[] = [];
+  state.writes.forEach((write) => {
+    const existingGroup = groups.find((group) => group.context === write.context && group.user === write.user);
+    if (existingGroup) {
+      existingGroup.elements.push(...write.elements);
+      if (existingGroup.indexingType !== write.indexingType) {
+        existingGroup.indexingType = 'batch';
+      }
+    } else {
+      groups.push({
+        ...write,
+        elements: [...write.elements],
+      });
+    }
+  });
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    await elIndexElementsNow(group.context, group.user, group.indexingType, group.elements);
+  }
+};
+
+const bufferIndexElements = (
+  context: AuthContext,
+  user: AuthUser,
+  indexingType: string | undefined,
+  elements: Record<string, any>[],
+): boolean => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return false;
+  }
+  let state = getBufferedIndexState();
+  if (!state) {
+    state = { writes: [] };
+    setBatchExecutionMetadata(BATCH_INDEX_ELEMENTS_METADATA_KEY, state);
+    registerBatchCommitter({
+      key: BATCH_INDEX_ELEMENTS_METADATA_KEY,
+      execute: () => flushBufferedIndexElements(state as BufferedIndexState),
+    });
+  }
+  state.writes.push({ context, user, indexingType, elements });
+  return true;
+};
+
+const elIndexElementsNow = async (
   context: AuthContext,
   user: AuthUser,
   indexingType: string | undefined,
@@ -4915,6 +5011,19 @@ export const elIndexElements = async (
     // Deprecated attribute to be removed when transition done
     [SEMATTRS_DB_OPERATION]: 'insert',
   }, elIndexElementsFn);
+};
+
+export const elIndexElements = async (
+  context: AuthContext,
+  user: AuthUser,
+  indexingType: string | undefined,
+  elements: Record<string, any>[],
+) => {
+  validateElementsToIndex(context, user, elements);
+  if (bufferIndexElements(context, user, indexingType, elements)) {
+    return elements.length;
+  }
+  return elIndexElementsNow(context, user, indexingType, elements);
 };
 
 export const elUpdateRelationConnections = async (context: AuthContext, elements: any[]) => {

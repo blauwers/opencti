@@ -18,6 +18,11 @@ export interface BatchSideEffect {
   execute: () => Promise<void>;
 }
 
+export interface BatchCommitter {
+  key: string;
+  execute: () => Promise<void>;
+}
+
 export interface BatchMutation<T> {
   kind: BatchMutationKind;
   executeWrite: () => Promise<T>;
@@ -43,7 +48,10 @@ export interface BatchExecutionResult<T> {
 }
 
 interface BatchExecutionState {
+  committers: Map<string, BatchCommitter>;
+  metadata: Map<string, unknown>;
   sideEffects: BatchSideEffect[];
+  writeBoundaryOpen: boolean;
 }
 
 const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionState>();
@@ -75,6 +83,40 @@ const materializeSideEffects = async (state: BatchExecutionState) => {
   for (let index = 0; index < state.sideEffects.length; index += 1) {
     await state.sideEffects[index].execute();
   }
+};
+
+const commitWrites = async (state: BatchExecutionState) => {
+  for (const committer of state.committers.values()) {
+    await committer.execute();
+  }
+};
+
+export const hasActiveBatchExecution = (): boolean => {
+  return batchExecutionStorage.getStore() !== undefined;
+};
+
+export const isBatchWriteBoundaryOpen = (): boolean => {
+  return batchExecutionStorage.getStore()?.writeBoundaryOpen === true;
+};
+
+export const getBatchExecutionMetadata = <T>(key: string): T | undefined => {
+  return batchExecutionStorage.getStore()?.metadata.get(key) as T | undefined;
+};
+
+export const setBatchExecutionMetadata = <T>(key: string, value: T): void => {
+  const state = batchExecutionStorage.getStore();
+  if (state) {
+    state.metadata.set(key, value);
+  }
+};
+
+export const registerBatchCommitter = (committer: BatchCommitter): boolean => {
+  const state = batchExecutionStorage.getStore();
+  if (!state) {
+    return false;
+  }
+  state.committers.set(committer.key, committer);
+  return true;
 };
 
 export const registerBatchSideEffect = async (sideEffect: BatchSideEffect): Promise<void> => {
@@ -113,9 +155,16 @@ export const executeBatchMutations = async <T>(
     };
   }
 
-  const state: BatchExecutionState = { sideEffects: [] };
+  const state: BatchExecutionState = {
+    committers: new Map(),
+    metadata: new Map(),
+    sideEffects: [],
+    writeBoundaryOpen: true,
+  };
   return batchExecutionStorage.run(state, async () => {
     const results = await executeWrites(mutations, state);
+    state.writeBoundaryOpen = false;
+    await commitWrites(state);
     const materialization = materializeSideEffects(state);
     const hasSideEffects = state.sideEffects.length > 0;
     if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
