@@ -29,6 +29,8 @@ import { objectOrganization, RELATION_GRANTED_TO } from '../schema/stixRefRelati
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../modules/organization/organization-types';
 import { elFindByIds } from '../database/engine';
 import { addExportGeneratedCount } from '../manager/telemetryManager';
+import { buildBatchAdmission, buildBatchQueueMessage, prepareBundleSubmission } from '../modules/batch/batch-domain';
+import { BatchExecutionMode } from '../modules/batch/batch-types';
 
 export const stixDelete = async (context, user, id, opts = {}) => {
   const element = await internalLoadById(context, user, id);
@@ -54,6 +56,34 @@ export const stixObjectMerge = async (context, user, targetId, sourceIds) => {
   return mergeEntities(context, user, targetId, sourceIds);
 };
 
+export const submitStixBundle = async (
+  context,
+  user,
+  connectorId,
+  bundle,
+  work_id,
+  options = {},
+) => {
+  const preparedBundle = prepareBundleSubmission(bundle, options);
+  // Create work and send the bundle to ingestion.
+  const connector = await storeLoadById(context, user, connectorId, ENTITY_TYPE_CONNECTOR);
+  if (!connector) {
+    throw UnsupportedError('Invalid connector', { connectorId });
+  }
+  let target_work_id = work_id;
+  if (isEmptyField(work_id)) {
+    const workName = `${connector.name} run @ ${now()}`;
+    const work = await createWork(context, user, connector, workName, connector.internal_id, { receivedTime: now() });
+    target_work_id = work.id;
+  }
+  const admission = buildBatchAdmission(connectorId, target_work_id, preparedBundle);
+  if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
+    await updateExpectationsNumber(context, user, target_work_id, admission.objectCount);
+  }
+  await pushToWorkerForConnector(connectorId, buildBatchQueueMessage(admission, user.internal_id));
+  return admission;
+};
+
 export const sendStixBundle = async (
   context,
   user,
@@ -64,36 +94,9 @@ export const sendStixBundle = async (
   cleanup_inconsistent_bundle = false,
 ) => {
   try {
-    // 01. Simple check bundle
-    const jsonBundle = JSON.parse(bundle);
-    if (jsonBundle.type !== 'bundle' || !jsonBundle.objects || jsonBundle.objects.length === 0) {
-      throw UnsupportedError('Invalid stix bundle', { work_id });
-    }
-    // 02. Create work and send the bundle to ingestion
-    const connector = await storeLoadById(context, user, connectorId, ENTITY_TYPE_CONNECTOR);
-    if (!connector) {
-      throw UnsupportedError('Invalid connector', { connectorId });
-    }
-    const splitBundles = split_bundles === true;
-    let target_work_id = work_id;
-    if (isEmptyField(work_id)) {
-      const workName = `${connector.name} run @ ${now()}`;
-      const work = await createWork(context, user, connector, workName, connector.internal_id, { receivedTime: now() });
-      target_work_id = work.id;
-    }
-    if (!splitBundles) {
-      await updateExpectationsNumber(context, user, target_work_id, jsonBundle.objects.length);
-    }
-    const content = Buffer.from(bundle, 'utf-8').toString('base64');
-    await pushToWorkerForConnector(connectorId, {
-      type: 'bundle',
-      applicant_id: user.internal_id,
-      content,
-      work_id: target_work_id,
-      update: true,
-      no_split: !splitBundles,
-      split_bundles: splitBundles,
-      cleanup_inconsistent_bundle: cleanup_inconsistent_bundle === true,
+    await submitStixBundle(context, user, connectorId, bundle, work_id, {
+      splitBundles: split_bundles,
+      cleanupInconsistentBundle: cleanup_inconsistent_bundle,
     });
     return true;
   } catch (err) {

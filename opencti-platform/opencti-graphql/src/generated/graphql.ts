@@ -2105,6 +2105,52 @@ export type BasicRelationship = {
   updated_at: Scalars['DateTime']['output'];
 };
 
+export type BatchAdmission = {
+  __typename?: 'BatchAdmission';
+  batch_id: Scalars['ID']['output'];
+  bundle_id: Scalars['ID']['output'];
+  execution_mode: BatchExecutionMode;
+  execution_preference: BatchExecutionPreference;
+  idempotency_key: Scalars['String']['output'];
+  object_count: Scalars['Int']['output'];
+  object_types: Array<Scalars['String']['output']>;
+  status: BatchAdmissionStatus;
+  wait_until: BatchWaitUntil;
+  work_id: Scalars['ID']['output'];
+};
+
+export enum BatchAdmissionStatus {
+  Accepted = 'ACCEPTED'
+}
+
+export enum BatchExecutionMode {
+  Atomic = 'ATOMIC',
+  Bulk = 'BULK',
+  Compatibility = 'COMPATIBILITY',
+  LegacySplit = 'LEGACY_SPLIT'
+}
+
+export enum BatchExecutionPreference {
+  Atomic = 'ATOMIC',
+  Auto = 'AUTO',
+  Bulk = 'BULK',
+  Compatibility = 'COMPATIBILITY',
+  LegacySplit = 'LEGACY_SPLIT'
+}
+
+export type BatchSubmitOptionsInput = {
+  cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
+  execution_preference?: InputMaybe<BatchExecutionPreference>;
+  idempotency_key?: InputMaybe<Scalars['String']['input']>;
+  split_bundles?: InputMaybe<Scalars['Boolean']['input']>;
+  wait_until?: InputMaybe<BatchWaitUntil>;
+};
+
+export enum BatchWaitUntil {
+  Committed = 'COMMITTED',
+  Materialized = 'MATERIALIZED'
+}
+
 export enum CguStatus {
   Disabled = 'disabled',
   Enabled = 'enabled',
@@ -17445,6 +17491,7 @@ export type Mutation = {
   statusTemplateDelete: Scalars['ID']['output'];
   statusTemplateFieldPatch: StatusTemplate;
   stixBundlePush?: Maybe<Scalars['Boolean']['output']>;
+  stixBundleSubmit: BatchAdmission;
   stixCoreObjectEdit?: Maybe<StixCoreObjectEditMutations>;
   stixCoreObjectsExportAsk?: Maybe<Array<File>>;
   stixCoreObjectsExportPush?: Maybe<Scalars['Boolean']['output']>;
@@ -19606,6 +19653,14 @@ export type MutationStixBundlePushArgs = {
   cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
   connectorId: Scalars['String']['input'];
   split_bundles?: InputMaybe<Scalars['Boolean']['input']>;
+  work_id?: InputMaybe<Scalars['String']['input']>;
+};
+
+
+export type MutationStixBundleSubmitArgs = {
+  bundle: Scalars['String']['input'];
+  connectorId: Scalars['String']['input'];
+  options?: InputMaybe<BatchSubmitOptionsInput>;
   work_id?: InputMaybe<Scalars['String']['input']>;
 };
 
@@ -39678,6 +39733,12 @@ export type ResolversTypes = ResolversObject<{
   BankAccountAddInput: BankAccountAddInput;
   BasicObject: ResolverTypeWrapper<BasicStoreBase>;
   BasicRelationship: ResolverTypeWrapper<ResolversInterfaceTypes<ResolversTypes>['BasicRelationship']>;
+  BatchAdmission: ResolverTypeWrapper<BatchAdmission>;
+  BatchAdmissionStatus: BatchAdmissionStatus;
+  BatchExecutionMode: BatchExecutionMode;
+  BatchExecutionPreference: BatchExecutionPreference;
+  BatchSubmitOptionsInput: BatchSubmitOptionsInput;
+  BatchWaitUntil: BatchWaitUntil;
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
   CGUStatus: CguStatus;
   CSVFeedAddInputFromImport: ResolverTypeWrapper<CsvFeedAddInputFromImport>;
@@ -40823,6 +40884,8 @@ export type ResolversParentTypes = ResolversObject<{
   BankAccountAddInput: BankAccountAddInput;
   BasicObject: BasicStoreBase;
   BasicRelationship: ResolversInterfaceTypes<ResolversParentTypes>['BasicRelationship'];
+  BatchAdmission: BatchAdmission;
+  BatchSubmitOptionsInput: BatchSubmitOptionsInput;
   Boolean: Scalars['Boolean']['output'];
   CSVFeedAddInputFromImport: CsvFeedAddInputFromImport;
   Campaign: Omit<Campaign, 'avatar' | 'cases' | 'connectors' | 'containers' | 'createdBy' | 'editContext' | 'exportFiles' | 'externalReferences' | 'filesFromTemplate' | 'fintelTemplates' | 'groupings' | 'importFiles' | 'jobs' | 'notes' | 'objectLabel' | 'objectMarking' | 'objectOrganization' | 'observedData' | 'opinions' | 'pendingFiles' | 'reports' | 'securityCoverage' | 'status' | 'stixCoreObjectsDistribution' | 'stixCoreRelationships' | 'stixCoreRelationshipsDistribution' | 'x_opencti_inferences'> & { avatar?: Maybe<ResolversParentTypes['OpenCtiFile']>, cases?: Maybe<ResolversParentTypes['CaseConnection']>, connectors?: Maybe<Array<Maybe<ResolversParentTypes['Connector']>>>, containers?: Maybe<ResolversParentTypes['ContainerConnection']>, createdBy?: Maybe<ResolversParentTypes['Identity']>, editContext?: Maybe<Array<ResolversParentTypes['EditUserContext']>>, exportFiles?: Maybe<ResolversParentTypes['FileConnection']>, externalReferences?: Maybe<ResolversParentTypes['ExternalReferenceConnection']>, filesFromTemplate?: Maybe<ResolversParentTypes['FileConnection']>, fintelTemplates?: Maybe<Array<ResolversParentTypes['FintelTemplate']>>, groupings?: Maybe<ResolversParentTypes['GroupingConnection']>, importFiles?: Maybe<ResolversParentTypes['FileConnection']>, jobs?: Maybe<Array<Maybe<ResolversParentTypes['Work']>>>, notes?: Maybe<ResolversParentTypes['NoteConnection']>, objectLabel?: Maybe<Array<ResolversParentTypes['Label']>>, objectMarking?: Maybe<Array<ResolversParentTypes['MarkingDefinition']>>, objectOrganization?: Maybe<Array<ResolversParentTypes['Organization']>>, observedData?: Maybe<ResolversParentTypes['ObservedDataConnection']>, opinions?: Maybe<ResolversParentTypes['OpinionConnection']>, pendingFiles?: Maybe<ResolversParentTypes['FileConnection']>, reports?: Maybe<ResolversParentTypes['ReportConnection']>, securityCoverage?: Maybe<ResolversParentTypes['SecurityCoverage']>, status?: Maybe<ResolversParentTypes['Status']>, stixCoreObjectsDistribution?: Maybe<Array<Maybe<ResolversParentTypes['Distribution']>>>, stixCoreRelationships?: Maybe<ResolversParentTypes['StixCoreRelationshipConnection']>, stixCoreRelationshipsDistribution?: Maybe<Array<Maybe<ResolversParentTypes['Distribution']>>>, x_opencti_inferences?: Maybe<Array<Maybe<ResolversParentTypes['Inference']>>> };
@@ -42473,6 +42536,19 @@ export type BasicRelationshipResolvers<ContextType = any, ParentType extends Res
   standard_id?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   toRole?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   updated_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+}>;
+
+export type BatchAdmissionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchAdmission'] = ResolversParentTypes['BatchAdmission']> = ResolversObject<{
+  batch_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  bundle_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  execution_mode?: Resolver<ResolversTypes['BatchExecutionMode'], ParentType, ContextType>;
+  execution_preference?: Resolver<ResolversTypes['BatchExecutionPreference'], ParentType, ContextType>;
+  idempotency_key?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  object_count?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  object_types?: Resolver<Array<ResolversTypes['String']>, ParentType, ContextType>;
+  status?: Resolver<ResolversTypes['BatchAdmissionStatus'], ParentType, ContextType>;
+  wait_until?: Resolver<ResolversTypes['BatchWaitUntil'], ParentType, ContextType>;
+  work_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
 }>;
 
 export type CsvFeedAddInputFromImportResolvers<ContextType = any, ParentType extends ResolversParentTypes['CSVFeedAddInputFromImport'] = ResolversParentTypes['CSVFeedAddInputFromImport']> = ResolversObject<{
@@ -47956,6 +48032,7 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   statusTemplateDelete?: Resolver<ResolversTypes['ID'], ParentType, ContextType, RequireFields<MutationStatusTemplateDeleteArgs, 'id'>>;
   statusTemplateFieldPatch?: Resolver<ResolversTypes['StatusTemplate'], ParentType, ContextType, RequireFields<MutationStatusTemplateFieldPatchArgs, 'id' | 'input'>>;
   stixBundlePush?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType, RequireFields<MutationStixBundlePushArgs, 'bundle' | 'connectorId'>>;
+  stixBundleSubmit?: Resolver<ResolversTypes['BatchAdmission'], ParentType, ContextType, RequireFields<MutationStixBundleSubmitArgs, 'bundle' | 'connectorId'>>;
   stixCoreObjectEdit?: Resolver<Maybe<ResolversTypes['StixCoreObjectEditMutations']>, ParentType, ContextType, RequireFields<MutationStixCoreObjectEditArgs, 'id'>>;
   stixCoreObjectsExportAsk?: Resolver<Maybe<Array<ResolversTypes['File']>>, ParentType, ContextType, RequireFields<MutationStixCoreObjectsExportAskArgs, 'input'>>;
   stixCoreObjectsExportPush?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType, RequireFields<MutationStixCoreObjectsExportPushArgs, 'entity_type' | 'file' | 'file_markings'>>;
@@ -53548,6 +53625,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   BankAccount?: BankAccountResolvers<ContextType>;
   BasicObject?: BasicObjectResolvers<ContextType>;
   BasicRelationship?: BasicRelationshipResolvers<ContextType>;
+  BatchAdmission?: BatchAdmissionResolvers<ContextType>;
   CSVFeedAddInputFromImport?: CsvFeedAddInputFromImportResolvers<ContextType>;
   Campaign?: CampaignResolvers<ContextType>;
   CampaignConnection?: CampaignConnectionResolvers<ContextType>;

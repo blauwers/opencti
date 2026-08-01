@@ -169,4 +169,5 @@ import './dataSharing/streamCollection-graphql';
 import './retentionRules/retentionRules-graphql';
 import './dataSanity/dataSanity-graphql';
 import './workflow/api/workflow-graphql';
+import './batch/batch-graphql';
 // endregion

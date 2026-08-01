@@ -1,0 +1,48 @@
+enum BatchAdmissionStatus {
+  ACCEPTED
+}
+
+enum BatchExecutionMode {
+  ATOMIC
+  BULK
+  COMPATIBILITY
+  LEGACY_SPLIT
+}
+
+enum BatchExecutionPreference {
+  AUTO
+  ATOMIC
+  BULK
+  COMPATIBILITY
+  LEGACY_SPLIT
+}
+
+enum BatchWaitUntil {
+  COMMITTED
+  MATERIALIZED
+}
+
+input BatchSubmitOptionsInput {
+  wait_until: BatchWaitUntil
+  execution_preference: BatchExecutionPreference
+  idempotency_key: String
+  split_bundles: Boolean
+  cleanup_inconsistent_bundle: Boolean
+}
+
+type BatchAdmission {
+  batch_id: ID!
+  bundle_id: ID!
+  work_id: ID!
+  object_count: Int!
+  object_types: [String!]!
+  execution_preference: BatchExecutionPreference!
+  execution_mode: BatchExecutionMode!
+  wait_until: BatchWaitUntil!
+  status: BatchAdmissionStatus!
+  idempotency_key: String!
+}
+
+type Mutation {
+  stixBundleSubmit(connectorId: String!, bundle: String!, work_id: String, options: BatchSubmitOptionsInput): BatchAdmission! @auth(for: [CONNECTORAPI])
+}
