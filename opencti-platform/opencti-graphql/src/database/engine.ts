@@ -256,7 +256,15 @@ type BufferedUpdateWrite = {
   dataToReplace: Record<string, any>;
 };
 
-type BufferedEngineWrite = BufferedIndexWrite | BufferedUpdateWrite;
+type BufferedDeleteWrite = {
+  kind: 'delete';
+  sequence: number;
+  context: AuthContext;
+  elements: BasicStoreBase[];
+  forceRefresh: boolean;
+};
+
+type BufferedEngineWrite = BufferedIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite;
 
 type BufferedEngineState = {
   nextSequence: number;
@@ -1930,7 +1938,7 @@ const getBufferedEngineElements = (): Array<{ kind: BufferedEngineWrite['kind'];
     .slice()
     .sort((left, right) => left.sequence - right.sequence)
     .forEach((write) => {
-      if (write.kind === 'index') {
+      if (write.kind === 'index' || write.kind === 'delete') {
         write.elements.forEach((element) => elements.push({ kind: write.kind, element }));
       } else {
         elements.push({ kind: write.kind, element: write.instance });
@@ -1975,6 +1983,10 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
   getBufferedEngineElements().forEach(({ kind, element }) => {
     const existing = mergedHits.get(element.internal_id);
+    if (kind === 'delete') {
+      mergedHits.delete(element.internal_id);
+      return;
+    }
     if (!existing && !matchesBufferedEngineElement(element, ids, types)) {
       return;
     }
@@ -4313,7 +4325,7 @@ export const getRelationsToRemove = async <T extends BasicStoreBase>(
   await getRelatedRelations(context, user, ids, relationsToRemove, 0, relationsToRemoveMap, opts);
   return { relations: R.flatten(relationsToRemove), relationsToRemoveMap };
 };
-export const elDeleteInstances = async <T extends BasicStoreBase>(
+const elDeleteInstancesNow = async <T extends BasicStoreBase>(
   context: AuthContext,
   instances: T[],
   opts: { forceRefresh?: boolean } = {},
@@ -4331,6 +4343,16 @@ export const elDeleteInstances = async <T extends BasicStoreBase>(
       await elBulk(context, { refresh: forceRefresh, timeout: BULK_TIMEOUT, body: bodyDelete });
     }
   }
+};
+export const elDeleteInstances = async <T extends BasicStoreBase>(
+  context: AuthContext,
+  instances: T[],
+  opts: { forceRefresh?: boolean } = {},
+) => {
+  if (bufferDeleteInstances(context, instances, opts)) {
+    return;
+  }
+  await elDeleteInstancesNow(context, instances, opts);
 };
 export const elRemoveRelationConnection = async (
   context: AuthContext,
@@ -4904,6 +4926,29 @@ const getOrCreateBufferedEngineState = (): BufferedEngineState | undefined => {
   return state;
 };
 
+const bufferDeleteInstances = <T extends BasicStoreBase>(
+  context: AuthContext,
+  elements: T[],
+  opts: { forceRefresh?: boolean } = {},
+): boolean => {
+  if (elements.length === 0) {
+    return false;
+  }
+  const state = getOrCreateBufferedEngineState();
+  if (!state) {
+    return false;
+  }
+  state.writes.push({
+    kind: 'delete',
+    sequence: state.nextSequence,
+    context,
+    elements,
+    forceRefresh: opts.forceRefresh ?? true,
+  });
+  state.nextSequence += 1;
+  return true;
+};
+
 const bufferIndexElements = (
   context: AuthContext,
   user: AuthUser,
@@ -5115,14 +5160,42 @@ const flushBufferedUpdateElements = async (writes: BufferedUpdateWrite[]) => {
   }
 };
 
-const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
-  const indexWrites = state.writes.filter((write): write is BufferedIndexWrite => write.kind === 'index');
-  const updateWrites = state.writes.filter((write): write is BufferedUpdateWrite => write.kind === 'update');
-  if (indexWrites.length > 0) {
-    await flushBufferedIndexElements(indexWrites);
+const flushBufferedDeleteElements = async (writes: BufferedDeleteWrite[]) => {
+  const groups: Array<{ context: AuthContext; forceRefresh: boolean; elements: BasicStoreBase[] }> = [];
+  writes.forEach((write) => {
+    const existingGroup = groups.find((group) => group.context === write.context && group.forceRefresh === write.forceRefresh);
+    if (existingGroup) {
+      existingGroup.elements.push(...write.elements);
+    } else {
+      groups.push({ context: write.context, forceRefresh: write.forceRefresh, elements: [...write.elements] });
+    }
+  });
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    await elDeleteInstancesNow(group.context, group.elements, { forceRefresh: group.forceRefresh });
   }
-  if (updateWrites.length > 0) {
-    await flushBufferedUpdateElements(updateWrites);
+};
+
+const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
+  const orderedWrites = state.writes.slice().sort((left, right) => left.sequence - right.sequence);
+  let segment: BufferedEngineWrite[] = [];
+  for (let index = 0; index <= orderedWrites.length; index += 1) {
+    const write = orderedWrites[index];
+    const kindChanged = segment.length > 0 && (!write || write.kind !== segment[0].kind);
+    if (kindChanged) {
+      if (segment[0].kind === 'index') {
+        await flushBufferedIndexElements(segment as BufferedIndexWrite[]);
+      } else if (segment[0].kind === 'update') {
+        await flushBufferedUpdateElements(segment as BufferedUpdateWrite[]);
+      } else {
+        await flushBufferedDeleteElements(segment as BufferedDeleteWrite[]);
+      }
+      segment = [];
+    }
+    if (write) {
+      segment.push(write);
+    }
   }
 };
 
