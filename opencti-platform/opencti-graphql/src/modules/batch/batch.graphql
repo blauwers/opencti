@@ -42,6 +42,14 @@ input BatchGraphqlOperationInput {
   query: String!
   variables: String
   operation_name: String
+  files: [BatchGraphqlFileInput!]
+}
+
+input BatchGraphqlFileInput {
+  path: String!
+  name: String!
+  mime_type: String!
+  data: String!
 }
 
 input BatchExecuteOptionsInput {

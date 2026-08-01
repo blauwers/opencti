@@ -2153,7 +2153,15 @@ export enum BatchExecutionReason {
   OperationalBundleCompatibility = 'OPERATIONAL_BUNDLE_COMPATIBILITY'
 }
 
+export type BatchGraphqlFileInput = {
+  data: Scalars['String']['input'];
+  mime_type: Scalars['String']['input'];
+  name: Scalars['String']['input'];
+  path: Scalars['String']['input'];
+};
+
 export type BatchGraphqlOperationInput = {
+  files?: InputMaybe<Array<BatchGraphqlFileInput>>;
   operation_name?: InputMaybe<Scalars['String']['input']>;
   query: Scalars['String']['input'];
   variables?: InputMaybe<Scalars['String']['input']>;
@@ -39777,6 +39785,7 @@ export type ResolversTypes = ResolversObject<{
   BatchExecutionMode: BatchExecutionMode;
   BatchExecutionPreference: BatchExecutionPreference;
   BatchExecutionReason: BatchExecutionReason;
+  BatchGraphqlFileInput: BatchGraphqlFileInput;
   BatchGraphqlOperationInput: BatchGraphqlOperationInput;
   BatchMutationExecution: ResolverTypeWrapper<BatchMutationExecution>;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;
@@ -40928,6 +40937,7 @@ export type ResolversParentTypes = ResolversObject<{
   BasicRelationship: ResolversInterfaceTypes<ResolversParentTypes>['BasicRelationship'];
   BatchAdmission: BatchAdmission;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
+  BatchGraphqlFileInput: BatchGraphqlFileInput;
   BatchGraphqlOperationInput: BatchGraphqlOperationInput;
   BatchMutationExecution: BatchMutationExecution;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;

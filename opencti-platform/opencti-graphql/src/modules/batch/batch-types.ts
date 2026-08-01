@@ -102,4 +102,12 @@ export interface BatchGraphqlOperationInput {
   query: string;
   variables?: string | null;
   operationName?: string | null;
+  files?: BatchGraphqlFileInput[] | null;
+}
+
+export interface BatchGraphqlFileInput {
+  path: string;
+  name: string;
+  mimeType: string;
+  data: string;
 }

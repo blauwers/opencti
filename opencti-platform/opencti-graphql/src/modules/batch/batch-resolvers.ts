@@ -1,7 +1,7 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
 import { executeBatchGraphqlOperations } from './batch-operation-executor';
-import type { BatchExecutionMode, BatchExecutionPreference, BatchGraphqlOperationInput, BatchWaitUntil } from './batch-types';
+import type { BatchExecutionMode, BatchExecutionPreference, BatchGraphqlFileInput, BatchGraphqlOperationInput, BatchWaitUntil } from './batch-types';
 
 interface BatchSubmitOptionsInput {
   wait_until?: BatchWaitUntil | null;
@@ -20,6 +20,14 @@ interface BatchGraphqlOperationInputValue {
   query: string;
   variables?: string | null;
   operation_name?: string | null;
+  files?: BatchGraphqlFileInputValue[] | null;
+}
+
+interface BatchGraphqlFileInputValue {
+  path: string;
+  name: string;
+  mime_type: string;
+  data: string;
 }
 
 const batchResolvers = {
@@ -52,6 +60,12 @@ const batchResolvers = {
       query: operation.query,
       variables: operation.variables,
       operationName: operation.operation_name,
+      files: operation.files?.map((file): BatchGraphqlFileInput => ({
+        path: file.path,
+        name: file.name,
+        mimeType: file.mime_type,
+        data: file.data,
+      })),
     })), {
       executionMode: options?.execution_mode ?? undefined,
       waitUntil: options?.wait_until ?? undefined,

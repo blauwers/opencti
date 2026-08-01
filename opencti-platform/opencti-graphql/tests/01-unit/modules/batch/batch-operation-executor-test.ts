@@ -1,4 +1,5 @@
 import { makeExecutableSchema } from '@graphql-tools/schema';
+import GraphQLUpload from 'graphql-upload/GraphQLUpload.mjs';
 import { describe, expect, it } from 'vitest';
 import {
   BatchSideEffectKind,
@@ -6,7 +7,7 @@ import {
   registerBatchCommitter,
   registerBatchSideEffect,
 } from '../../../../src/modules/batch/batch-executor';
-import { executeBatchGraphqlOperations } from '../../../../src/modules/batch/batch-operation-executor';
+import { buildBatchGraphqlResultToken, executeBatchGraphqlOperations } from '../../../../src/modules/batch/batch-operation-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
 const buildSchema = (calls: string[]) => makeExecutableSchema({
@@ -15,13 +16,18 @@ const buildSchema = (calls: string[]) => makeExecutableSchema({
       status: String!
     }
 
+    scalar Upload
+
     type Mutation {
       record(value: String!): String!
+      echo(value: String!): String!
+      upload(file: Upload!): String!
       fail: String!
       batchMutationsExecute: String!
     }
   `,
   resolvers: {
+    Upload: GraphQLUpload,
     Query: {
       status: () => 'ok',
     },
@@ -40,6 +46,20 @@ const buildSchema = (calls: string[]) => makeExecutableSchema({
             calls.push(`side-effect:${value}:${isBatchWriteBoundaryOpen()}`);
           },
         });
+        return value;
+      },
+      echo: (_: unknown, { value }: { value: string }) => {
+        calls.push(`echo:${value}`);
+        return value;
+      },
+      upload: async (_: unknown, { file }: { file: Promise<{ createReadStream: () => NodeJS.ReadableStream }> }) => {
+        const upload = await file;
+        const chunks: Buffer[] = [];
+        for await (const chunk of upload.createReadStream()) {
+          chunks.push(Buffer.from(chunk));
+        }
+        const value = Buffer.concat(chunks).toString('utf8');
+        calls.push(`upload:${value}`);
         return value;
       },
       fail: () => {
@@ -120,5 +140,41 @@ describe('batch GraphQL operation executor', () => {
     ])).rejects.toThrow('Batch GraphQL operation failed');
 
     expect(calls).toEqual([]);
+  });
+
+  it('substitutes prior result tokens and hydrates file inputs before execution', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [
+      { query: 'mutation Record { record(value: "source") }' },
+      {
+        query: 'mutation Echo($value: String!) { echo(value: $value) }',
+        variables: JSON.stringify({ value: buildBatchGraphqlResultToken(0, ['record']) }),
+      },
+      {
+        query: 'mutation Upload($file: Upload!) { upload(file: $file) }',
+        variables: JSON.stringify({ file: null }),
+        files: [{
+          path: 'file',
+          name: 'sample.txt',
+          mimeType: 'text/plain',
+          data: Buffer.from('payload').toString('base64'),
+        }],
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'write:source:true',
+      'echo:source',
+      'upload:payload',
+      'commit:false',
+      'side-effect:source:false',
+    ]);
+    expect(execution.results).toEqual([
+      { record: 'source' },
+      { echo: 'source' },
+      { upload: 'payload' },
+    ]);
   });
 });
