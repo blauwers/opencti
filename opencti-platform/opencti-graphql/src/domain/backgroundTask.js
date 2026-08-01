@@ -138,7 +138,7 @@ export const createRuleTask = async (context, user, ruleDefinition, input) => {
   const countExpected = queryData.pageInfo.globalCount;
   const task = await createDefaultTask(context, user, input, TASK_TYPE_RULE, countExpected);
   const ruleTask = { ...task, rule, enable };
-  await elIndex(INDEX_INTERNAL_OBJECTS, ruleTask);
+  await elIndex(INDEX_INTERNAL_OBJECTS, ruleTask, { context });
   return ruleTask;
 };
 
@@ -165,7 +165,7 @@ export const createQueryTask = async (context, user, input) => {
     message: 'creates `background task`',
     context_data: { entity_type: ENTITY_TYPE_BACKGROUND_TASK, input: queryTask },
   });
-  await elIndex(INDEX_INTERNAL_OBJECTS, queryTask);
+  await elIndex(INDEX_INTERNAL_OBJECTS, queryTask, { context });
   return queryTask;
 };
 

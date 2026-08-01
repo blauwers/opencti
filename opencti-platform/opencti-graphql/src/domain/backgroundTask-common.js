@@ -421,6 +421,6 @@ export const createListTask = async (context, user, input) => {
     message: 'creates `background task`',
     context_data: { entity_type: ENTITY_TYPE_BACKGROUND_TASK, input: listTask },
   });
-  await elIndex(INDEX_INTERNAL_OBJECTS, listTask);
+  await elIndex(INDEX_INTERNAL_OBJECTS, listTask, { context });
   return listTask;
 };

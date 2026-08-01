@@ -251,7 +251,7 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   if (draftContext) {
     work.draft_context = draftContext;
   }
-  await elIndex(INDEX_HISTORY, work);
+  await elIndex(INDEX_HISTORY, work, { context });
   const createdWork = await loadWorkById(context, user, workId);
   // If work was created, initialize work on redis
   if (createdWork) {

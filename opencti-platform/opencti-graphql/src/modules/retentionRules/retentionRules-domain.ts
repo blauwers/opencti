@@ -84,7 +84,7 @@ export const createRetentionRule = async (context: AuthContext, user: AuthUser, 
     active: input.active ?? true,
     filters,
   };
-  await elIndex(INDEX_INTERNAL_OBJECTS, retentionRule);
+  await elIndex(INDEX_INTERNAL_OBJECTS, retentionRule, { context });
   await publishUserAction({
     user,
     event_type: 'mutation',

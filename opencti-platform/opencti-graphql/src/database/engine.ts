@@ -255,6 +255,15 @@ type BufferedRawIndexWrite = {
   overlayElements: BasicStoreBase[];
 };
 
+type BufferedDirectIndexWrite = {
+  kind: 'direct-index';
+  sequence: number;
+  context: AuthContext;
+  documents: Record<string, any>[];
+  overlayElements: BasicStoreBase[];
+  refresh: boolean;
+};
+
 type BufferedUpdateWrite = {
   kind: 'update';
   sequence: number;
@@ -289,7 +298,7 @@ type BufferedBulkUpdateWrite = {
   forceRefresh: boolean;
 };
 
-type BufferedEngineWrite = BufferedIndexWrite | BufferedRawIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite | BufferedBulkUpdateWrite;
+type BufferedEngineWrite = BufferedIndexWrite | BufferedRawIndexWrite | BufferedDirectIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite | BufferedBulkUpdateWrite;
 
 type BufferedEngineState = {
   nextSequence: number;
@@ -2003,6 +2012,18 @@ const applyBufferedUpdate = <T extends Record<string, any>>(existing: T | undefi
   return updated as T;
 };
 
+const getBufferedWriteElements = (
+  write: Exclude<BufferedEngineWrite, BufferedBulkUpdateWrite>,
+): BasicStoreBase[] => {
+  if (write.kind === 'update') {
+    return [write.instance];
+  }
+  if (write.kind === 'raw-index' || write.kind === 'direct-index') {
+    return write.overlayElements;
+  }
+  return write.elements as BasicStoreBase[];
+};
+
 const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   hits: T[],
   ids: string[],
@@ -2020,7 +2041,7 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
       });
       return;
     }
-    const elements = write.kind === 'update' ? [write.instance] : (write.kind === 'raw-index' ? write.overlayElements : write.elements);
+    const elements = getBufferedWriteElements(write);
     elements.forEach((element) => {
       const existing = mergedHits.get(element.internal_id);
       const matchesQuery = matchesBufferedEngineElement(element, ids, types, indices);
@@ -2185,7 +2206,7 @@ const getBufferedEngineElementIds = (): string[] => {
       ids.push(write.instance.internal_id);
       return;
     }
-    const elements = write.kind === 'raw-index' ? write.overlayElements : write.elements;
+    const elements = getBufferedWriteElements(write);
     ids.push(...elements.map((element) => element.internal_id));
   });
   return R.uniq(ids.filter((id) => isNotEmptyField(id)));
@@ -4248,12 +4269,15 @@ export const elBulk = async (context: AuthContext, args: any) => {
 export const elIndex = async (
   indexName: string[] | string | undefined,
   documentBody: Record<string, any>,
-  opts: { refresh?: boolean; pipeline?: any } = {},
+  opts: { refresh?: boolean; pipeline?: any; context?: AuthContext } = {},
 ) => {
-  const { refresh = true, pipeline } = opts;
+  const { refresh = true, pipeline, context } = opts;
   const documentId = documentBody.internal_id;
   const entityType = documentBody.entity_type ? documentBody.entity_type : '';
   logApp.debug(`[SEARCH] index > ${entityType} ${documentId} in ${indexName}`, { documentBody });
+  if (!pipeline && context && await bufferDirectIndexDocument(context, indexName, documentBody, refresh)) {
+    return documentBody;
+  }
   let indexParams: any = {
     index: indexName,
     id: documentBody.internal_id,
@@ -4783,7 +4807,8 @@ const applyBufferedWritesToRawDocument = (source: Record<string, any>, internalI
       return;
     }
     if ((write.kind === 'index' && write.elements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex)))
-      || (write.kind === 'raw-index' && write.overlayElements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex)))) {
+      || (write.kind === 'raw-index' && write.overlayElements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex)))
+      || (write.kind === 'direct-index' && write.overlayElements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex)))) {
       needsVisibleElement = true;
     }
   });
@@ -4877,6 +4902,45 @@ const bufferReindexElements = async (
     context,
     documents,
     overlayElements,
+  });
+  state.nextSequence += 1;
+  return true;
+};
+
+const buildBufferedOverlayElements = async (documents: Record<string, any>[]) => {
+  return elConvertHits<BasicStoreBase>(documents.map((document) => ({
+    _index: document._index,
+    _id: document._id ?? document.internal_id,
+    _source: R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+  })));
+};
+
+const bufferDirectIndexDocument = async (
+  context: AuthContext,
+  indexName: string[] | string | undefined,
+  documentBody: Record<string, any>,
+  refresh: boolean,
+) => {
+  if (typeof indexName !== 'string' || isEmptyField(documentBody.internal_id)) {
+    return false;
+  }
+  const state = getOrCreateBufferedEngineState();
+  if (!state) {
+    return false;
+  }
+  const document = {
+    ...documentBody,
+    _index: indexName,
+    _id: documentBody._id ?? documentBody.internal_id,
+  };
+  const overlayElements = await buildBufferedOverlayElements([document]);
+  state.writes.push({
+    kind: 'direct-index',
+    sequence: state.nextSequence,
+    context,
+    documents: [document],
+    overlayElements,
+    refresh,
   });
   state.nextSequence += 1;
   return true;
@@ -5353,6 +5417,32 @@ const flushBufferedRawIndexElements = async (writes: BufferedRawIndexWrite[]) =>
   }
 };
 
+const flushBufferedDirectIndexElements = async (writes: BufferedDirectIndexWrite[]) => {
+  const groups: Array<{ context: AuthContext; refresh: boolean; documents: Record<string, any>[] }> = [];
+  writes.forEach((write) => {
+    const existingGroup = groups.find((group) => group.context === write.context && group.refresh === write.refresh);
+    if (existingGroup) {
+      existingGroup.documents.push(...write.documents);
+    } else {
+      groups.push({ context: write.context, refresh: write.refresh, documents: [...write.documents] });
+    }
+  });
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    const groupsOfDocuments = R.splitEvery(MAX_BULK_OPERATIONS, group.documents);
+    for (let documentIndex = 0; documentIndex < groupsOfDocuments.length; documentIndex += 1) {
+      const body = groupsOfDocuments[documentIndex].flatMap((document) => [
+        { index: { _index: document._index, _id: document._id ?? document.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+        R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+      ]);
+      if (body.length > 0) {
+        await elBulk(group.context, { refresh: group.refresh, timeout: BULK_TIMEOUT, body });
+      }
+    }
+  }
+};
+
 const getOrCreateBufferedEngineState = (): BufferedEngineState | undefined => {
   if (!isBatchWriteBoundaryOpen()) {
     return undefined;
@@ -5688,6 +5778,8 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
         await flushBufferedIndexElements(segment as BufferedIndexWrite[]);
       } else if (segment[0].kind === 'raw-index') {
         await flushBufferedRawIndexElements(segment as BufferedRawIndexWrite[]);
+      } else if (segment[0].kind === 'direct-index') {
+        await flushBufferedDirectIndexElements(segment as BufferedDirectIndexWrite[]);
       } else if (segment[0].kind === 'update') {
         await flushBufferedUpdateElements(segment as BufferedUpdateWrite[]);
       } else if (segment[0].kind === 'delete') {

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
-import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
+import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elIndex, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById, mergeEntities } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { elIndexFiles } from '../../../src/database/file-search';
@@ -9,10 +9,11 @@ import { fileToReadStream, uploadToStorage } from '../../../src/database/file-st
 import { getFileContent } from '../../../src/database/raw-file-storage';
 import { findById as findDocumentById, IMPORT_STORAGE_PATH } from '../../../src/modules/internal/document/document-domain';
 import { addMalware } from '../../../src/domain/malware';
+import { loadWorkById } from '../../../src/domain/work';
 import { addStixCyberObservable, stixCyberObservableDelete } from '../../../src/domain/stixCyberObservable';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
-import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS, INDEX_FILES } from '../../../src/database/utils';
+import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS, INDEX_FILES, INDEX_HISTORY } from '../../../src/database/utils';
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
 import { updatePirInformationOnEntity } from '../../../src/modules/pir/pir-utils';
@@ -22,6 +23,7 @@ import { FilterMode, FilterOperator, VocabularyCategory } from '../../../src/gen
 import { buildRefRelationKey } from '../../../src/schema/general';
 import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
 import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
+import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 
 describe('batch engine writes', () => {
@@ -31,6 +33,7 @@ describe('batch engine writes', () => {
   const cleanupObservables: any[] = [];
   const cleanupSoftDeletedMalwareIds: string[] = [];
   const cleanupVocabularies: any[] = [];
+  const cleanupWorkIds: string[] = [];
 
   const findDeleteOperationsForMainEntity = (mainEntityId: string) => {
     return fullEntitiesList<any>(testContext, ADMIN_USER, [ENTITY_TYPE_DELETE_OPERATION], {
@@ -76,6 +79,17 @@ describe('batch engine writes', () => {
     });
   };
 
+  const buildDirectWork = () => ({
+    internal_id: `work--${uuidv4()}`,
+    entity_type: ENTITY_TYPE_WORK,
+    name: `Batch direct work ${uuidv4()}`,
+    timestamp: Date.now(),
+    updated_at: new Date().toISOString(),
+    status: 'wait',
+    messages: [],
+    errors: [],
+  });
+
   afterAll(async () => {
     if (malware) {
       await deleteElementById(testContext, ADMIN_USER, malware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
@@ -111,6 +125,12 @@ describe('batch engine writes', () => {
       const existing = await internalLoadById(testContext, ADMIN_USER, cleanupVocabulary.internal_id);
       if (existing) {
         await deleteElementById(testContext, ADMIN_USER, cleanupVocabulary.internal_id, ENTITY_TYPE_VOCABULARY, { forceDelete: true });
+      }
+    }
+    for (let index = 0; index < cleanupWorkIds.length; index += 1) {
+      const cleanupWork = await loadWorkById(testContext, ADMIN_USER, cleanupWorkIds[index]);
+      if (cleanupWork) {
+        await elDeleteInstances(testContext, [cleanupWork]);
       }
     }
   });
@@ -218,6 +238,48 @@ describe('batch engine writes', () => {
     const committed = await internalLoadById(testContext, ADMIN_USER, rawUpdateMalware.internal_id) as any;
     expect(committed.description).toBe('raw doc update');
     expect(committed.confidence).toBe(64);
+  });
+
+  it('keeps direct index writes inside the batch boundary until commit', async () => {
+    const directWork = buildDirectWork();
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          await elIndex(INDEX_HISTORY, directWork, { context: testContext });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await loadWorkById(testContext, ADMIN_USER, directWork.internal_id) as any;
+          expect(buffered?.name).toBe(directWork.name);
+          throw new Error('abort direct index batch');
+        },
+      },
+    ])).rejects.toThrow('abort direct index batch');
+
+    await expect(loadWorkById(testContext, ADMIN_USER, directWork.internal_id)).resolves.toBeUndefined();
+  });
+
+  it('materializes direct index writes after batch commit', async () => {
+    const directWork = buildDirectWork();
+    cleanupWorkIds.push(directWork.internal_id);
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          await elIndex(INDEX_HISTORY, directWork, { context: testContext });
+          return null;
+        },
+      },
+    ]);
+
+    const committed = await loadWorkById(testContext, ADMIN_USER, directWork.internal_id) as any;
+    expect(committed?.name).toBe(directWork.name);
   });
 
   it('buffers connection rewrites and exposes them to later mutations in the same batch', async () => {

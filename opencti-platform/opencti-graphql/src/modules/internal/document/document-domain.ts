@@ -71,7 +71,7 @@ export const indexFileToDocument = async (context: AuthContext, file: any) => {
   } else if (getDraftContext(context)) {
     indexToTarget = INDEX_DRAFT_OBJECTS;
   }
-  return elIndex(indexToTarget, data);
+  return elIndex(indexToTarget, data, { context });
 };
 
 export const deleteDocumentIndex = async (context: AuthContext, user: AuthUser, id: string) => {
