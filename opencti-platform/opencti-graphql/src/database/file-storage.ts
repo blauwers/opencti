@@ -284,18 +284,7 @@ export const copyFile = async (
   try {
     await rawCopyFile(sourceId, targetId);
     // Register in elastic
-    const targetMetadata = { ...sourceDocument.metaData, entity_id: targetEntityId };
-
-    const file = {
-      id: targetId,
-      name: sourceDocument.name,
-      size: sourceDocument.size,
-      information: '',
-      lastModified: new Date(),
-      lastModifiedSinceMin: sinceNowInMinutes(new Date()),
-      metaData: targetMetadata,
-      uploadStatus: 'complete',
-    };
+    const file = buildCopiedFile(targetId, sourceDocument, targetEntityId);
     await indexFileToDocument(context, file);
     logApp.info('[FILE STORAGE] Copy file to S3 in success', { document: file, sourceId, targetId });
     return file;
@@ -303,6 +292,23 @@ export const copyFile = async (
     logApp.error('[FILE STORAGE] Cannot copy file in S3', { cause: err, sourceId, targetId });
     return null;
   }
+};
+
+const buildCopiedFile = (
+  targetId: string,
+  sourceDocument: BasicStoreEntityDocument,
+  targetEntityId: string,
+): LoadedFile => {
+  return {
+    id: targetId,
+    name: sourceDocument.name,
+    size: sourceDocument.size,
+    information: '',
+    lastModified: new Date(),
+    lastModifiedSinceMin: sinceNowInMinutes(new Date()),
+    metaData: { ...sourceDocument.metaData, entity_id: targetEntityId },
+    uploadStatus: 'complete',
+  };
 };
 
 /**
@@ -758,6 +764,19 @@ export const fileToReadStream = (localFilePath: string, localFileName: string, s
 
 export const ALL_ROOT_FOLDERS = [SUPPORT_STORAGE_PATH, IMPORT_STORAGE_PATH, EXPORT_STORAGE_PATH, FROM_TEMPLATE_STORAGE_PATH];
 export const ALL_MERGEABLE_FOLDERS = [IMPORT_STORAGE_PATH, EXPORT_STORAGE_PATH, FROM_TEMPLATE_STORAGE_PATH];
+
+type MoveFileOperation = {
+  sourceId: string;
+  targetId: string;
+  sourceDocument: BasicStoreEntityDocument;
+  targetEntityId: string;
+};
+
+export type MoveAllFilesPlan = {
+  operations: MoveFileOperation[];
+  updatedXOpenctiFiles: StoreFile[];
+};
+
 /**
  * Delete all files in storage that relates to an element.
  * @param context
@@ -865,9 +884,20 @@ export const deleteAllBucketContent = async (context: AuthContext, user: AuthUse
  * @param targetEntity
  */
 export const moveAllFilesFromEntityToAnother = async (context: AuthContext, user: AuthUser, sourceEntity: BasicStoreBase, targetEntity: BasicStoreBase) => {
+  const plan = await planMoveAllFilesFromEntityToAnother(context, user, sourceEntity, targetEntity);
+  return materializeMoveAllFilesPlan(context, user, plan);
+};
+
+export const planMoveAllFilesFromEntityToAnother = async (
+  context: AuthContext,
+  user: AuthUser,
+  sourceEntity: BasicStoreBase,
+  targetEntity: BasicStoreBase,
+): Promise<MoveAllFilesPlan> => {
   if (getDraftContext(context, user)) {
     throw UnsupportedError('Cannot merge all files in draft');
   }
+  const operations: MoveFileOperation[] = [];
   const updatedXOpenctiFiles: Array<StoreFile> = [];
   for (let folderI = 0; folderI < ALL_MERGEABLE_FOLDERS.length; folderI += 1) {
     try {
@@ -883,15 +913,9 @@ export const moveAllFilesFromEntityToAnother = async (context: AuthContext, user
         if (!targetFilesNames.includes(sourceFileName)) { // move the file only if no files with this name already exist in target
           const sourceFileS3Id = `${sourcePath}/${sourceFileName}`;
           const targetFileS3Id = `${targetPath}/${sourceFileName}`;
-          logApp.info(`[FILE STORAGE] Moving from ${sourceFileS3Id} to: ${targetFileS3Id}`);
           const copyProps = { sourceId: sourceFileS3Id, targetId: targetFileS3Id, sourceDocument: sourceFileDocument, targetEntityId: targetEntity.internal_id };
-          const newFile = await copyFile(context, copyProps);
-          if (newFile) {
-            const newFileForEntity = storeFileConverter(user, newFile);
-            updatedXOpenctiFiles.push(newFileForEntity);
-
-            await deleteFile(context, user, sourceFileS3Id); // TODO to be removed ? This will be done by merge delete no ?
-          }
+          operations.push(copyProps);
+          updatedXOpenctiFiles.push(storeFileConverter(user, buildCopiedFile(targetFileS3Id, sourceFileDocument, targetEntity.internal_id)));
         }
       }
     } catch (err) {
@@ -899,5 +923,24 @@ export const moveAllFilesFromEntityToAnother = async (context: AuthContext, user
     }
   }
 
+  return { operations, updatedXOpenctiFiles };
+};
+
+export const materializeMoveAllFilesPlan = async (
+  context: AuthContext,
+  user: AuthUser,
+  plan: MoveAllFilesPlan,
+  opts: { forceDelete?: boolean } = {},
+) => {
+  const updatedXOpenctiFiles: StoreFile[] = [];
+  for (let operationIndex = 0; operationIndex < plan.operations.length; operationIndex += 1) {
+    const operation = plan.operations[operationIndex];
+    logApp.info(`[FILE STORAGE] Moving from ${operation.sourceId} to: ${operation.targetId}`);
+    const newFile = await copyFile(context, operation);
+    if (newFile) {
+      updatedXOpenctiFiles.push(storeFileConverter(user, newFile));
+      await deleteFile(context, user, operation.sourceId, opts); // TODO to be removed ? This will be done by merge delete no ?
+    }
+  }
   return updatedXOpenctiFiles;
 };

@@ -229,7 +229,15 @@ import {
 } from '../utils/confidence-level';
 import { buildEntityData, buildInnerRelation, buildRelationData } from './data-builder';
 import { isIndividualAssociatedToUser, verifyCanDeleteIndividual, verifyCanDeleteOrganization } from './data-consistency';
-import { deleteAllObjectFiles, deleteFile, moveAllFilesFromEntityToAnother, storeFileConverter, uploadToStorage } from './file-storage';
+import {
+  deleteAllObjectFiles,
+  deleteFile,
+  materializeMoveAllFilesPlan,
+  moveAllFilesFromEntityToAnother,
+  planMoveAllFilesFromEntityToAnother,
+  storeFileConverter,
+  uploadToStorage,
+} from './file-storage';
 import { getFileContent } from './raw-file-storage';
 import { getDraftContext } from '../utils/draftContext';
 import { getDraftChanges, isDraftSupportedEntity } from './draft-utils';
@@ -1591,7 +1599,18 @@ const mergeEntitiesRaw = async (
   for (let i = 0; i < sourceEntitiesWithFiles.length; i += 1) {
     const sourceEntity = sourceEntitiesWithFiles[i];
     if (sourceEntity.x_opencti_files && sourceEntity.x_opencti_files.length > 0) {
-      sourceEntity.x_opencti_files = await moveAllFilesFromEntityToAnother(context, user, sourceEntity, targetEntity);
+      if (isBatchWriteBoundaryOpen()) {
+        const movePlan = await planMoveAllFilesFromEntityToAnother(context, user, sourceEntity, targetEntity);
+        sourceEntity.x_opencti_files = movePlan.updatedXOpenctiFiles;
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.FileLifecycle,
+          execute: async () => {
+            await materializeMoveAllFilesPlan(context, user, movePlan, { forceDelete: true });
+          },
+        });
+      } else {
+        sourceEntity.x_opencti_files = await moveAllFilesFromEntityToAnother(context, user, sourceEntity, targetEntity);
+      }
     }
   }
   logApp.info('[OPENCTI] Copy of files on S3 ended.');
@@ -1760,7 +1779,13 @@ const mergeEntitiesRaw = async (
   // Delete remaining files for source entities (workbenches linked via metaData.entity_id)
   // Note: regular files were already moved by moveAllFilesFromEntityToAnother
   for (let i = 0; i < sourceEntities.length; i += 1) {
-    await deleteAllObjectFiles(context, SYSTEM_USER, sourceEntities[i]);
+    const forceDeleteFilesAfterCommit = isBatchWriteBoundaryOpen();
+    await registerBatchSideEffect({
+      kind: BatchSideEffectKind.FileLifecycle,
+      execute: async () => {
+        await deleteAllObjectFiles(context, SYSTEM_USER, sourceEntities[i], { forceDelete: forceDeleteFilesAfterCommit });
+      },
+    });
   }
 
   // Take care of relations deletions to prevent duplicate marking definitions.

@@ -1,13 +1,15 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
-import { deleteElementById } from '../../../src/database/middleware';
+import { deleteElementById, mergeEntities } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { elIndexFiles } from '../../../src/database/file-search';
 import { fileToReadStream, uploadToStorage } from '../../../src/database/file-storage';
 import { getFileContent } from '../../../src/database/raw-file-storage';
 import { findById as findDocumentById, IMPORT_STORAGE_PATH } from '../../../src/modules/internal/document/document-domain';
 import { addMalware } from '../../../src/domain/malware';
+import { addStixCyberObservable, stixCyberObservableDelete } from '../../../src/domain/stixCyberObservable';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
 import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS, INDEX_FILES } from '../../../src/database/utils';
@@ -26,6 +28,7 @@ describe('batch engine writes', () => {
   let malware: any;
   let deletedMalware: any;
   const cleanupMalwares: any[] = [];
+  const cleanupObservables: any[] = [];
   const cleanupSoftDeletedMalwareIds: string[] = [];
   const cleanupVocabularies: any[] = [];
 
@@ -57,6 +60,22 @@ describe('batch engine writes', () => {
     return { documentId, fileId: upload.id };
   };
 
+  const createArtifactWithFile = (fileName: string) => {
+    return addStixCyberObservable(testContext, ADMIN_USER, {
+      type: 'Artifact',
+      Artifact: {
+        payload_bin: '',
+        file: {
+          createReadStream: () => Readable.from(`batch artifact ${fileName}`),
+          filename: fileName,
+          mimetype: 'text/plain',
+        },
+        hashes: [],
+        mime_type: 'text/plain',
+      },
+    });
+  };
+
   afterAll(async () => {
     if (malware) {
       await deleteElementById(testContext, ADMIN_USER, malware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
@@ -72,6 +91,13 @@ describe('batch engine writes', () => {
       const existing = await internalLoadById(testContext, ADMIN_USER, cleanupMalware.internal_id);
       if (existing) {
         await deleteElementById(testContext, ADMIN_USER, cleanupMalware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
+      }
+    }
+    for (let index = 0; index < cleanupObservables.length; index += 1) {
+      const cleanupObservable = cleanupObservables[index];
+      const existing = await internalLoadById(testContext, ADMIN_USER, cleanupObservable.internal_id);
+      if (existing) {
+        await stixCyberObservableDelete(testContext, ADMIN_USER, cleanupObservable.internal_id);
       }
     }
     for (let index = 0; index < cleanupSoftDeletedMalwareIds.length; index += 1) {
@@ -534,6 +560,58 @@ describe('batch engine writes', () => {
 
     await expect(findDocumentById(testContext, ADMIN_USER, fileId)).resolves.toBeDefined();
     await expect(findDeleteOperationsForMainEntity(softDeleteMalware.internal_id)).resolves.toHaveLength(1);
+  });
+
+  it('keeps merge file moves outside an aborted batch', async () => {
+    const targetArtifact = await createArtifactWithFile(`batch-target-${uuidv4()}.txt`);
+    const sourceArtifact = await createArtifactWithFile(`batch-source-${uuidv4()}.txt`);
+    cleanupObservables.push(targetArtifact, sourceArtifact);
+    const sourceFileId = sourceArtifact.x_opencti_files[0].id;
+    const targetFileId = sourceFileId.replace(sourceArtifact.internal_id, targetArtifact.internal_id);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await mergeEntities(testContext, ADMIN_USER, targetArtifact.internal_id, [sourceArtifact.internal_id]);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await expect(findDocumentById(testContext, ADMIN_USER, sourceFileId)).resolves.toBeDefined();
+          await expect(findDocumentById(testContext, ADMIN_USER, targetFileId)).resolves.toBeUndefined();
+          throw new Error('abort merge file move batch');
+        },
+      },
+    ])).rejects.toThrow('abort merge file move batch');
+
+    await expect(findDocumentById(testContext, ADMIN_USER, sourceFileId)).resolves.toBeDefined();
+    await expect(findDocumentById(testContext, ADMIN_USER, targetFileId)).resolves.toBeUndefined();
+  });
+
+  it('materializes merge file moves after batch commit', async () => {
+    const targetArtifact = await createArtifactWithFile(`batch-commit-target-${uuidv4()}.txt`);
+    const sourceArtifact = await createArtifactWithFile(`batch-commit-source-${uuidv4()}.txt`);
+    cleanupObservables.push(targetArtifact, sourceArtifact);
+    const sourceFileId = sourceArtifact.x_opencti_files[0].id;
+    const targetFileId = sourceFileId.replace(sourceArtifact.internal_id, targetArtifact.internal_id);
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await mergeEntities(testContext, ADMIN_USER, targetArtifact.internal_id, [sourceArtifact.internal_id]);
+          return null;
+        },
+      },
+    ]);
+
+    await expect(findDocumentById(testContext, ADMIN_USER, sourceFileId)).resolves.toBeUndefined();
+    await expect(findDocumentById(testContext, ADMIN_USER, targetFileId)).resolves.toBeDefined();
+    const mergedArtifact = await internalLoadById(testContext, ADMIN_USER, targetArtifact.internal_id) as any;
+    expect(mergedArtifact?.x_opencti_files.map((file: any) => file.id)).toContain(targetFileId);
   });
 
   it('keeps draft copies and live draft markers inside the batch boundary until commit', async () => {
