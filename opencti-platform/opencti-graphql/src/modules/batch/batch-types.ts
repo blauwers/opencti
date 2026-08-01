@@ -124,6 +124,7 @@ export interface BatchGraphqlOperationInput {
   query: string;
   variables?: string | null;
   operationName?: string | null;
+  objectId?: string | null;
   executionGroup?: number | null;
   executionPhase?: number | null;
   files?: BatchGraphqlFileInput[] | null;
@@ -134,4 +135,12 @@ export interface BatchGraphqlFileInput {
   name: string;
   mimeType: string;
   data: string;
+}
+
+export interface BatchGraphqlExecutionPlanInput {
+  executionPhases: Array<{
+    objectIds: string[];
+    phase: number;
+  }>;
+  version: number;
 }

@@ -17007,6 +17007,7 @@ input BatchGraphqlOperationInput {
   query: String!
   variables: String
   operation_name: String
+  object_id: String
   execution_group: Int
   execution_phase: Int
   files: [BatchGraphqlFileInput!]
@@ -17022,6 +17023,17 @@ input BatchGraphqlFileInput {
 input BatchExecuteOptionsInput {
   wait_until: BatchWaitUntil
   execution_mode: BatchExecutionMode
+  batch_plan: BatchGraphqlExecutionPlanInput
+}
+
+input BatchGraphqlExecutionPhaseInput {
+  phase: Int!
+  object_ids: [String!]!
+}
+
+input BatchGraphqlExecutionPlanInput {
+  version: Int!
+  execution_phases: [BatchGraphqlExecutionPhaseInput!]!
 }
 
 type BatchAdmission {

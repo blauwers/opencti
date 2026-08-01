@@ -6,7 +6,7 @@ import conf from '../../config/conf';
 import { FunctionalError } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
-import type { BatchGraphqlFileInput, BatchGraphqlOperationInput } from './batch-types';
+import type { BatchGraphqlExecutionPlanInput, BatchGraphqlFileInput, BatchGraphqlOperationInput } from './batch-types';
 
 type BatchGraphqlOperationResult = Record<string, unknown> | null | undefined;
 type BatchGraphqlResultBindings = Map<string, unknown>;
@@ -16,6 +16,7 @@ type PreparedBatchGraphqlOperation = {
   executionGroup?: number;
   executionPhase?: number;
   files?: BatchGraphqlFileInput[] | null;
+  objectId?: string;
   operationIndex: number;
   operationName?: string | null;
   variables: Record<string, unknown>;
@@ -26,6 +27,9 @@ type PreparedBatchGraphqlOperationGroup = {
   executionPhase: number;
   groupId: number;
   operations: PreparedBatchGraphqlOperation[];
+};
+type BatchGraphqlExecutionOptions = BatchExecutionOptions & {
+  bundlePlan?: BatchGraphqlExecutionPlanInput;
 };
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
@@ -194,6 +198,16 @@ const parseVariables = (variables: string | null | undefined, operationIndex: nu
   }
 };
 
+const parseObjectId = (objectId: string | null | undefined, operationIndex: number): string | undefined => {
+  if (objectId === null || objectId === undefined) {
+    return undefined;
+  }
+  if (typeof objectId !== 'string' || objectId.length === 0) {
+    throw FunctionalError('Invalid batch GraphQL object id', { operation_index: operationIndex, object_id: objectId });
+  }
+  return objectId;
+};
+
 const validateOperationDocument = (
   schema: GraphQLSchema,
   operation: BatchGraphqlOperationInput,
@@ -278,10 +292,33 @@ const prepareBatchGraphqlOperations = (
       executionGroup: parseExecutionCoordinate(operation.executionGroup, 'execution_group', operationIndex),
       executionPhase: parseExecutionCoordinate(operation.executionPhase, 'execution_phase', operationIndex),
       files: operation.files,
+      objectId: parseObjectId(operation.objectId, operationIndex),
       operationIndex,
       operationName: operation.operationName,
     };
   });
+};
+
+const buildBundleExecutionPhaseMap = (bundlePlan: BatchGraphqlExecutionPlanInput | undefined): Map<string, number> | undefined => {
+  if (!bundlePlan) {
+    return undefined;
+  }
+  if (bundlePlan.version !== 1 || !Array.isArray(bundlePlan.executionPhases)) {
+    throw FunctionalError('Invalid batch GraphQL bundle plan');
+  }
+  const phasesByObjectId = new Map<string, number>();
+  bundlePlan.executionPhases.forEach((phase) => {
+    if (!Number.isInteger(phase.phase) || phase.phase < 0 || !Array.isArray(phase.objectIds)) {
+      throw FunctionalError('Invalid batch GraphQL bundle plan phase', { phase });
+    }
+    phase.objectIds.forEach((objectId) => {
+      if (typeof objectId !== 'string' || objectId.length === 0 || phasesByObjectId.has(objectId)) {
+        throw FunctionalError('Invalid batch GraphQL bundle plan object id', { object_id: objectId });
+      }
+      phasesByObjectId.set(objectId, phase.phase);
+    });
+  });
+  return phasesByObjectId;
 };
 
 const buildSerialOperationGroups = (
@@ -361,9 +398,48 @@ const buildDeclaredOperationGroups = (
   return groups;
 };
 
+const buildBundlePlannedOperationGroups = (
+  operations: PreparedBatchGraphqlOperation[],
+  phasesByObjectId: Map<string, number>,
+): PreparedBatchGraphqlOperationGroup[] => {
+  const groupIdsByObjectId = new Map<string, number>();
+  let nextGroupId = 0;
+  const operationsWithBackendPlan = operations.map((operation) => {
+    if (!operation.objectId) {
+      throw FunctionalError('Batch GraphQL bundle plan requires object ids for every operation', {
+        operation_index: operation.operationIndex,
+      });
+    }
+    const executionPhase = phasesByObjectId.get(operation.objectId);
+    if (executionPhase === undefined) {
+      throw FunctionalError('Batch GraphQL operation object is missing from bundle plan', {
+        operation_index: operation.operationIndex,
+        object_id: operation.objectId,
+      });
+    }
+    let executionGroup = groupIdsByObjectId.get(operation.objectId);
+    if (executionGroup === undefined) {
+      executionGroup = nextGroupId;
+      groupIdsByObjectId.set(operation.objectId, executionGroup);
+      nextGroupId += 1;
+    }
+    return {
+      ...operation,
+      executionGroup,
+      executionPhase,
+    };
+  });
+  return buildDeclaredOperationGroups(operationsWithBackendPlan);
+};
+
 const buildOperationGroups = (
   operations: PreparedBatchGraphqlOperation[],
+  bundlePlan: BatchGraphqlExecutionPlanInput | undefined,
 ): PreparedBatchGraphqlOperationGroup[] => {
+  const phasesByObjectId = buildBundleExecutionPhaseMap(bundlePlan);
+  if (phasesByObjectId) {
+    return buildBundlePlannedOperationGroups(operations, phasesByObjectId);
+  }
   const operationsWithMetadata = operations.filter((operation) => operation.executionGroup !== undefined || operation.executionPhase !== undefined);
   if (operationsWithMetadata.length === 0) {
     return buildSerialOperationGroups(operations);
@@ -392,8 +468,9 @@ const executeOperationGroups = async (
   context: AuthContext,
   operations: PreparedBatchGraphqlOperation[],
   resultBindings: BatchGraphqlResultBindings,
+  bundlePlan: BatchGraphqlExecutionPlanInput | undefined,
 ): Promise<BatchGraphqlOperationResult[]> => {
-  const groups = buildOperationGroups(operations);
+  const groups = buildOperationGroups(operations, bundlePlan);
   const groupsByPhase = new Map<number, PreparedBatchGraphqlOperationGroup[]>();
   groups.forEach((group) => {
     const phaseGroups = groupsByPhase.get(group.executionPhase) ?? [];
@@ -416,7 +493,7 @@ export const executeBatchGraphqlOperations = async (
   schema: GraphQLSchema,
   context: AuthContext,
   operations: BatchGraphqlOperationInput[],
-  options: BatchExecutionOptions = {},
+  options: BatchGraphqlExecutionOptions = {},
 ): Promise<BatchExecutionResult<BatchGraphqlOperationResult>> => {
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
@@ -425,7 +502,7 @@ export const executeBatchGraphqlOperations = async (
   const resultBindings: BatchGraphqlResultBindings = new Map();
   const execution = await executeBatchMutations<BatchGraphqlOperationResult[]>([{
     kind: BatchMutationKind.GraphqlOperation,
-    executeWrite: () => executeOperationGroups(schema, context, preparedOperations, resultBindings),
+    executeWrite: () => executeOperationGroups(schema, context, preparedOperations, resultBindings, options.bundlePlan),
   }], options);
   return {
     ...execution,

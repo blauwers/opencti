@@ -22,6 +22,7 @@ class BatchMutationPlan:
     _next_execution_group: int = field(default=0, init=False, repr=False)
     _active_execution_group: Optional[int] = field(default=None, init=False, repr=False)
     _active_execution_phase: Optional[int] = field(default=None, init=False, repr=False)
+    _active_object_id: Optional[str] = field(default=None, init=False, repr=False)
 
     @staticmethod
     def is_mutation(query: str) -> bool:
@@ -41,6 +42,8 @@ class BatchMutationPlan:
         if self._active_execution_group is not None:
             operation["execution_group"] = self._active_execution_group
             operation["execution_phase"] = self._active_execution_phase
+            if self._active_object_id is not None:
+                operation["object_id"] = self._active_object_id
         files = self._serialize_files(files_vars)
         if files:
             operation["files"] = files
@@ -48,20 +51,26 @@ class BatchMutationPlan:
         return {"data": self._build_synthetic_data(query, operation_index)}
 
     @contextmanager
-    def execution_group(self, execution_phase: int):
+    def execution_group(self, execution_phase: int, object_id: Optional[str] = None):
         """Tag captured mutations as one serial group within a dependency phase."""
         if not isinstance(execution_phase, int) or execution_phase < 0:
             raise ValueError("Batch execution phase must be a non-negative integer")
+        if object_id is not None and (
+            not isinstance(object_id, str) or len(object_id) == 0
+        ):
+            raise ValueError("Batch execution object id must be a non-empty string")
         if self._active_execution_group is not None:
             raise ValueError("A batch execution group is already active")
         self._active_execution_group = self._next_execution_group
         self._active_execution_phase = execution_phase
+        self._active_object_id = object_id
         self._next_execution_group += 1
         try:
             yield
         finally:
             self._active_execution_group = None
             self._active_execution_phase = None
+            self._active_object_id = None
 
     @staticmethod
     def _serialize_files(files_vars: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -70,7 +79,11 @@ class BatchMutationPlan:
             key = file_var["key"]
             files = file_var["file"] if file_var["multiple"] else [file_var["file"]]
             for index, file in enumerate(files):
-                data = file.data.encode("utf-8") if isinstance(file.data, str) else file.data
+                data = (
+                    file.data.encode("utf-8")
+                    if isinstance(file.data, str)
+                    else file.data
+                )
                 serialized_files.append(
                     {
                         "path": f"{key}.{index}" if file_var["multiple"] else key,
@@ -87,10 +100,14 @@ class BatchMutationPlan:
         try:
             selection_index = tokens.index("{")
         except ValueError as exc:
-            raise BatchMutationPlanUnsupported("Mutation query has no selection set") from exc
+            raise BatchMutationPlanUnsupported(
+                "Mutation query has no selection set"
+            ) from exc
         selection, _ = cls._parse_selection_set(tokens, selection_index)
         return {
-            response_key: cls._build_synthetic_value(field_name, children, operation_index, [response_key])
+            response_key: cls._build_synthetic_value(
+                field_name, children, operation_index, [response_key]
+            )
             for response_key, (field_name, children) in selection.items()
         }
 
@@ -103,7 +120,9 @@ class BatchMutationPlan:
         cls, tokens: List[str], index: int
     ) -> Tuple[Dict[str, Tuple[str, Optional[Dict[str, Any]]]], int]:
         if index >= len(tokens) or tokens[index] != "{":
-            raise BatchMutationPlanUnsupported("Mutation query has an invalid selection set")
+            raise BatchMutationPlanUnsupported(
+                "Mutation query has an invalid selection set"
+            )
         selection: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}
         index += 1
         while index < len(tokens) and tokens[index] != "}":
@@ -130,7 +149,9 @@ class BatchMutationPlan:
             if index < len(tokens) and tokens[index] == ":":
                 index += 1
                 if index >= len(tokens):
-                    raise BatchMutationPlanUnsupported("Mutation query alias is incomplete")
+                    raise BatchMutationPlanUnsupported(
+                        "Mutation query alias is incomplete"
+                    )
                 field_name = tokens[index]
                 index += 1
             if index < len(tokens) and tokens[index] == "(":
@@ -144,7 +165,9 @@ class BatchMutationPlan:
                 children, index = cls._parse_selection_set(tokens, index)
             selection[response_key] = (field_name, children)
         if index >= len(tokens) or tokens[index] != "}":
-            raise BatchMutationPlanUnsupported("Mutation query selection set is incomplete")
+            raise BatchMutationPlanUnsupported(
+                "Mutation query selection set is incomplete"
+            )
         return selection, index + 1
 
     @staticmethod

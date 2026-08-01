@@ -86,7 +86,7 @@ def test_batch_mutation_plan_serializes_uploads_with_variable_paths():
 def test_batch_mutation_plan_tags_operations_with_execution_group_metadata():
     plan = BatchMutationPlan()
 
-    with plan.execution_group(2):
+    with plan.execution_group(2, "indicator--1"):
         plan.capture(
             "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
             {"input": {"stix_id": "indicator--1"}},
@@ -98,15 +98,22 @@ def test_batch_mutation_plan_tags_operations_with_execution_group_metadata():
             [],
         )
 
-    with plan.execution_group(3):
+    with plan.execution_group(3, "relationship--1"):
         plan.capture(
             "mutation RelationshipAdd($input: StixCoreRelationshipAddInput!) { stixCoreRelationshipAdd(input: $input) { id } }",
             {"input": {"fromId": "indicator--1", "toId": "identity--1"}},
             [],
         )
 
-    assert [(operation["execution_group"], operation["execution_phase"]) for operation in plan.operations] == [
-        (0, 2),
-        (0, 2),
-        (1, 3),
+    assert [
+        (
+            operation["execution_group"],
+            operation["execution_phase"],
+            operation["object_id"],
+        )
+        for operation in plan.operations
+    ] == [
+        (0, 2, "indicator--1"),
+        (0, 2, "indicator--1"),
+        (1, 3, "relationship--1"),
     ]

@@ -792,6 +792,7 @@ class OpenCTIApiClient:
         plan: BatchMutationPlan,
         execution_mode: Optional[str] = None,
         wait_until: Optional[str] = None,
+        backend_batch_plan: Optional[Dict[str, Any]] = None,
     ):
         """Execute a captured mutation plan through the backend batch endpoint."""
         if len(plan.operations) == 0:
@@ -812,6 +813,11 @@ class OpenCTIApiClient:
             options["execution_mode"] = execution_mode
         if wait_until is not None:
             options["wait_until"] = wait_until
+        if isinstance(backend_batch_plan, dict):
+            options["batch_plan"] = {
+                "version": backend_batch_plan.get("version"),
+                "execution_phases": backend_batch_plan.get("execution_phases"),
+            }
         return self.query(
             mutation,
             {

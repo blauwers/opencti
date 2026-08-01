@@ -2126,6 +2126,7 @@ export enum BatchAdmissionStatus {
 }
 
 export type BatchExecuteOptionsInput = {
+  batch_plan?: InputMaybe<BatchGraphqlExecutionPlanInput>;
   execution_mode?: InputMaybe<BatchExecutionMode>;
   wait_until?: InputMaybe<BatchWaitUntil>;
 };
@@ -2153,6 +2154,16 @@ export enum BatchExecutionReason {
   OperationalBundleCompatibility = 'OPERATIONAL_BUNDLE_COMPATIBILITY'
 }
 
+export type BatchGraphqlExecutionPhaseInput = {
+  object_ids: Array<Scalars['String']['input']>;
+  phase: Scalars['Int']['input'];
+};
+
+export type BatchGraphqlExecutionPlanInput = {
+  execution_phases: Array<BatchGraphqlExecutionPhaseInput>;
+  version: Scalars['Int']['input'];
+};
+
 export type BatchGraphqlFileInput = {
   data: Scalars['String']['input'];
   mime_type: Scalars['String']['input'];
@@ -2164,6 +2175,7 @@ export type BatchGraphqlOperationInput = {
   execution_group?: InputMaybe<Scalars['Int']['input']>;
   execution_phase?: InputMaybe<Scalars['Int']['input']>;
   files?: InputMaybe<Array<BatchGraphqlFileInput>>;
+  object_id?: InputMaybe<Scalars['String']['input']>;
   operation_name?: InputMaybe<Scalars['String']['input']>;
   query: Scalars['String']['input'];
   variables?: InputMaybe<Scalars['String']['input']>;
@@ -39787,6 +39799,8 @@ export type ResolversTypes = ResolversObject<{
   BatchExecutionMode: BatchExecutionMode;
   BatchExecutionPreference: BatchExecutionPreference;
   BatchExecutionReason: BatchExecutionReason;
+  BatchGraphqlExecutionPhaseInput: BatchGraphqlExecutionPhaseInput;
+  BatchGraphqlExecutionPlanInput: BatchGraphqlExecutionPlanInput;
   BatchGraphqlFileInput: BatchGraphqlFileInput;
   BatchGraphqlOperationInput: BatchGraphqlOperationInput;
   BatchMutationExecution: ResolverTypeWrapper<BatchMutationExecution>;
@@ -40939,6 +40953,8 @@ export type ResolversParentTypes = ResolversObject<{
   BasicRelationship: ResolversInterfaceTypes<ResolversParentTypes>['BasicRelationship'];
   BatchAdmission: BatchAdmission;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
+  BatchGraphqlExecutionPhaseInput: BatchGraphqlExecutionPhaseInput;
+  BatchGraphqlExecutionPlanInput: BatchGraphqlExecutionPlanInput;
   BatchGraphqlFileInput: BatchGraphqlFileInput;
   BatchGraphqlOperationInput: BatchGraphqlOperationInput;
   BatchMutationExecution: BatchMutationExecution;

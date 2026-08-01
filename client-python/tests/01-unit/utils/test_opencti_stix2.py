@@ -356,6 +356,7 @@ def test_import_bundle_batch_tags_item_mutations_with_dependency_phases(
         (
             operation["execution_group"],
             operation["execution_phase"],
+            operation["object_id"],
             operation["variables"],
         )
         for operation in plan.operations
@@ -363,11 +364,13 @@ def test_import_bundle_batch_tags_item_mutations_with_dependency_phases(
         (
             0,
             1,
+            "identity--22222222-2222-4222-8222-222222222222",
             '{"value": "identity--22222222-2222-4222-8222-222222222222"}',
         ),
         (
             1,
             2,
+            "indicator--11111111-1111-4111-8111-111111111111",
             '{"value": "indicator--11111111-1111-4111-8111-111111111111"}',
         ),
     ]
@@ -426,11 +429,19 @@ def test_import_bundle_batch_prefers_backend_execution_phases(
     )
 
     assert [
-        (operation["execution_phase"], operation["variables"])
+        (operation["execution_phase"], operation["object_id"], operation["variables"])
         for operation in plan.operations
     ] == [
-        (0, '{"value": "identity--22222222-2222-4222-8222-222222222222"}'),
-        (7, '{"value": "indicator--11111111-1111-4111-8111-111111111111"}'),
+        (
+            0,
+            "identity--22222222-2222-4222-8222-222222222222",
+            '{"value": "identity--22222222-2222-4222-8222-222222222222"}',
+        ),
+        (
+            7,
+            "indicator--11111111-1111-4111-8111-111111111111",
+            '{"value": "indicator--11111111-1111-4111-8111-111111111111"}',
+        ),
     ]
 
 

@@ -1,7 +1,14 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
 import { executeBatchGraphqlOperations } from './batch-operation-executor';
-import type { BatchExecutionMode, BatchExecutionPreference, BatchGraphqlFileInput, BatchGraphqlOperationInput, BatchWaitUntil } from './batch-types';
+import type {
+  BatchExecutionMode,
+  BatchExecutionPreference,
+  BatchGraphqlExecutionPlanInput,
+  BatchGraphqlFileInput,
+  BatchGraphqlOperationInput,
+  BatchWaitUntil,
+} from './batch-types';
 
 interface BatchSubmitOptionsInput {
   wait_until?: BatchWaitUntil | null;
@@ -14,12 +21,14 @@ interface BatchSubmitOptionsInput {
 interface BatchExecuteOptionsInput {
   wait_until?: BatchWaitUntil | null;
   execution_mode?: BatchExecutionMode | null;
+  batch_plan?: BatchGraphqlExecutionPlanInputValue | null;
 }
 
 interface BatchGraphqlOperationInputValue {
   query: string;
   variables?: string | null;
   operation_name?: string | null;
+  object_id?: string | null;
   execution_group?: number | null;
   execution_phase?: number | null;
   files?: BatchGraphqlFileInputValue[] | null;
@@ -30,6 +39,14 @@ interface BatchGraphqlFileInputValue {
   name: string;
   mime_type: string;
   data: string;
+}
+
+interface BatchGraphqlExecutionPlanInputValue {
+  version: number;
+  execution_phases: Array<{
+    object_ids: string[];
+    phase: number;
+  }>;
 }
 
 const batchResolvers = {
@@ -62,6 +79,7 @@ const batchResolvers = {
       query: operation.query,
       variables: operation.variables,
       operationName: operation.operation_name,
+      objectId: operation.object_id,
       executionGroup: operation.execution_group,
       executionPhase: operation.execution_phase,
       files: operation.files?.map((file): BatchGraphqlFileInput => ({
@@ -73,6 +91,15 @@ const batchResolvers = {
     })), {
       executionMode: options?.execution_mode ?? undefined,
       waitUntil: options?.wait_until ?? undefined,
+      bundlePlan: options?.batch_plan
+        ? {
+          version: options.batch_plan.version,
+          executionPhases: options.batch_plan.execution_phases.map((phase) => ({
+            phase: phase.phase,
+            objectIds: phase.object_ids,
+          })),
+        } satisfies BatchGraphqlExecutionPlanInput
+        : undefined,
     }),
   },
   BatchAdmission: {

@@ -465,11 +465,13 @@ class OpenCTIStix2:
                 batch_plan=plan,
                 backend_batch_plan=backend_batch_plan,
             )
-        self.opencti.execute_batch_mutation_plan(
-            plan,
-            execution_mode=execution_mode,
-            wait_until=wait_until,
-        )
+        execute_kwargs = {
+            "execution_mode": execution_mode,
+            "wait_until": wait_until,
+        }
+        if backend_batch_plan is not None:
+            execute_kwargs["backend_batch_plan"] = backend_batch_plan
+        self.opencti.execute_batch_mutation_plan(plan, **execute_kwargs)
         return imported, rejected
 
     def resolve_author(self, title: str) -> Optional[Identity]:
@@ -3968,7 +3970,10 @@ class OpenCTIStix2:
             else:
                 execution_group = (
                     batch_plan.execution_group(
-                        backend_execution_phases.get(item["id"], item.get("nb_deps", 0))
+                        backend_execution_phases.get(
+                            item["id"], item.get("nb_deps", 0)
+                        ),
+                        item["id"],
                     )
                     if batch_plan is not None
                     else nullcontext()

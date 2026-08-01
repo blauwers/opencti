@@ -268,6 +268,86 @@ describe('batch GraphQL operation executor', () => {
     ]);
   });
 
+  it('rebuilds operation groups from backend bundle object phases', async () => {
+    const calls: string[] = [];
+    let releaseSource: (() => void) | undefined;
+    let markIndependentStarted: (() => void) | undefined;
+    const sourceGate = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    const independentStarted = new Promise<void>((resolve) => {
+      markIndependentStarted = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'source') {
+        await sourceGate;
+      }
+      if (value === 'independent') {
+        markIndependentStarted?.();
+      }
+    });
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'source' }),
+        objectId: 'identity--1',
+        executionGroup: 99,
+        executionPhase: 9,
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'independent' }),
+        objectId: 'malware--1',
+        executionGroup: 99,
+        executionPhase: 9,
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'dependent' }),
+        objectId: 'indicator--1',
+        executionGroup: 99,
+        executionPhase: 0,
+      },
+    ], {
+      bundlePlan: {
+        version: 1,
+        executionPhases: [
+          { phase: 0, objectIds: ['identity--1', 'malware--1'] },
+          { phase: 1, objectIds: ['indicator--1'] },
+        ],
+      },
+    });
+
+    await independentStarted;
+    expect(calls).toEqual([
+      'write:source:true',
+      'write:independent:true',
+    ]);
+
+    releaseSource?.();
+    const execution = await executionPromise;
+    expect(calls).toContain('write:dependent:true');
+    expect(execution.results).toEqual([
+      { record: 'source' },
+      { record: 'independent' },
+      { record: 'dependent' },
+    ]);
+  });
+
+  it('rejects bundle-planned operations without an admitted object id', async () => {
+    const schema = buildSchema([]);
+
+    await expect(executeBatchGraphqlOperations(schema, {} as any, [
+      { query: 'mutation Record { record(value: "missing") }' },
+    ], {
+      bundlePlan: {
+        version: 1,
+        executionPhases: [{ phase: 0, objectIds: ['identity--1'] }],
+      },
+    })).rejects.toThrow('Batch GraphQL bundle plan requires object ids for every operation');
+  });
+
   it('moves result-token consumers to a later phase even when declared beside the producer', async () => {
     const calls: string[] = [];
     let releaseSource: (() => void) | undefined;
