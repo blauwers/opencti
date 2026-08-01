@@ -56,17 +56,16 @@ const bundle = JSON.stringify({
 });
 
 describe('batch admission contract', () => {
-  it('classifies identity plus indicator bundles as the first atomic cohort by default', () => {
+  it('classifies identity plus indicator bundles on the generic bulk path by default', () => {
     const prepared = prepareBundleSubmission(bundle);
 
     expect(prepared.bundleId).toBe('bundle--11111111-1111-4111-8111-111111111111');
     expect(prepared.objectCount).toBe(3);
     expect(prepared.objectTypes).toEqual(['identity', 'indicator']);
     expect(prepared.executionPreference).toBe(BatchExecutionPreference.Auto);
-    expect(prepared.executionMode).toBe(BatchExecutionMode.Atomic);
-    expect(prepared.executionReason).toBe(BatchExecutionReason.IdentityIndicatorAtomicCohort);
+    expect(prepared.executionMode).toBe(BatchExecutionMode.Bulk);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.GenericBulkCompatible);
     expect(prepared.eligibleExecutionModes).toEqual([
-      BatchExecutionMode.Atomic,
       BatchExecutionMode.Bulk,
       BatchExecutionMode.Compatibility,
     ]);
@@ -186,10 +185,9 @@ describe('batch admission contract', () => {
       no_split: true,
       split_bundles: false,
       batch_id: prepared.bundleId,
-      batch_execution_mode: BatchExecutionMode.Atomic,
-      batch_execution_reason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+      batch_execution_mode: BatchExecutionMode.Bulk,
+      batch_execution_reason: BatchExecutionReason.GenericBulkCompatible,
       batch_eligible_execution_modes: [
-        BatchExecutionMode.Atomic,
         BatchExecutionMode.Bulk,
         BatchExecutionMode.Compatibility,
       ],
@@ -219,8 +217,8 @@ describe('submitStixBundle', () => {
       bundleId: 'bundle--11111111-1111-4111-8111-111111111111',
       workId: 'work-1',
       objectCount: 3,
-      executionMode: BatchExecutionMode.Atomic,
-      executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+      executionMode: BatchExecutionMode.Bulk,
+      executionReason: BatchExecutionReason.GenericBulkCompatible,
       waitUntil: BatchWaitUntil.Materialized,
     });
     expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-1', 1);
@@ -228,8 +226,8 @@ describe('submitStixBundle', () => {
       'connector-1',
       expect.objectContaining({
         batch_id: admission.batchId,
-        batch_execution_mode: BatchExecutionMode.Atomic,
-        batch_execution_reason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+        batch_execution_mode: BatchExecutionMode.Bulk,
+        batch_execution_reason: BatchExecutionReason.GenericBulkCompatible,
         batch_wait_until: BatchWaitUntil.Materialized,
         no_split: true,
         split_bundles: false,

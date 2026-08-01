@@ -50,8 +50,8 @@ const buildPglYoyoShape = (): BundleShape => {
   return {
     name: 'PGL Yoyo identity plus indicators',
     bundle: buildBundle(1, objects),
-    executionMode: BatchExecutionMode.Atomic,
-    executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+    executionMode: BatchExecutionMode.Bulk,
+    executionReason: BatchExecutionReason.GenericBulkCompatible,
     objectTypes: ['identity', 'indicator'],
   };
 };

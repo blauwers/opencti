@@ -14,9 +14,6 @@ import {
 } from './batch-types';
 
 const BUNDLE_PREFIX = 'bundle--';
-const IDENTITY_TYPE = 'identity';
-const INDICATOR_TYPE = 'indicator';
-
 const batchContractError = (message: string, code: BatchAdmissionErrorCode, data: Record<string, unknown> = {}) => {
   return FunctionalError(message, { batch_error_code: code, ...data });
 };
@@ -41,32 +38,7 @@ const normalizeWaitUntil = (waitUntil: BatchSubmitOptions['waitUntil']): BatchWa
   throw batchContractError('Invalid batch wait_until value', BatchAdmissionErrorCode.InvalidWaitUntil, { wait_until: waitUntil });
 };
 
-const hasOpenCtiOperation = (object: Record<string, any>): boolean => {
-  if (object.opencti_operation !== undefined || object.x_opencti_operation !== undefined) {
-    return true;
-  }
-  return Object.values(object.extensions ?? {}).some((extension) => {
-    return typeof extension === 'object'
-      && extension !== null
-      && ('opencti_operation' in extension || 'x_opencti_operation' in extension);
-  });
-};
-
-const isIdentityIndicatorAtomicCohort = (objects: Record<string, any>[]): boolean => {
-  if (objects.length < 2 || objects.some((object) => hasOpenCtiOperation(object))) {
-    return false;
-  }
-  const identities = objects.filter((object) => object.type === IDENTITY_TYPE);
-  const indicators = objects.filter((object) => object.type === INDICATOR_TYPE);
-  if (identities.length !== 1 || indicators.length !== objects.length - 1) {
-    return false;
-  }
-  const identityId = identities[0].id;
-  return typeof identityId === 'string'
-    && indicators.every((indicator) => indicator.created_by_ref === identityId);
-};
-
-const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Record<string, any>[]): {
+const normalizeExecutionPreference = (options: BatchSubmitOptions): {
   executionPreference: BatchExecutionPreference;
   executionMode: BatchExecutionMode;
   executionReason: BatchExecutionReason;
@@ -81,9 +53,7 @@ const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Reco
     };
   }
   const executionPreference = options.executionPreference ?? BatchExecutionPreference.Auto;
-  const atomicEligible = isIdentityIndicatorAtomicCohort(objects);
   const eligibleExecutionModes = [
-    ...(atomicEligible ? [BatchExecutionMode.Atomic] : []),
     BatchExecutionMode.Bulk,
     BatchExecutionMode.Compatibility,
   ];
@@ -104,19 +74,11 @@ const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Reco
     };
   }
   if (executionPreference === BatchExecutionPreference.Atomic) {
-    if (!atomicEligible) {
-      throw batchContractError(
-        'Requested batch execution preference is not eligible for this bundle',
-        BatchAdmissionErrorCode.ExecutionPreferenceNotEligible,
-        { execution_preference: executionPreference, eligible_execution_modes: eligibleExecutionModes },
-      );
-    }
-    return {
-      executionPreference,
-      executionMode: BatchExecutionMode.Atomic,
-      executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
-      eligibleExecutionModes,
-    };
+    throw batchContractError(
+      'Requested batch execution preference is not eligible for this bundle',
+      BatchAdmissionErrorCode.ExecutionPreferenceNotEligible,
+      { execution_preference: executionPreference, eligible_execution_modes: eligibleExecutionModes },
+    );
   }
   if (executionPreference === BatchExecutionPreference.Bulk) {
     return {
@@ -132,14 +94,6 @@ const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Reco
       BatchAdmissionErrorCode.UnsupportedExecutionPreference,
       { execution_preference: executionPreference },
     );
-  }
-  if (atomicEligible) {
-    return {
-      executionPreference,
-      executionMode: BatchExecutionMode.Atomic,
-      executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
-      eligibleExecutionModes,
-    };
   }
   return {
     executionPreference,
@@ -177,7 +131,7 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
 
   const bundleId = normalizeBundleId(jsonBundle.id);
   const normalizedBundle = { ...jsonBundle, id: bundleId };
-  const { executionPreference, executionMode, executionReason, eligibleExecutionModes } = normalizeExecutionPreference(options, jsonBundle.objects);
+  const { executionPreference, executionMode, executionReason, eligibleExecutionModes } = normalizeExecutionPreference(options);
   const waitUntil = normalizeWaitUntil(options.waitUntil);
   const idempotencyKey = normalizeIdempotencyKey(options.idempotencyKey, bundleId);
   const objectTypes = Array.from(new Set(jsonBundle.objects
