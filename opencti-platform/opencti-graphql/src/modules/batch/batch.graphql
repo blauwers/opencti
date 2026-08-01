@@ -38,6 +38,17 @@ input BatchSubmitOptionsInput {
   cleanup_inconsistent_bundle: Boolean
 }
 
+input BatchGraphqlOperationInput {
+  query: String!
+  variables: String
+  operation_name: String
+}
+
+input BatchExecuteOptionsInput {
+  wait_until: BatchWaitUntil
+  execution_mode: BatchExecutionMode
+}
+
 type BatchAdmission {
   batch_id: ID!
   bundle_id: ID!
@@ -53,6 +64,15 @@ type BatchAdmission {
   idempotency_key: String!
 }
 
+type BatchMutationExecution {
+  operation_count: Int!
+  execution_mode: BatchExecutionMode!
+  wait_until: BatchWaitUntil!
+  side_effect_kinds: [String!]!
+  materialized: Boolean!
+}
+
 type Mutation {
   stixBundleSubmit(connectorId: String!, bundle: String!, work_id: String, options: BatchSubmitOptionsInput): BatchAdmission! @auth(for: [CONNECTORAPI])
+  batchMutationsExecute(operations: [BatchGraphqlOperationInput!]!, options: BatchExecuteOptionsInput): BatchMutationExecution! @auth(for: [CONNECTORAPI])
 }

@@ -2125,6 +2125,11 @@ export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED'
 }
 
+export type BatchExecuteOptionsInput = {
+  execution_mode?: InputMaybe<BatchExecutionMode>;
+  wait_until?: InputMaybe<BatchWaitUntil>;
+};
+
 export enum BatchExecutionMode {
   Atomic = 'ATOMIC',
   Bulk = 'BULK',
@@ -2147,6 +2152,21 @@ export enum BatchExecutionReason {
   IdentityIndicatorAtomicCohort = 'IDENTITY_INDICATOR_ATOMIC_COHORT',
   OperationalBundleCompatibility = 'OPERATIONAL_BUNDLE_COMPATIBILITY'
 }
+
+export type BatchGraphqlOperationInput = {
+  operation_name?: InputMaybe<Scalars['String']['input']>;
+  query: Scalars['String']['input'];
+  variables?: InputMaybe<Scalars['String']['input']>;
+};
+
+export type BatchMutationExecution = {
+  __typename?: 'BatchMutationExecution';
+  execution_mode: BatchExecutionMode;
+  materialized: Scalars['Boolean']['output'];
+  operation_count: Scalars['Int']['output'];
+  side_effect_kinds: Array<Scalars['String']['output']>;
+  wait_until: BatchWaitUntil;
+};
 
 export type BatchSubmitOptionsInput = {
   cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
@@ -17163,6 +17183,7 @@ export type Mutation = {
   attackPatternAdd?: Maybe<AttackPattern>;
   attackPatternEdit?: Maybe<AttackPatternEditMutations>;
   autoRegisterOpenCTI: Success;
+  batchMutationsExecute: BatchMutationExecution;
   bookmarkAdd?: Maybe<StixDomainObject>;
   bookmarkDelete?: Maybe<Scalars['ID']['output']>;
   campaignAdd?: Maybe<Campaign>;
@@ -17805,6 +17826,12 @@ export type MutationAttackPatternEditArgs = {
 
 export type MutationAutoRegisterOpenCtiArgs = {
   input: AutoRegisterInput;
+};
+
+
+export type MutationBatchMutationsExecuteArgs = {
+  operations: Array<BatchGraphqlOperationInput>;
+  options?: InputMaybe<BatchExecuteOptionsInput>;
 };
 
 
@@ -39746,9 +39773,12 @@ export type ResolversTypes = ResolversObject<{
   BasicRelationship: ResolverTypeWrapper<ResolversInterfaceTypes<ResolversTypes>['BasicRelationship']>;
   BatchAdmission: ResolverTypeWrapper<BatchAdmission>;
   BatchAdmissionStatus: BatchAdmissionStatus;
+  BatchExecuteOptionsInput: BatchExecuteOptionsInput;
   BatchExecutionMode: BatchExecutionMode;
   BatchExecutionPreference: BatchExecutionPreference;
   BatchExecutionReason: BatchExecutionReason;
+  BatchGraphqlOperationInput: BatchGraphqlOperationInput;
+  BatchMutationExecution: ResolverTypeWrapper<BatchMutationExecution>;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;
   BatchWaitUntil: BatchWaitUntil;
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
@@ -40897,6 +40927,9 @@ export type ResolversParentTypes = ResolversObject<{
   BasicObject: BasicStoreBase;
   BasicRelationship: ResolversInterfaceTypes<ResolversParentTypes>['BasicRelationship'];
   BatchAdmission: BatchAdmission;
+  BatchExecuteOptionsInput: BatchExecuteOptionsInput;
+  BatchGraphqlOperationInput: BatchGraphqlOperationInput;
+  BatchMutationExecution: BatchMutationExecution;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;
   Boolean: Scalars['Boolean']['output'];
   CSVFeedAddInputFromImport: CsvFeedAddInputFromImport;
@@ -42563,6 +42596,14 @@ export type BatchAdmissionResolvers<ContextType = any, ParentType extends Resolv
   status?: Resolver<ResolversTypes['BatchAdmissionStatus'], ParentType, ContextType>;
   wait_until?: Resolver<ResolversTypes['BatchWaitUntil'], ParentType, ContextType>;
   work_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+}>;
+
+export type BatchMutationExecutionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchMutationExecution'] = ResolversParentTypes['BatchMutationExecution']> = ResolversObject<{
+  execution_mode?: Resolver<ResolversTypes['BatchExecutionMode'], ParentType, ContextType>;
+  materialized?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
+  operation_count?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  side_effect_kinds?: Resolver<Array<ResolversTypes['String']>, ParentType, ContextType>;
+  wait_until?: Resolver<ResolversTypes['BatchWaitUntil'], ParentType, ContextType>;
 }>;
 
 export type CsvFeedAddInputFromImportResolvers<ContextType = any, ParentType extends ResolversParentTypes['CSVFeedAddInputFromImport'] = ResolversParentTypes['CSVFeedAddInputFromImport']> = ResolversObject<{
@@ -47708,6 +47749,7 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   attackPatternAdd?: Resolver<Maybe<ResolversTypes['AttackPattern']>, ParentType, ContextType, RequireFields<MutationAttackPatternAddArgs, 'input'>>;
   attackPatternEdit?: Resolver<Maybe<ResolversTypes['AttackPatternEditMutations']>, ParentType, ContextType, RequireFields<MutationAttackPatternEditArgs, 'id'>>;
   autoRegisterOpenCTI?: Resolver<ResolversTypes['Success'], ParentType, ContextType, RequireFields<MutationAutoRegisterOpenCtiArgs, 'input'>>;
+  batchMutationsExecute?: Resolver<ResolversTypes['BatchMutationExecution'], ParentType, ContextType, RequireFields<MutationBatchMutationsExecuteArgs, 'operations'>>;
   bookmarkAdd?: Resolver<Maybe<ResolversTypes['StixDomainObject']>, ParentType, ContextType, RequireFields<MutationBookmarkAddArgs, 'id' | 'type'>>;
   bookmarkDelete?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType, RequireFields<MutationBookmarkDeleteArgs, 'id'>>;
   campaignAdd?: Resolver<Maybe<ResolversTypes['Campaign']>, ParentType, ContextType, RequireFields<MutationCampaignAddArgs, 'input'>>;
@@ -53640,6 +53682,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   BasicObject?: BasicObjectResolvers<ContextType>;
   BasicRelationship?: BasicRelationshipResolvers<ContextType>;
   BatchAdmission?: BatchAdmissionResolvers<ContextType>;
+  BatchMutationExecution?: BatchMutationExecutionResolvers<ContextType>;
   CSVFeedAddInputFromImport?: CsvFeedAddInputFromImportResolvers<ContextType>;
   Campaign?: CampaignResolvers<ContextType>;
   CampaignConnection?: CampaignConnectionResolvers<ContextType>;

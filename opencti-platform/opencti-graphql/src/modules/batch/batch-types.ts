@@ -97,3 +97,9 @@ export interface BatchQueueMessage {
   batch_wait_until: BatchWaitUntil;
   batch_idempotency_key: string;
 }
+
+export interface BatchGraphqlOperationInput {
+  query: string;
+  variables?: string | null;
+  operationName?: string | null;
+}
