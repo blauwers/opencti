@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pycti.api.opencti_api_batch import BatchMutationPlan
 from pycti.utils.opencti_stix2 import OpenCTIStix2
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
@@ -310,6 +311,66 @@ def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
         execution_mode="BULK",
         wait_until="COMMITTED",
     )
+
+
+def test_import_bundle_batch_tags_item_mutations_with_dependency_phases(
+    monkeypatch,
+) -> None:
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+    plan = BatchMutationPlan()
+
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
+        plan.capture(
+            "mutation Record($value: String!) { record(value: $value) }",
+            {"value": item["id"]},
+            [],
+        )
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--11111111-1111-4111-8111-111111111111",
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                    "created_by_ref": "identity--22222222-2222-4222-8222-222222222222",
+                },
+                {
+                    "type": "identity",
+                    "id": "identity--22222222-2222-4222-8222-222222222222",
+                },
+            ],
+        },
+        batch_plan=plan,
+    )
+
+    assert [
+        (
+            operation["execution_group"],
+            operation["execution_phase"],
+            operation["variables"],
+        )
+        for operation in plan.operations
+    ] == [
+        (
+            0,
+            1,
+            '{"value": "identity--22222222-2222-4222-8222-222222222222"}',
+        ),
+        (
+            1,
+            2,
+            '{"value": "indicator--11111111-1111-4111-8111-111111111111"}',
+        ),
+    ]
 
 
 def test_extract_embedded_storage_path_ignores_query_string(

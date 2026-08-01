@@ -8,6 +8,7 @@ import re
 import time
 import traceback
 import uuid
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urljoin, urlparse
 
@@ -20,7 +21,7 @@ from requests import RequestException, Timeout
 from typing_extensions import deprecated
 
 from pycti.entities.opencti_identity import Identity
-from pycti.api.opencti_api_batch import BatchMutationPlanUnsupported
+from pycti.api.opencti_api_batch import BatchMutationPlan, BatchMutationPlanUnsupported
 from pycti.utils.constants import (
     IdentityTypes,
     LocationTypes,
@@ -459,6 +460,7 @@ class OpenCTIStix2:
                 objects_max_refs,
                 cleanup_inconsistent_bundle,
                 report_expectations,
+                batch_plan=plan,
             )
         self.opencti.execute_batch_mutation_plan(
             plan,
@@ -3728,6 +3730,7 @@ class OpenCTIStix2:
         objects_max_refs: int = 0,
         cleanup_inconsistent_bundle: bool = False,
         report_expectations: bool = True,
+        batch_plan: Optional[BatchMutationPlan] = None,
     ) -> Tuple[list, list]:
         """Import a complete STIX2 bundle into OpenCTI.
 
@@ -3748,6 +3751,9 @@ class OpenCTIStix2:
         :param report_expectations: Whether to report Work progress per imported item.
             The batch worker disables this and reports once for the original bundle.
         :type report_expectations: bool, optional
+        :param batch_plan: Active mutation plan used to tag each item's operations with
+            a dependency phase for backend execution.
+        :type batch_plan: BatchMutationPlan or None, optional
         :return: Tuple of (list of successfully imported elements, list of failed/too-large elements)
         :rtype: Tuple[list, list]
         :raises ValueError: If the bundle is not properly formatted or empty
@@ -3817,14 +3823,20 @@ class OpenCTIStix2:
                     )
                 too_large_elements_bundles.append(item)
             else:
-                failed_item = self.import_item_with_retries(
-                    item,
-                    update,
-                    types,
-                    work_id,
-                    bundle_id,
-                    report_expectations,
+                execution_group = (
+                    batch_plan.execution_group(item.get("nb_deps", 0))
+                    if batch_plan is not None
+                    else nullcontext()
                 )
+                with execution_group:
+                    failed_item = self.import_item_with_retries(
+                        item,
+                        update,
+                        types,
+                        work_id,
+                        bundle_id,
+                        report_expectations,
+                    )
                 if failed_item is not None:
                     too_large_elements_bundles.append(failed_item)
                 else:

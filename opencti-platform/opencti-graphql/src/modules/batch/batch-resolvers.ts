@@ -20,6 +20,8 @@ interface BatchGraphqlOperationInputValue {
   query: string;
   variables?: string | null;
   operation_name?: string | null;
+  execution_group?: number | null;
+  execution_phase?: number | null;
   files?: BatchGraphqlFileInputValue[] | null;
 }
 
@@ -60,6 +62,8 @@ const batchResolvers = {
       query: operation.query,
       variables: operation.variables,
       operationName: operation.operation_name,
+      executionGroup: operation.execution_group,
+      executionPhase: operation.execution_phase,
       files: operation.files?.map((file): BatchGraphqlFileInput => ({
         path: file.path,
         name: file.name,

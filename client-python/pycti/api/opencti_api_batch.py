@@ -1,6 +1,7 @@
 import base64
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +19,9 @@ class BatchMutationPlanUnsupported(Exception):
 @dataclass
 class BatchMutationPlan:
     operations: List[Dict[str, Any]] = field(default_factory=list)
+    _next_execution_group: int = field(default=0, init=False, repr=False)
+    _active_execution_group: Optional[int] = field(default=None, init=False, repr=False)
+    _active_execution_phase: Optional[int] = field(default=None, init=False, repr=False)
 
     @staticmethod
     def is_mutation(query: str) -> bool:
@@ -34,11 +38,30 @@ class BatchMutationPlan:
             "query": query,
             "variables": json.dumps(variables),
         }
+        if self._active_execution_group is not None:
+            operation["execution_group"] = self._active_execution_group
+            operation["execution_phase"] = self._active_execution_phase
         files = self._serialize_files(files_vars)
         if files:
             operation["files"] = files
         self.operations.append(operation)
         return {"data": self._build_synthetic_data(query, operation_index)}
+
+    @contextmanager
+    def execution_group(self, execution_phase: int):
+        """Tag captured mutations as one serial group within a dependency phase."""
+        if not isinstance(execution_phase, int) or execution_phase < 0:
+            raise ValueError("Batch execution phase must be a non-negative integer")
+        if self._active_execution_group is not None:
+            raise ValueError("A batch execution group is already active")
+        self._active_execution_group = self._next_execution_group
+        self._active_execution_phase = execution_phase
+        self._next_execution_group += 1
+        try:
+            yield
+        finally:
+            self._active_execution_group = None
+            self._active_execution_phase = None
 
     @staticmethod
     def _serialize_files(files_vars: List[Dict[str, Any]]) -> List[Dict[str, str]]:

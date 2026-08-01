@@ -2161,6 +2161,8 @@ export type BatchGraphqlFileInput = {
 };
 
 export type BatchGraphqlOperationInput = {
+  execution_group?: InputMaybe<Scalars['Int']['input']>;
+  execution_phase?: InputMaybe<Scalars['Int']['input']>;
   files?: InputMaybe<Array<BatchGraphqlFileInput>>;
   operation_name?: InputMaybe<Scalars['String']['input']>;
   query: Scalars['String']['input'];

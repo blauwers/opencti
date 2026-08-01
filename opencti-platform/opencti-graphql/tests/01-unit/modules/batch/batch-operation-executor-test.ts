@@ -10,7 +10,7 @@ import {
 import { buildBatchGraphqlResultToken, executeBatchGraphqlOperations } from '../../../../src/modules/batch/batch-operation-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
-const buildSchema = (calls: string[]) => makeExecutableSchema({
+const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<void>) => makeExecutableSchema({
   typeDefs: `
     type Query {
       status: String!
@@ -34,6 +34,7 @@ const buildSchema = (calls: string[]) => makeExecutableSchema({
     Mutation: {
       record: async (_: unknown, { value }: { value: string }) => {
         calls.push(`write:${value}:${isBatchWriteBoundaryOpen()}`);
+        await beforeRecord?.(value);
         registerBatchCommitter({
           key: 'graphql-operations',
           execute: async () => {
@@ -217,5 +218,119 @@ describe('batch GraphQL operation executor', () => {
       { echo: 'source' },
       { upload: 'payload' },
     ]);
+  });
+
+  it('executes independent declared groups in the same phase concurrently', async () => {
+    const calls: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let markSecondStarted: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'first') {
+        await firstGate;
+      }
+      if (value === 'second') {
+        markSecondStarted?.();
+      }
+    });
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'first' }),
+        executionGroup: 0,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'second' }),
+        executionGroup: 1,
+        executionPhase: 1,
+      },
+    ]);
+
+    await secondStarted;
+    expect(calls).toEqual([
+      'write:first:true',
+      'write:second:true',
+    ]);
+
+    releaseFirst?.();
+    const execution = await executionPromise;
+    expect(execution.results).toEqual([
+      { record: 'first' },
+      { record: 'second' },
+    ]);
+  });
+
+  it('moves result-token consumers to a later phase even when declared beside the producer', async () => {
+    const calls: string[] = [];
+    let releaseSource: (() => void) | undefined;
+    let markSourceStarted: (() => void) | undefined;
+    const sourceGate = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    const sourceStarted = new Promise<void>((resolve) => {
+      markSourceStarted = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'source') {
+        markSourceStarted?.();
+        await sourceGate;
+      }
+    });
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'source' }),
+        executionGroup: 0,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation Echo($value: String!) { echo(value: $value) }',
+        variables: JSON.stringify({ value: buildBatchGraphqlResultToken(0, ['record']) }),
+        executionGroup: 1,
+        executionPhase: 1,
+      },
+    ]);
+
+    await sourceStarted;
+    expect(calls).toEqual(['write:source:true']);
+
+    releaseSource?.();
+    const execution = await executionPromise;
+    expect(calls).toContain('echo:source');
+    expect(execution.results).toEqual([
+      { record: 'source' },
+      { echo: 'source' },
+    ]);
+  });
+
+  it('does not commit writes when one concurrent group fails', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    await expect(executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'first' }),
+        executionGroup: 0,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation Fail { fail }',
+        executionGroup: 1,
+        executionPhase: 1,
+      },
+    ])).rejects.toThrow('Batch GraphQL operation failed');
+
+    expect(calls).toContain('write:first:true');
+    expect(calls).not.toContain('commit:false');
   });
 });

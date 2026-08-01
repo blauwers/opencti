@@ -81,3 +81,32 @@ def test_batch_mutation_plan_serializes_uploads_with_variable_paths():
             "data": "dHdv",
         },
     ]
+
+
+def test_batch_mutation_plan_tags_operations_with_execution_group_metadata():
+    plan = BatchMutationPlan()
+
+    with plan.execution_group(2):
+        plan.capture(
+            "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+            {"input": {"stix_id": "indicator--1"}},
+            [],
+        )
+        plan.capture(
+            "mutation IndicatorEdit($id: ID!) { indicatorEdit(id: $id) { id } }",
+            {"id": "indicator--1"},
+            [],
+        )
+
+    with plan.execution_group(3):
+        plan.capture(
+            "mutation RelationshipAdd($input: StixCoreRelationshipAddInput!) { stixCoreRelationshipAdd(input: $input) { id } }",
+            {"input": {"fromId": "indicator--1", "toId": "identity--1"}},
+            [],
+        )
+
+    assert [(operation["execution_group"], operation["execution_phase"]) for operation in plan.operations] == [
+        (0, 2),
+        (0, 2),
+        (1, 3),
+    ]

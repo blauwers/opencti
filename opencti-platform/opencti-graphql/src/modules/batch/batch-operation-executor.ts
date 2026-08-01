@@ -1,6 +1,8 @@
 import { Readable } from 'node:stream';
+import { Promise as BluePromise } from 'bluebird';
 import { execute, Kind, parse, type DocumentNode, type ExecutionResult, type GraphQLSchema, validate } from 'graphql';
 import Upload from 'graphql-upload/Upload.mjs';
+import conf from '../../config/conf';
 import { FunctionalError } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
@@ -9,15 +11,26 @@ import type { BatchGraphqlFileInput, BatchGraphqlOperationInput } from './batch-
 type BatchGraphqlOperationResult = Record<string, unknown> | null | undefined;
 type BatchGraphqlResultBindings = Map<string, unknown>;
 type PreparedBatchGraphqlOperation = {
+  dependencyOperationIndexes: Set<number>;
   document: DocumentNode;
+  executionGroup?: number;
+  executionPhase?: number;
   files?: BatchGraphqlFileInput[] | null;
   operationIndex: number;
   operationName?: string | null;
   variables: Record<string, unknown>;
 };
+type PreparedBatchGraphqlOperationGroup = {
+  declaredPhase: number;
+  dependencyGroupIds: Set<number>;
+  executionPhase: number;
+  groupId: number;
+  operations: PreparedBatchGraphqlOperation[];
+};
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
+const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
 
 export const buildBatchGraphqlResultToken = (operationIndex: number, path: string[]): string => {
   return `${BATCH_RESULT_TOKEN_PREFIX}:${operationIndex}:${path.join('.')}`;
@@ -119,7 +132,11 @@ const validateOperationFiles = (
   files.forEach((file) => setValueAtPath(candidateVariables, file.path, null, operationIndex));
 };
 
-const validateOperationResultTokens = (value: unknown, operationIndex: number): void => {
+const collectOperationResultTokenDependencies = (
+  value: unknown,
+  operationIndex: number,
+  dependencies: Set<number> = new Set(),
+): Set<number> => {
   if (typeof value === 'string' && value.startsWith(BATCH_RESULT_TOKEN_PREFIX)) {
     const match = value.match(BATCH_RESULT_TOKEN_PATTERN);
     if (!match) {
@@ -132,15 +149,34 @@ const validateOperationResultTokens = (value: unknown, operationIndex: number): 
         dependency_operation_index: dependencyIndex,
       });
     }
-    return;
+    dependencies.add(dependencyIndex);
+    return dependencies;
   }
   if (Array.isArray(value)) {
-    value.forEach((item) => validateOperationResultTokens(item, operationIndex));
-    return;
+    value.forEach((item) => collectOperationResultTokenDependencies(item, operationIndex, dependencies));
+    return dependencies;
   }
   if (value !== null && typeof value === 'object') {
-    Object.values(value).forEach((item) => validateOperationResultTokens(item, operationIndex));
+    Object.values(value).forEach((item) => collectOperationResultTokenDependencies(item, operationIndex, dependencies));
   }
+  return dependencies;
+};
+
+const parseExecutionCoordinate = (
+  value: number | null | undefined,
+  field: 'execution_group' | 'execution_phase',
+  operationIndex: number,
+): number | undefined => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw FunctionalError('Invalid batch GraphQL execution metadata', {
+      operation_index: operationIndex,
+      [field]: value,
+    });
+  }
+  return value;
 };
 
 const parseVariables = (variables: string | null | undefined, operationIndex: number): Record<string, unknown> => {
@@ -235,14 +271,145 @@ const prepareBatchGraphqlOperations = (
   return operations.map((operation, operationIndex) => {
     const prepared = validateOperationDocument(schema, operation, operationIndex);
     validateOperationFiles(prepared.variables, operation.files, operationIndex);
-    validateOperationResultTokens(prepared.variables, operationIndex);
+    const dependencyOperationIndexes = collectOperationResultTokenDependencies(prepared.variables, operationIndex);
     return {
       ...prepared,
+      dependencyOperationIndexes,
+      executionGroup: parseExecutionCoordinate(operation.executionGroup, 'execution_group', operationIndex),
+      executionPhase: parseExecutionCoordinate(operation.executionPhase, 'execution_phase', operationIndex),
       files: operation.files,
       operationIndex,
       operationName: operation.operationName,
     };
   });
+};
+
+const buildSerialOperationGroups = (
+  operations: PreparedBatchGraphqlOperation[],
+): PreparedBatchGraphqlOperationGroup[] => {
+  return operations.map((operation) => ({
+    declaredPhase: operation.operationIndex,
+    dependencyGroupIds: new Set(),
+    executionPhase: operation.operationIndex,
+    groupId: operation.operationIndex,
+    operations: [operation],
+  }));
+};
+
+const buildDeclaredOperationGroups = (
+  operations: PreparedBatchGraphqlOperation[],
+): PreparedBatchGraphqlOperationGroup[] => {
+  const groups: PreparedBatchGraphqlOperationGroup[] = [];
+  const groupsById = new Map<number, PreparedBatchGraphqlOperationGroup>();
+  const operationGroupIds = new Map<number, number>();
+  let currentGroup: PreparedBatchGraphqlOperationGroup | undefined;
+  let lastDeclaredPhase = -1;
+
+  operations.forEach((operation) => {
+    const groupId = operation.executionGroup as number;
+    const declaredPhase = operation.executionPhase as number;
+    if (!currentGroup || currentGroup.groupId !== groupId) {
+      if (groupsById.has(groupId)) {
+        throw FunctionalError('Batch GraphQL execution groups must be contiguous', {
+          operation_index: operation.operationIndex,
+          execution_group: groupId,
+        });
+      }
+      if (declaredPhase < lastDeclaredPhase) {
+        throw FunctionalError('Batch GraphQL execution phases must be non-decreasing', {
+          operation_index: operation.operationIndex,
+          execution_phase: declaredPhase,
+        });
+      }
+      currentGroup = {
+        declaredPhase,
+        dependencyGroupIds: new Set(),
+        executionPhase: declaredPhase,
+        groupId,
+        operations: [],
+      };
+      groups.push(currentGroup);
+      groupsById.set(groupId, currentGroup);
+      lastDeclaredPhase = declaredPhase;
+    } else if (currentGroup.declaredPhase !== declaredPhase) {
+      throw FunctionalError('Batch GraphQL execution group operations must share one phase', {
+        operation_index: operation.operationIndex,
+        execution_group: groupId,
+      });
+    }
+    currentGroup.operations.push(operation);
+    operationGroupIds.set(operation.operationIndex, groupId);
+  });
+
+  groups.forEach((group) => {
+    group.operations.forEach((operation) => {
+      operation.dependencyOperationIndexes.forEach((dependencyOperationIndex) => {
+        const dependencyGroupId = operationGroupIds.get(dependencyOperationIndex);
+        if (dependencyGroupId !== undefined && dependencyGroupId !== group.groupId) {
+          group.dependencyGroupIds.add(dependencyGroupId);
+        }
+      });
+    });
+    group.dependencyGroupIds.forEach((dependencyGroupId) => {
+      const dependencyGroup = groupsById.get(dependencyGroupId);
+      if (dependencyGroup) {
+        group.executionPhase = Math.max(group.executionPhase, dependencyGroup.executionPhase + 1);
+      }
+    });
+  });
+
+  return groups;
+};
+
+const buildOperationGroups = (
+  operations: PreparedBatchGraphqlOperation[],
+): PreparedBatchGraphqlOperationGroup[] => {
+  const operationsWithMetadata = operations.filter((operation) => operation.executionGroup !== undefined || operation.executionPhase !== undefined);
+  if (operationsWithMetadata.length === 0) {
+    return buildSerialOperationGroups(operations);
+  }
+  if (operationsWithMetadata.length !== operations.length
+    || operations.some((operation) => operation.executionGroup === undefined || operation.executionPhase === undefined)) {
+    throw FunctionalError('Batch GraphQL execution metadata must be provided for every operation');
+  }
+  return buildDeclaredOperationGroups(operations);
+};
+
+const executeOperationGroup = async (
+  schema: GraphQLSchema,
+  context: AuthContext,
+  group: PreparedBatchGraphqlOperationGroup,
+  resultBindings: BatchGraphqlResultBindings,
+  results: BatchGraphqlOperationResult[],
+): Promise<void> => {
+  for (const operation of group.operations) {
+    results[operation.operationIndex] = await executeOperation(schema, context, operation, resultBindings);
+  }
+};
+
+const executeOperationGroups = async (
+  schema: GraphQLSchema,
+  context: AuthContext,
+  operations: PreparedBatchGraphqlOperation[],
+  resultBindings: BatchGraphqlResultBindings,
+): Promise<BatchGraphqlOperationResult[]> => {
+  const groups = buildOperationGroups(operations);
+  const groupsByPhase = new Map<number, PreparedBatchGraphqlOperationGroup[]>();
+  groups.forEach((group) => {
+    const phaseGroups = groupsByPhase.get(group.executionPhase) ?? [];
+    phaseGroups.push(group);
+    groupsByPhase.set(group.executionPhase, phaseGroups);
+  });
+  const results = new Array<BatchGraphqlOperationResult>(operations.length);
+  const phases = Array.from(groupsByPhase.keys()).sort((left, right) => left - right);
+  for (const phase of phases) {
+    await BluePromise.map(
+      groupsByPhase.get(phase) ?? [],
+      (group) => executeOperationGroup(schema, context, group, resultBindings, results),
+      { concurrency: BATCH_GRAPHQL_MAX_CONCURRENCY },
+    );
+  }
+  return results;
 };
 
 export const executeBatchGraphqlOperations = async (
@@ -256,9 +423,12 @@ export const executeBatchGraphqlOperations = async (
   }
   const preparedOperations = prepareBatchGraphqlOperations(schema, operations);
   const resultBindings: BatchGraphqlResultBindings = new Map();
-  const mutations = preparedOperations.map((operation) => ({
+  const execution = await executeBatchMutations<BatchGraphqlOperationResult[]>([{
     kind: BatchMutationKind.GraphqlOperation,
-    executeWrite: () => executeOperation(schema, context, operation, resultBindings),
-  }));
-  return executeBatchMutations(mutations, options);
+    executeWrite: () => executeOperationGroups(schema, context, preparedOperations, resultBindings),
+  }], options);
+  return {
+    ...execution,
+    results: execution.results[0],
+  };
 };

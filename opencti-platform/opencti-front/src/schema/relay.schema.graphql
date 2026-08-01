@@ -17007,6 +17007,8 @@ input BatchGraphqlOperationInput {
   query: String!
   variables: String
   operation_name: String
+  execution_group: Int
+  execution_phase: Int
   files: [BatchGraphqlFileInput!]
 }
 
