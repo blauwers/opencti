@@ -2238,6 +2238,59 @@ export const elListBufferedElements = async <T extends BasicStoreBase>(
   }
   return elFindByIds<T>(context, user, ids, { indices, type, withoutRels: false }) as Promise<T[]>;
 };
+export const elFindBufferedElementsByIds = async <T extends BasicStoreBase>(
+  context: AuthContext,
+  user: AuthUser,
+  ids: string[] | string,
+  opts: Pick<ElFindByIdsOpts, 'indices' | 'type'> = {},
+): Promise<T[]> => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return [];
+  }
+  const idsArray = Array.isArray(ids) ? ids : [ids];
+  const processIds = idsArray.filter((id) => isNotEmptyField(id));
+  if (processIds.length === 0) {
+    return [];
+  }
+  const types = (Array.isArray(opts.type) || isEmptyField(opts.type)) ? opts.type : [opts.type] as string[];
+  const queryIndices = computeQueryIndices(opts.indices, types);
+  const computedIndices = getIndicesToQuery(context, user, queryIndices);
+  const bufferedHits = new Map<string, T>();
+  getOrderedBufferedEngineWrites().forEach((write) => {
+    if (write.kind === 'bulk-update') {
+      write.operations.forEach((operation) => {
+        const existing = bufferedHits.get(operation.internalId);
+        if (existing && matchesBufferedEngineElement(existing, processIds, types, computedIndices) && matchesBufferedEngineIndex(existing._index, operation.index)) {
+          bufferedHits.set(operation.internalId, operation.apply(existing) as T);
+        }
+      });
+      return;
+    }
+    const elements = getBufferedWriteElements(write);
+    elements.forEach((element) => {
+      const existing = bufferedHits.get(element.internal_id);
+      const matchesQuery = matchesBufferedEngineElement(element, processIds, types, computedIndices);
+      if (write.kind === 'delete') {
+        if (matchesQuery) {
+          bufferedHits.delete(element.internal_id);
+        }
+        return;
+      }
+      if (!existing && !matchesQuery) {
+        return;
+      }
+      if (existing && !matchesQuery) {
+        return;
+      }
+      if (write.kind === 'update') {
+        bufferedHits.set(element.internal_id, applyBufferedUpdate(existing, element) as T);
+        return;
+      }
+      bufferedHits.set(element.internal_id, element as T);
+    });
+  });
+  return Array.from(bufferedHits.values());
+};
 export const elLoadById = async <T extends BasicStoreBase>(
   context: AuthContext,
   user: AuthUser,

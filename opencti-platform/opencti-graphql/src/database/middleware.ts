@@ -52,6 +52,7 @@ import {
   elAggregationRelationsCount,
   elConnection,
   elDeleteElements,
+  elFindBufferedElementsByIds,
   elFindByIds,
   type ElFindByIdsOpts,
   elHistogramCount,
@@ -3333,7 +3334,7 @@ export const getExistingRelations = async (
   const existingRelationships: StoreProxyRelation[] = [];
   const inputIds = getInputIds(relationshipType, input, false);
   if (isBatchWriteBoundaryOpen()) {
-    const bufferedRelationships = await internalFindByIds<BasicStoreRelation>(context, SYSTEM_USER, inputIds, { type: relationshipType }) as StoreProxyRelation[];
+    const bufferedRelationships = await elFindBufferedElementsByIds<BasicStoreRelation>(context, SYSTEM_USER, inputIds, { type: relationshipType }) as StoreProxyRelation[];
     pushAll(existingRelationships, bufferedRelationships);
   }
   if (fromRule) {
