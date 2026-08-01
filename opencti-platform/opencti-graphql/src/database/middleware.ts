@@ -182,6 +182,7 @@ import {
 import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
 import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
+import { BatchMutationKind, executeSingleBatchMutation } from '../modules/batch/batch-executor';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
 import {
@@ -2896,20 +2897,25 @@ export const updateAttribute = async <T extends StoreObject>(
   inputs: EditInput[],
   opts: { noEnrich?: boolean } & UpdateAttributeOpts = {},
 ) => {
-  const initial = await storeLoadByIdWithRefs<T>(context, user, id, { ...opts, type });
-  if (!initial) {
-    throw FunctionalError('Cant find element to update', { id, type });
-  }
-  // Validate input attributes
-  const entitySetting = await getEntitySettingFromCache(context, initial.entity_type);
-  await validateInputUpdate(context, user, initial.entity_type, initial as Record<string, any>, inputs, entitySetting as BasicStoreEntityEntitySetting);
-  // Continue update
-  const data = await updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
-  if (!opts.noEnrich && data.event) {
-    // If element really updated, try to enrich if needed
-    await triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase);
-  }
-  return data;
+  return executeSingleBatchMutation({
+    kind: BatchMutationKind.UpdateAttribute,
+    execute: async () => {
+      const initial = await storeLoadByIdWithRefs<T>(context, user, id, { ...opts, type });
+      if (!initial) {
+        throw FunctionalError('Cant find element to update', { id, type });
+      }
+      // Validate input attributes
+      const entitySetting = await getEntitySettingFromCache(context, initial.entity_type);
+      await validateInputUpdate(context, user, initial.entity_type, initial as Record<string, any>, inputs, entitySetting as BasicStoreEntityEntitySetting);
+      // Continue update
+      const data = await updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
+      if (!opts.noEnrich && data.event) {
+        // If element really updated, try to enrich if needed
+        await triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase);
+      }
+      return data;
+    },
+  });
 };
 type PatchAttributeOpts = UpdateAttributeOpts & {
   operations?: Record<string, undefined | 'add' | 'remove' | 'replace'>;
@@ -3507,7 +3513,10 @@ export const createRelation = async (
   input: Record<string, any>,
   opts: CreateRelationRawOpts = {},
 ) => {
-  const data = await createRelationRaw(context, user, input, opts);
+  const data = await executeSingleBatchMutation({
+    kind: BatchMutationKind.CreateRelation,
+    execute: () => createRelationRaw(context, user, input, opts),
+  });
   return data.element;
 };
 type RuleContent = {
@@ -3961,7 +3970,10 @@ export const createEntity = async (
 ) => {
   const isCompleteResult = opts.complete === true;
   // volumes of objects relationships must be controlled
-  const data = await createEntityRaw(context, user, input, type, opts);
+  const data = await executeSingleBatchMutation({
+    kind: BatchMutationKind.CreateEntity,
+    execute: () => createEntityRaw(context, user, input, type, opts),
+  });
   // In case of creation, start an enrichment
   if (data.isCreation) {
     await triggerCreateEntityAutoEnrichment(context, user, data.element);
