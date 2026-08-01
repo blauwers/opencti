@@ -10,7 +10,9 @@ import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS } from '../../../src/databas
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
 import { updatePirInformationOnEntity } from '../../../src/modules/pir/pir-utils';
-import { FilterMode, FilterOperator } from '../../../src/generated/graphql';
+import { addVocabulary, deleteVocabulary, editVocabulary } from '../../../src/modules/vocabulary/vocabulary-domain';
+import { ENTITY_TYPE_VOCABULARY } from '../../../src/modules/vocabulary/vocabulary-types';
+import { FilterMode, FilterOperator, VocabularyCategory } from '../../../src/generated/graphql';
 import { buildRefRelationKey } from '../../../src/schema/general';
 import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
 import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
@@ -21,6 +23,7 @@ describe('batch engine writes', () => {
   let deletedMalware: any;
   const cleanupMalwares: any[] = [];
   const cleanupSoftDeletedMalwareIds: string[] = [];
+  const cleanupVocabularies: any[] = [];
 
   const findDeleteOperationsForMainEntity = (mainEntityId: string) => {
     return fullEntitiesList<any>(testContext, ADMIN_USER, [ENTITY_TYPE_DELETE_OPERATION], {
@@ -53,6 +56,13 @@ describe('batch engine writes', () => {
       const deleteOperations = await findDeleteOperationsForMainEntity(cleanupSoftDeletedMalwareIds[index]);
       for (let operationIndex = 0; operationIndex < deleteOperations.length; operationIndex += 1) {
         await confirmDelete(testContext, ADMIN_USER, deleteOperations[operationIndex].internal_id);
+      }
+    }
+    for (let index = 0; index < cleanupVocabularies.length; index += 1) {
+      const cleanupVocabulary = cleanupVocabularies[index];
+      const existing = await internalLoadById(testContext, ADMIN_USER, cleanupVocabulary.internal_id);
+      if (existing) {
+        await deleteElementById(testContext, ADMIN_USER, cleanupVocabulary.internal_id, ENTITY_TYPE_VOCABULARY, { forceDelete: true });
       }
     }
   });
@@ -519,5 +529,130 @@ describe('batch engine writes', () => {
     expect(committed?.pir_information ?? []).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ pir_id: pirId }),
     ]));
+  });
+
+  it('keeps vocabulary rename fan-out updates inside the batch boundary until commit', async () => {
+    const oldName = `batch-old-${uuidv4()}`;
+    const newName = `batch-new-${uuidv4()}`;
+    const vocabulary = await addVocabulary(testContext, ADMIN_USER, {
+      name: oldName,
+      description: '',
+      category: VocabularyCategory.MalwareTypeOv,
+    });
+    cleanupVocabularies.push(vocabulary);
+    const vocabularyMalware = await addMalware(testContext, ADMIN_USER, {
+      name: `Batch vocabulary rename ${uuidv4()}`,
+      malware_types: [oldName],
+    });
+    cleanupMalwares.push(vocabularyMalware);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await editVocabulary(testContext, ADMIN_USER, vocabulary.internal_id, [{ key: 'name', value: [newName] }], {});
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await internalLoadById(testContext, ADMIN_USER, vocabularyMalware.internal_id) as any;
+          expect(buffered?.malware_types).toContain(newName);
+          expect(buffered?.malware_types).not.toContain(oldName);
+          throw new Error('abort vocabulary rename batch');
+        },
+      },
+    ])).rejects.toThrow('abort vocabulary rename batch');
+
+    const committed = await internalLoadById(testContext, ADMIN_USER, vocabularyMalware.internal_id) as any;
+    expect(committed?.malware_types).toContain(oldName);
+    expect(committed?.malware_types).not.toContain(newName);
+  });
+
+  it('keeps vocabulary delete fan-out updates inside the batch boundary until commit', async () => {
+    const removedName = `batch-remove-${uuidv4()}`;
+    const keptName = `batch-keep-${uuidv4()}`;
+    const removedVocabulary = await addVocabulary(testContext, ADMIN_USER, {
+      name: removedName,
+      description: '',
+      category: VocabularyCategory.MalwareTypeOv,
+    });
+    const keptVocabulary = await addVocabulary(testContext, ADMIN_USER, {
+      name: keptName,
+      description: '',
+      category: VocabularyCategory.MalwareTypeOv,
+    });
+    cleanupVocabularies.push(removedVocabulary, keptVocabulary);
+    const vocabularyMalware = await addMalware(testContext, ADMIN_USER, {
+      name: `Batch vocabulary delete ${uuidv4()}`,
+      malware_types: [removedName, keptName],
+    });
+    cleanupMalwares.push(vocabularyMalware);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await deleteVocabulary(testContext, ADMIN_USER, removedVocabulary.internal_id);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await internalLoadById(testContext, ADMIN_USER, vocabularyMalware.internal_id) as any;
+          expect(buffered?.malware_types).toEqual([keptName]);
+          throw new Error('abort vocabulary delete batch');
+        },
+      },
+    ])).rejects.toThrow('abort vocabulary delete batch');
+
+    const committed = await internalLoadById(testContext, ADMIN_USER, vocabularyMalware.internal_id) as any;
+    expect(committed?.malware_types).toEqual(expect.arrayContaining([removedName, keptName]));
+  });
+
+  it('applies vocabulary fan-out updates to entities created earlier in the same batch', async () => {
+    const oldName = `batch-created-old-${uuidv4()}`;
+    const newName = `batch-created-new-${uuidv4()}`;
+    const vocabulary = await addVocabulary(testContext, ADMIN_USER, {
+      name: oldName,
+      description: '',
+      category: VocabularyCategory.MalwareTypeOv,
+    });
+    cleanupVocabularies.push(vocabulary);
+    let createdMalwareId: string | undefined;
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          const createdMalware = await addMalware(testContext, ADMIN_USER, {
+            name: `Batch created vocabulary rename ${uuidv4()}`,
+            malware_types: [oldName],
+          });
+          createdMalwareId = createdMalware.internal_id;
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await editVocabulary(testContext, ADMIN_USER, vocabulary.internal_id, [{ key: 'name', value: [newName] }], {});
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await internalLoadById(testContext, ADMIN_USER, createdMalwareId) as any;
+          expect(buffered?.malware_types).toEqual([newName]);
+          throw new Error('abort created vocabulary rename batch');
+        },
+      },
+    ])).rejects.toThrow('abort created vocabulary rename batch');
+
+    const committed = await internalLoadById(testContext, ADMIN_USER, createdMalwareId);
+    expect(committed).toBeUndefined();
   });
 });

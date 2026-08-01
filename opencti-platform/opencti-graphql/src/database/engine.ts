@@ -2174,6 +2174,37 @@ export const elFindByIds = async <T extends BasicStoreBase>(
   }
   return mergedHits;
 };
+const getBufferedEngineElementIds = (): string[] => {
+  const ids: string[] = [];
+  getOrderedBufferedEngineWrites().forEach((write) => {
+    if (write.kind === 'bulk-update') {
+      ids.push(...write.operations.map((operation) => operation.internalId));
+      return;
+    }
+    if (write.kind === 'update') {
+      ids.push(write.instance.internal_id);
+      return;
+    }
+    const elements = write.kind === 'raw-index' ? write.overlayElements : write.elements;
+    ids.push(...elements.map((element) => element.internal_id));
+  });
+  return R.uniq(ids.filter((id) => isNotEmptyField(id)));
+};
+export const elListBufferedElements = async <T extends BasicStoreBase>(
+  context: AuthContext,
+  user: AuthUser,
+  indices?: string[] | string | null,
+  type?: string | string[] | null,
+): Promise<T[]> => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return [];
+  }
+  const ids = getBufferedEngineElementIds();
+  if (ids.length === 0) {
+    return [];
+  }
+  return elFindByIds<T>(context, user, ids, { indices, type, withoutRels: false }) as Promise<T[]>;
+};
 export const elLoadById = async <T extends BasicStoreBase>(
   context: AuthContext,
   user: AuthUser,

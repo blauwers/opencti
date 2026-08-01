@@ -1578,7 +1578,7 @@ const mergeEntitiesRaw = async (
     }
     const completeCategory = getVocabulariesCategories().find(({ key }) => key === targetVocabularyEntity.category);
     if (completeCategory) {
-      await updateElasticVocabularyValue(sourceVocabularyEntities.map((s) => s.name), targetVocabularyEntity.name, completeCategory);
+      await updateElasticVocabularyValue(context, sourceVocabularyEntities.map((s) => s.name), targetVocabularyEntity.name, completeCategory);
     }
   }
 

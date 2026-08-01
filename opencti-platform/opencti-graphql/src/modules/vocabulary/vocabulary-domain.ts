@@ -6,9 +6,7 @@ import { countAllThings, pageEntitiesConnection, storeLoadById } from '../../dat
 import { type BasicStoreEntityVocabulary, ENTITY_TYPE_VOCABULARY, type StoreEntityVocabulary } from './vocabulary-types';
 import { notify } from '../../database/redis';
 import { BUS_TOPICS } from '../../config/conf';
-import { elRawUpdateByQuery } from '../../database/engine';
-import { READ_ENTITIES_INDICES } from '../../database/utils';
-import { getVocabulariesCategories, updateElasticVocabularyValue } from './vocabulary-utils';
+import { getVocabulariesCategories, removeElasticVocabularyValue, updateElasticVocabularyValue } from './vocabulary-utils';
 import type { DomainFindById } from '../../domain/domainTypes';
 import { UnsupportedError } from '../../config/errors';
 import { addFilter } from '../../utils/filtering/filtering-utils';
@@ -77,49 +75,7 @@ export const deleteVocabulary = async (context: AuthContext, user: AuthUser, voc
   const deletable = !vocabulary.builtIn && (!completeCategory || (!completeCategory.fields.some(({ required }) => required) || usages === 0));
   if (deletable) {
     if (completeCategory) {
-      await elRawUpdateByQuery({
-        index: READ_ENTITIES_INDICES,
-        wait_for_completion: false,
-        body: {
-          script: {
-            source: 'for(field in params.category.fields) if(ctx._source[field.key] instanceof List) ctx._source[field.key].remove(ctx._source[field.key].indexOf(params.oldName)); else ctx._source[field.key] = null;',
-            lang: 'painless',
-            params: { oldName: vocabulary.name, category: completeCategory },
-          },
-          query: {
-            bool: {
-              must: [
-                {
-                  bool: {
-                    should: [
-                      ...completeCategory.fields.map((f) => ({
-                        match: {
-                          [`${f.key}.keyword`]: {
-                            query: vocabulary.name,
-                          },
-                        },
-                      })),
-                    ],
-                    minimum_should_match: 1,
-                  },
-                },
-                {
-                  bool: {
-                    should: [
-                      ...completeCategory.fields.map((f) => ({
-                        exists: {
-                          field: f.key,
-                        },
-                      })),
-                    ],
-                    minimum_should_match: 1,
-                  },
-                },
-              ],
-            },
-          },
-        },
-      });
+      await removeElasticVocabularyValue(context, vocabulary.name, completeCategory);
     }
     await deleteElementById(context, user, vocabularyId, ENTITY_TYPE_VOCABULARY, props);
   }
@@ -133,7 +89,7 @@ export const editVocabulary = async (context: AuthContext, user: AuthUser, id: s
     if (name) {
       const completeCategory = getVocabulariesCategories().find(({ key }) => key === oldValue.category);
       if (completeCategory) {
-        await updateElasticVocabularyValue([oldValue.name], name, completeCategory);
+        await updateElasticVocabularyValue(context, [oldValue.name], name, completeCategory);
       }
     }
   }

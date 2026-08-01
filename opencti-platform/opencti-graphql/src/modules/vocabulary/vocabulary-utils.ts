@@ -1,9 +1,13 @@
-import type { VocabularyCategory, VocabularyDefinition } from '../../generated/graphql';
+import { FilterMode, type VocabularyCategory, type VocabularyDefinition } from '../../generated/graphql';
 import { vocabularyDefinitions } from './vocabulary-types';
 import { UnsupportedError } from '../../config/errors';
-import { elRawUpdateByQuery } from '../../database/engine';
+import { elFindByIds, elList, elListBufferedElements, elRawUpdateByQuery, elReplace } from '../../database/engine';
 import { READ_ENTITIES_INDICES } from '../../database/utils';
 import { STIX_PATTERN_TYPE } from '../../utils/syntax';
+import { isBatchWriteBoundaryOpen } from '../batch/batch-executor';
+import { SYSTEM_USER } from '../../utils/access';
+import type { AuthContext } from '../../types/user';
+import type { BasicStoreBase } from '../../types/store';
 
 export const builtInOv = [
   'pattern_type_ov',
@@ -1246,7 +1250,83 @@ export const getVocabularyCategoryForField = (fieldName: string, entityType: str
   });
 };
 
-export const updateElasticVocabularyValue = async (oldNames: string[], name: string, category: VocabularyDefinition) => {
+const listVocabularyUsageElements = async (context: AuthContext, names: string[], category: VocabularyDefinition) => {
+  const committedElements = await elList<BasicStoreBase>(context, SYSTEM_USER, READ_ENTITIES_INDICES, {
+    filters: {
+      mode: FilterMode.And,
+      filters: [{ key: category.fields.map((field) => field.key), values: names }],
+      filterGroups: [],
+    },
+  });
+  if (!isBatchWriteBoundaryOpen()) {
+    return committedElements;
+  }
+  const bufferedElements = await elListBufferedElements<BasicStoreBase>(context, SYSTEM_USER, READ_ENTITIES_INDICES);
+  const candidateIds = Array.from(new Set([...committedElements, ...bufferedElements].map((element) => element.internal_id)));
+  if (candidateIds.length === 0) {
+    return [];
+  }
+  const currentElements = await elFindByIds<BasicStoreBase>(context, SYSTEM_USER, candidateIds, { indices: READ_ENTITIES_INDICES, withoutRels: false }) as BasicStoreBase[];
+  return currentElements.filter((element) => {
+    const elementData = element as Record<string, any>;
+    return category.fields.some((field) => {
+      const value = elementData[field.key];
+      return Array.isArray(value) ? value.some((item) => names.includes(item)) : names.includes(value);
+    });
+  });
+};
+
+const updateBufferedVocabularyValue = async (context: AuthContext, oldNames: string[], name: string, category: VocabularyDefinition) => {
+  const elements = await listVocabularyUsageElements(context, oldNames, category);
+  await Promise.all(elements.map((element) => {
+    const patch: Record<string, any> = {};
+    const elementData = element as Record<string, any>;
+    category.fields.forEach((field) => {
+      const value = elementData[field.key];
+      if (Array.isArray(value)) {
+        const nextValue = Array.from(new Set(value.map((item) => (oldNames.includes(item) ? name : item))));
+        if (nextValue.length !== value.length || nextValue.some((item, index) => item !== value[index])) {
+          patch[field.key] = nextValue;
+        }
+      } else if (oldNames.includes(value)) {
+        patch[field.key] = name;
+      }
+    });
+    if (Object.keys(patch).length === 0) {
+      return Promise.resolve();
+    }
+    return elReplace(context, element._index, element._id ?? element.internal_id, { doc: patch });
+  }));
+};
+
+const removeBufferedVocabularyValue = async (context: AuthContext, oldName: string, category: VocabularyDefinition) => {
+  const elements = await listVocabularyUsageElements(context, [oldName], category);
+  await Promise.all(elements.map((element) => {
+    const patch: Record<string, any> = {};
+    const elementData = element as Record<string, any>;
+    category.fields.forEach((field) => {
+      const value = elementData[field.key];
+      if (Array.isArray(value)) {
+        const nextValue = value.filter((item) => item !== oldName);
+        if (nextValue.length !== value.length) {
+          patch[field.key] = nextValue;
+        }
+      } else if (value === oldName) {
+        patch[field.key] = null;
+      }
+    });
+    if (Object.keys(patch).length === 0) {
+      return Promise.resolve();
+    }
+    return elReplace(context, element._index, element._id ?? element.internal_id, { doc: patch });
+  }));
+};
+
+export const updateElasticVocabularyValue = async (context: AuthContext, oldNames: string[], name: string, category: VocabularyDefinition) => {
+  if (isBatchWriteBoundaryOpen()) {
+    await updateBufferedVocabularyValue(context, oldNames, name, category);
+    return;
+  }
   await elRawUpdateByQuery({
     index: READ_ENTITIES_INDICES,
     wait_for_completion: false,
@@ -1265,6 +1345,56 @@ export const updateElasticVocabularyValue = async (oldNames: string[], name: str
                   ...category.fields.map((f) => ({
                     terms: {
                       [`${f.key}.keyword`]: oldNames,
+                    },
+                  })),
+                ],
+                minimum_should_match: 1,
+              },
+            },
+            {
+              bool: {
+                should: [
+                  ...category.fields.map((f) => ({
+                    exists: {
+                      field: f.key,
+                    },
+                  })),
+                ],
+                minimum_should_match: 1,
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+};
+
+export const removeElasticVocabularyValue = async (context: AuthContext, oldName: string, category: VocabularyDefinition) => {
+  if (isBatchWriteBoundaryOpen()) {
+    await removeBufferedVocabularyValue(context, oldName, category);
+    return;
+  }
+  await elRawUpdateByQuery({
+    index: READ_ENTITIES_INDICES,
+    wait_for_completion: false,
+    body: {
+      script: {
+        source: 'for(field in params.category.fields) if(ctx._source[field.key] instanceof List) ctx._source[field.key].remove(ctx._source[field.key].indexOf(params.oldName)); else ctx._source[field.key] = null;',
+        lang: 'painless',
+        params: { oldName, category },
+      },
+      query: {
+        bool: {
+          must: [
+            {
+              bool: {
+                should: [
+                  ...category.fields.map((f) => ({
+                    match: {
+                      [`${f.key}.keyword`]: {
+                        query: oldName,
+                      },
                     },
                   })),
                 ],
