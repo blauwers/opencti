@@ -4328,6 +4328,32 @@ export const elDelete = (indexName: string, documentId: string) => {
   };
   return retryElOperations(deleteOperation);
 };
+const getBufferedIndexedRelationIds = (): string[] => {
+  return getOrderedBufferedEngineWrites()
+    .filter((write): write is BufferedIndexWrite => write.kind === 'index')
+    .flatMap((write) => write.elements)
+    .filter((element) => element.base_type === BASE_TYPE_RELATION)
+    .map((element) => element.internal_id);
+};
+const isRelationConnectedToIds = (relation: BasicStoreRelation, ids: string[]) => {
+  const relationIds = [
+    relation.fromId,
+    relation.toId,
+    ...(relation.connections ?? []).map((connection) => connection.internal_id),
+  ];
+  return relationIds.some((id) => ids.includes(id));
+};
+const mergeBufferedRelatedRelations = (hits: BasicStoreRelation[], targetIds: string[], includeBufferedIndexed = false): BasicStoreRelation[] => {
+  const relationIds = hits.map((hit) => hit.internal_id);
+  if (includeBufferedIndexed) {
+    relationIds.push(...getBufferedIndexedRelationIds());
+  }
+  if (relationIds.length === 0) {
+    return [];
+  }
+  return mergeBufferedEngineElements(hits, R.uniq(relationIds), ABSTRACT_BASIC_RELATIONSHIP)
+    .filter((relation) => isRelationConnectedToIds(relation, targetIds));
+};
 const getRelatedRelations = async (
   context: AuthContext,
   user: AuthUser,
@@ -4349,20 +4375,24 @@ const getRelatedRelations = async (
     filterGroups: [],
   };
   const foundRelations: string[] = [];
-  const callback = async (hits: BasicStoreRelation[]) => {
+  const appendRelations = (hits: BasicStoreRelation[]) => {
     const preparedElements: (BasicStoreRelation & { level: number })[] = [];
     hits.forEach((hit) => {
       if (!cache.has(hit.internal_id)) {
         foundRelations.push(hit.internal_id);
         cache.set(hit.internal_id, '');
+        preparedElements.push({ ...hit, level });
       }
-      preparedElements.push({ ...hit, level });
     });
     unshiftAll(elements, preparedElements);
+  };
+  const callback = async (hits: BasicStoreRelation[]) => {
+    appendRelations(mergeBufferedRelatedRelations(hits, fromOrToIds));
     return true;
   };
   const finalOpts: RepaginateOpts<BasicStoreRelation> = { ...opts, filters, callback, types: [ABSTRACT_BASIC_RELATIONSHIP] };
   await elList<BasicStoreRelation>(context, user, READ_RELATIONSHIPS_INDICES, finalOpts);
+  appendRelations(mergeBufferedRelatedRelations([], fromOrToIds, true));
   // If relations find, need to recurse to find relations to relations
   if (foundRelations.length > 0) {
     const groups = R.splitEvery(MAX_BULK_OPERATIONS, foundRelations);

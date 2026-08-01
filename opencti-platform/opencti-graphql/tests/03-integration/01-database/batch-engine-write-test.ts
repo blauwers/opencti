@@ -325,4 +325,35 @@ describe('batch engine writes', () => {
     });
     expect(committedRelations).toHaveLength(1);
   });
+
+  it('deletes relations created earlier in the same backend batch scope', async () => {
+    const source = await addMalware(testContext, ADMIN_USER, { name: `Batch transient source ${uuidv4()}` });
+    const target = await addMalware(testContext, ADMIN_USER, { name: `Batch transient target ${uuidv4()}` });
+    cleanupMalwares.push(source, target);
+    let relation: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => {
+          relation = await addStixCoreRelationship(testContext, ADMIN_USER, {
+            relationship_type: RELATION_RELATED_TO,
+            fromId: source.id,
+            toId: target.id,
+          });
+          return relation;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elDeleteElements(testContext, ADMIN_USER, [target], { forceDelete: true });
+          return null;
+        },
+      },
+    ]);
+
+    await expect(internalLoadById(testContext, ADMIN_USER, target.internal_id)).resolves.toBeUndefined();
+    await expect(internalLoadById(testContext, ADMIN_USER, relation.internal_id)).resolves.toBeUndefined();
+  });
 });
