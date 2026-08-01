@@ -197,7 +197,14 @@ import { getRoleAssumerWithWebIdentity } from '../utils/awsSdk';
 import { elConvertHits, elConvertHitsToMap, INNER_HITS_WINDOWS_SIZE } from './engine-data-converter';
 import { isEsScriptFilterEnabled } from './engine-config';
 import { AbortError } from 'node-fetch';
-import { getBatchExecutionMetadata, isBatchWriteBoundaryOpen, registerBatchCommitter, setBatchExecutionMetadata } from '../modules/batch/batch-executor';
+import {
+  BatchSideEffectKind,
+  getBatchExecutionMetadata,
+  isBatchWriteBoundaryOpen,
+  registerBatchCommitter,
+  registerBatchSideEffect,
+  setBatchExecutionMetadata,
+} from '../modules/batch/batch-executor';
 
 const ELK_ENGINE = 'elk';
 const OPENSEARCH_ENGINE = 'opensearch';
@@ -229,17 +236,31 @@ export const ES_RETRY_ON_CONFLICT = 30;
 export const BULK_TIMEOUT = '1h';
 const ES_MAX_MAPPINGS = 3000;
 const MAX_AGGREGATION_SIZE = 100;
-const BATCH_INDEX_ELEMENTS_METADATA_KEY = 'engine.index-elements';
+const BATCH_ENGINE_WRITES_METADATA_KEY = 'engine.writes';
 
 type BufferedIndexWrite = {
+  kind: 'index';
+  sequence: number;
   context: AuthContext;
   user: AuthUser;
   indexingType: string | undefined;
   elements: Record<string, any>[];
 };
 
-type BufferedIndexState = {
-  writes: BufferedIndexWrite[];
+type BufferedUpdateWrite = {
+  kind: 'update';
+  sequence: number;
+  context: AuthContext;
+  user: AuthUser;
+  instance: BasicStoreBase;
+  dataToReplace: Record<string, any>;
+};
+
+type BufferedEngineWrite = BufferedIndexWrite | BufferedUpdateWrite;
+
+type BufferedEngineState = {
+  nextSequence: number;
+  writes: BufferedEngineWrite[];
 };
 
 export const ROLE_FROM = 'from';
@@ -1898,15 +1919,27 @@ export type ElFindByIdsOpts = {
   historyFiltering?: boolean;
 };
 
-const getBufferedIndexState = (): BufferedIndexState | undefined => {
-  return getBatchExecutionMetadata<BufferedIndexState>(BATCH_INDEX_ELEMENTS_METADATA_KEY);
+const getBufferedEngineState = (): BufferedEngineState | undefined => {
+  return getBatchExecutionMetadata<BufferedEngineState>(BATCH_ENGINE_WRITES_METADATA_KEY);
 };
 
-const getBufferedIndexElements = (): Record<string, any>[] => {
-  return getBufferedIndexState()?.writes.flatMap((write) => write.elements) ?? [];
+const getBufferedEngineElements = (): Array<{ kind: BufferedEngineWrite['kind']; element: Record<string, any> }> => {
+  const writes = getBufferedEngineState()?.writes ?? [];
+  const elements: Array<{ kind: BufferedEngineWrite['kind']; element: Record<string, any> }> = [];
+  writes
+    .slice()
+    .sort((left, right) => left.sequence - right.sequence)
+    .forEach((write) => {
+      if (write.kind === 'index') {
+        write.elements.forEach((element) => elements.push({ kind: write.kind, element }));
+      } else {
+        elements.push({ kind: write.kind, element: write.instance });
+      }
+    });
+  return elements;
 };
 
-const matchesBufferedIndexElement = (
+const matchesBufferedEngineElement = (
   element: Record<string, any>,
   ids: string[],
   types: string | string[] | null | undefined,
@@ -1922,15 +1955,35 @@ const matchesBufferedIndexElement = (
   return typeList.includes(element.entity_type) || (element.parent_types ?? []).some((type: string) => typeList.includes(type));
 };
 
-const mergeBufferedIndexElements = <T extends BasicStoreBase>(
+const applyBufferedUpdate = <T extends BasicStoreBase>(existing: T | undefined, patch: Record<string, any>): T => {
+  const updated = { ...(existing ?? {}) } as Record<string, any>;
+  Object.entries(patch).forEach(([key, value]) => {
+    if (value === undefined || value === null) {
+      delete updated[key];
+    } else {
+      updated[key] = value;
+    }
+  });
+  return updated as T;
+};
+
+const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   hits: T[],
   ids: string[],
   types: string | string[] | null | undefined,
 ): T[] => {
   const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
-  getBufferedIndexElements()
-    .filter((element) => matchesBufferedIndexElement(element, ids, types))
-    .forEach((element) => mergedHits.set(element.internal_id, element as T));
+  getBufferedEngineElements().forEach(({ kind, element }) => {
+    const existing = mergedHits.get(element.internal_id);
+    if (!existing && !matchesBufferedEngineElement(element, ids, types)) {
+      return;
+    }
+    if (kind === 'update') {
+      mergedHits.set(element.internal_id, applyBufferedUpdate(existing, element));
+      return;
+    }
+    mergedHits.set(element.internal_id, element as T);
+  });
   return Array.from(mergedHits.values());
 };
 
@@ -2056,7 +2109,7 @@ export const elFindByIds = async <T extends BasicStoreBase>(
       pushAll(hits, convertedHits);
     }
   }
-  const mergedHits = mergeBufferedIndexElements(hits, processIds, types);
+  const mergedHits = mergeBufferedEngineElements(hits, processIds, types);
   if (toMap) {
     return elConvertHitsToMap<T>(mergedHits, { mapWithAllIds });
   }
@@ -4163,12 +4216,7 @@ export const elUpdate = async (
   };
   return retryElOperations(updateOperation);
 };
-export const elReplace = async (
-  context: AuthContext,
-  indexName: string,
-  documentId: string,
-  documentBody: any,
-) => {
+const buildReplaceScriptBody = (documentBody: any) => {
   const doc = R.dissoc('_index', documentBody.doc);
   const entries = Object.entries(doc);
   const rawSources = [];
@@ -4182,9 +4230,15 @@ export const elReplace = async (
     }
   }
   const source = R.join(';', rawSources);
-  return elUpdate(context, indexName, documentId, {
-    script: { source, params: doc },
-  });
+  return { script: { source, params: doc } };
+};
+export const elReplace = async (
+  context: AuthContext,
+  indexName: string,
+  documentId: string,
+  documentBody: any,
+) => {
+  return elUpdate(context, indexName, documentId, buildReplaceScriptBody(documentBody));
 };
 export const elDelete = (indexName: string, documentId: string) => {
   const deleteOperation = async () => {
@@ -4811,9 +4865,9 @@ const validateElementsToIndex = (context: AuthContext, user: AuthUser, elements:
   }
 };
 
-const flushBufferedIndexElements = async (state: BufferedIndexState) => {
+const flushBufferedIndexElements = async (writes: BufferedIndexWrite[]) => {
   const groups: BufferedIndexWrite[] = [];
-  state.writes.forEach((write) => {
+  writes.forEach((write) => {
     const existingGroup = groups.find((group) => group.context === write.context && group.user === write.user);
     if (existingGroup) {
       existingGroup.elements.push(...write.elements);
@@ -4834,25 +4888,41 @@ const flushBufferedIndexElements = async (state: BufferedIndexState) => {
   }
 };
 
+const getOrCreateBufferedEngineState = (): BufferedEngineState | undefined => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return undefined;
+  }
+  let state = getBufferedEngineState();
+  if (!state) {
+    state = { nextSequence: 0, writes: [] };
+    setBatchExecutionMetadata(BATCH_ENGINE_WRITES_METADATA_KEY, state);
+    registerBatchCommitter({
+      key: BATCH_ENGINE_WRITES_METADATA_KEY,
+      execute: () => flushBufferedEngineWrites(state as BufferedEngineState),
+    });
+  }
+  return state;
+};
+
 const bufferIndexElements = (
   context: AuthContext,
   user: AuthUser,
   indexingType: string | undefined,
   elements: Record<string, any>[],
 ): boolean => {
-  if (!isBatchWriteBoundaryOpen()) {
+  const state = getOrCreateBufferedEngineState();
+  if (!state) {
     return false;
   }
-  let state = getBufferedIndexState();
-  if (!state) {
-    state = { writes: [] };
-    setBatchExecutionMetadata(BATCH_INDEX_ELEMENTS_METADATA_KEY, state);
-    registerBatchCommitter({
-      key: BATCH_INDEX_ELEMENTS_METADATA_KEY,
-      execute: () => flushBufferedIndexElements(state as BufferedIndexState),
-    });
-  }
-  state.writes.push({ context, user, indexingType, elements });
+  state.writes.push({
+    kind: 'index',
+    sequence: state.nextSequence,
+    context,
+    user,
+    indexingType,
+    elements,
+  });
+  state.nextSequence += 1;
   return true;
 };
 
@@ -5011,6 +5081,49 @@ const elIndexElementsNow = async (
     // Deprecated attribute to be removed when transition done
     [SEMATTRS_DB_OPERATION]: 'insert',
   }, elIndexElementsFn);
+};
+
+const flushBufferedUpdateElements = async (writes: BufferedUpdateWrite[]) => {
+  const groups: Array<{ context: AuthContext; user: AuthUser; writes: BufferedUpdateWrite[] }> = [];
+  writes.forEach((write) => {
+    const existingGroup = groups.find((group) => group.context === write.context && group.user === write.user);
+    if (existingGroup) {
+      existingGroup.writes.push(write);
+    } else {
+      groups.push({ context: write.context, user: write.user, writes: [write] });
+    }
+  });
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    const groupsOfUpdates = R.splitEvery(MAX_BULK_OPERATIONS, group.writes);
+    for (let updateIndex = 0; updateIndex < groupsOfUpdates.length; updateIndex += 1) {
+      const bodyUpdate = groupsOfUpdates[updateIndex].flatMap((write) => [
+        {
+          update: {
+            _index: write.instance._index,
+            _id: write.instance._id ?? write.instance.internal_id,
+            retry_on_conflict: ES_RETRY_ON_CONFLICT,
+          },
+        },
+        buildReplaceScriptBody({ doc: write.dataToReplace }),
+      ]);
+      if (bodyUpdate.length > 0) {
+        await elBulk(group.context, { refresh: true, timeout: BULK_TIMEOUT, body: bodyUpdate });
+      }
+    }
+  }
+};
+
+const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
+  const indexWrites = state.writes.filter((write): write is BufferedIndexWrite => write.kind === 'index');
+  const updateWrites = state.writes.filter((write): write is BufferedUpdateWrite => write.kind === 'update');
+  if (indexWrites.length > 0) {
+    await flushBufferedIndexElements(indexWrites);
+  }
+  if (updateWrites.length > 0) {
+    await flushBufferedUpdateElements(updateWrites);
+  }
 };
 
 export const elIndexElements = async (
@@ -5193,18 +5306,52 @@ const getInstanceToUpdate = async (context: AuthContext, user: AuthUser, instanc
   }
   return instance;
 };
+
+const bufferUpdateElement = (
+  context: AuthContext,
+  user: AuthUser,
+  instance: BasicStoreBase,
+  dataToReplace: Record<string, any>,
+): boolean => {
+  const state = getOrCreateBufferedEngineState();
+  if (!state) {
+    return false;
+  }
+  state.writes.push({
+    kind: 'update',
+    sequence: state.nextSequence,
+    context,
+    user,
+    instance,
+    dataToReplace,
+  });
+  state.nextSequence += 1;
+  return true;
+};
+
 export const elUpdateElement = async (context: AuthContext, user: AuthUser, instance: BasicStoreBase) => {
   const instanceToUse = await getInstanceToUpdate(context, user, instance);
   const esData = await prepareElementForIndexing(instanceToUse);
   validateDataBeforeIndexing(esData);
   const dataToReplace = R.pipe(R.dissoc('representative'), R.dissoc('_id'))(esData);
-  const replacePromise = elReplace(context, instanceToUse._index, instanceToUse._id ?? instanceToUse.internal_id, { doc: dataToReplace });
-  // If entity with a name, must update connections
-  let connectionPromise = Promise.resolve();
-  if (esData.name && isStixObject(instanceToUse.entity_type)) {
-    connectionPromise = elUpdateConnectionsOfElement(instance.internal_id, { name: extractEntityRepresentativeName(esData) });
+  const shouldUpdateConnections = esData.name && isStixObject(instanceToUse.entity_type);
+  const updateConnections = () => {
+    if (shouldUpdateConnections) {
+      return elUpdateConnectionsOfElement(instance.internal_id, { name: extractEntityRepresentativeName(esData) });
+    }
+    return Promise.resolve();
+  };
+  if (bufferUpdateElement(context, user, instanceToUse, dataToReplace)) {
+    if (shouldUpdateConnections) {
+      await registerBatchSideEffect({
+        kind: BatchSideEffectKind.CompatibilityProjection,
+        execute: updateConnections,
+      });
+    }
+    return [];
   }
-  return Promise.all([replacePromise, connectionPromise]);
+  const replacePromise = elReplace(context, instanceToUse._index, instanceToUse._id ?? instanceToUse.internal_id, { doc: dataToReplace });
+  return Promise.all([replacePromise, updateConnections()]);
 };
 
 export const getStats = (indices = READ_PLATFORM_INDICES) => {
