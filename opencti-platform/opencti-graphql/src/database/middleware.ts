@@ -1086,7 +1086,19 @@ export const inputResolveRefs = async (
     // TODO Improve type restriction from targeted ref inferred types
     // This information must be added in the model
     const idsToFetch = Array.from(fetchingIdsMap.keys());
-    const simpleResolutionsPromise = internalFindByIds(context, user, idsToFetch);
+    const resolveSimpleRefs = async () => {
+      const batchLoader = isBatchWriteBoundaryOpen() ? context.batch?.inputResolveRefsBatchLoader : undefined;
+      if (!batchLoader) {
+        return internalFindByIds(context, user, idsToFetch);
+      }
+      const resolutionGroups = await BluePromise.all(idsToFetch.map((id) => batchLoader.load(id)));
+      const resolvedElements: BasicStoreObject[] = [];
+      for (let index = 0; index < resolutionGroups.length; index += 1) {
+        pushAll(resolvedElements, resolutionGroups[index]);
+      }
+      return R.uniqBy((element) => element.internal_id, resolvedElements);
+    };
+    const simpleResolutionsPromise = resolveSimpleRefs();
     let embeddedFromPromise;
     if (embeddedFromResolution) {
       fetchingIdsMap.set(embeddedFromResolution, [{ id: embeddedFromResolution, destKey: 'from', multiple: false }]);
