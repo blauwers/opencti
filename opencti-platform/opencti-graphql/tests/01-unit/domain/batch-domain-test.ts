@@ -199,6 +199,12 @@ describe('batch admission contract', () => {
         planned_object_count: 3,
         ignored_object_count: 0,
         incompatible_object_ids: [],
+        ordered_object_ids: [
+          'identity--11111111-1111-4111-8111-111111111111',
+          'indicator--11111111-1111-4111-8111-111111111111',
+          'indicator--22222222-2222-4222-8222-222222222222',
+        ],
+        object_normalizations: [],
         execution_phases: [
           {
             phase: 0,

@@ -215,6 +215,21 @@ export const buildBatchQueueMessage = (admission: BatchAdmission, applicantId: s
       planned_object_count: admission.bundlePlan.plannedObjectCount,
       ignored_object_count: admission.bundlePlan.ignoredObjectCount,
       incompatible_object_ids: admission.bundlePlan.incompatibleObjectIds,
+      ordered_object_ids: admission.bundlePlan.orderedObjectIds,
+      object_normalizations: admission.bundlePlan.objects
+        .filter((object) => object.normalization !== undefined)
+        .map((object) => ({
+          id: object.id,
+          ...(object.normalization?.referenceValues
+            ? { reference_values: object.normalization.referenceValues }
+            : {}),
+          ...(object.normalization?.externalReferenceIndexes
+            ? { external_reference_indexes: object.normalization.externalReferenceIndexes }
+            : {}),
+          ...(object.normalization?.killChainPhaseIndexes
+            ? { kill_chain_phase_indexes: object.normalization.killChainPhaseIndexes }
+            : {}),
+        })),
       execution_phases: admission.bundlePlan.executionPhases.map((phase) => ({
         phase: phase.phase,
         object_ids: phase.objectIds,

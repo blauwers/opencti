@@ -32,6 +32,7 @@ describe('batch bundle planner', () => {
       { phase: 1, objectIds: [indicatorId] },
       { phase: 2, objectIds: [relationshipId] },
     ]);
+    expect(plan.orderedObjectIds).toEqual([identityId, indicatorId, relationshipId]);
     expect(plan.objects).toEqual([
       expect.objectContaining({ id: relationshipId, dependencyIds: [indicatorId, identityId], executionPhase: 2 }),
       expect.objectContaining({ id: indicatorId, dependencyIds: [identityId], executionPhase: 1 }),
@@ -82,6 +83,57 @@ describe('batch bundle planner', () => {
     expect(plan.executionPhases).toEqual([]);
   });
 
+  it('records backend-owned reference cleanup patches without rewriting the source bundle', () => {
+    const indicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
+    const source = {
+      type: 'indicator',
+      id: indicatorId,
+      created_by_ref: 'identity--11111111-1111-4111-8111-111111111111',
+      object_marking_refs: [
+        'marking-definition--33333333-3333-4333-8333-333333333333',
+        'marking-definition--33333333-3333-4333-8333-333333333333',
+      ],
+    };
+    const plan = planStixBundleObjects([source], { cleanupInconsistentBundle: true });
+
+    expect(source.created_by_ref).toBe('identity--11111111-1111-4111-8111-111111111111');
+    expect(source.object_marking_refs).toHaveLength(2);
+    expect(plan.objects[0]).toMatchObject({
+      id: indicatorId,
+      normalization: {
+        referenceValues: {
+          created_by_ref: null,
+          object_marking_refs: [],
+        },
+      },
+    });
+  });
+
+  it('records embedded reference deduplication as compact retained indexes', () => {
+    const indicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
+    const plan = planStixBundleObjects([{
+      type: 'indicator',
+      id: indicatorId,
+      external_references: [
+        { source_name: 'feed', external_id: '1' },
+        { source_name: 'feed', external_id: '1' },
+        { url: 'https://example.test/a' },
+      ],
+      kill_chain_phases: [
+        { kill_chain_name: 'chain', phase_name: 'phase' },
+        { kill_chain_name: 'chain', phase_name: 'phase' },
+      ],
+    }]);
+
+    expect(plan.objects[0]).toMatchObject({
+      id: indicatorId,
+      normalization: {
+        externalReferenceIndexes: [0, 2],
+        killChainPhaseIndexes: [0],
+      },
+    });
+  });
+
   it('keeps missing external references outside the local dependency graph by default', () => {
     const indicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
     const plan = planStixBundleObjects([
@@ -126,5 +178,12 @@ describe('batch bundle planner', () => {
       { phase: 0, objectIds: [secondId] },
       { phase: 1, objectIds: [firstId] },
     ]);
+    expect(plan.objects.find((object) => object.id === secondId)).toMatchObject({
+      normalization: {
+        referenceValues: {
+          object_refs: [],
+        },
+      },
+    });
   });
 });

@@ -9,6 +9,7 @@ import time
 import traceback
 import uuid
 from contextlib import nullcontext
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urljoin, urlparse
 
@@ -3752,6 +3753,100 @@ class OpenCTIStix2:
                     phases_by_id[object_id] = phase
         return phases_by_id
 
+    @staticmethod
+    def _prepare_bundle_from_backend_plan(
+        stix_bundle: Dict,
+        backend_batch_plan: Optional[Dict],
+    ) -> Optional[Tuple[int, list, list]]:
+        """Apply backend-owned bundle ordering and normalization metadata."""
+        if not isinstance(backend_batch_plan, dict):
+            return None
+        if backend_batch_plan.get("version") != 1:
+            return None
+        ordered_object_ids = backend_batch_plan.get("ordered_object_ids")
+        incompatible_object_ids = backend_batch_plan.get("incompatible_object_ids")
+        ignored_object_count = backend_batch_plan.get("ignored_object_count")
+        object_normalizations = backend_batch_plan.get("object_normalizations")
+        if (
+            not isinstance(ordered_object_ids, list)
+            or not all(isinstance(object_id, str) for object_id in ordered_object_ids)
+            or len(set(ordered_object_ids)) != len(ordered_object_ids)
+            or not isinstance(incompatible_object_ids, list)
+            or not all(
+                isinstance(object_id, str) for object_id in incompatible_object_ids
+            )
+            or not isinstance(ignored_object_count, int)
+            or ignored_object_count < 0
+            or not isinstance(object_normalizations, list)
+        ):
+            return None
+
+        objects_by_id = {}
+        for item in stix_bundle["objects"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                return None
+            objects_by_id[item["id"]] = item
+        if any(object_id not in objects_by_id for object_id in ordered_object_ids):
+            return None
+        if any(object_id not in objects_by_id for object_id in incompatible_object_ids):
+            return None
+
+        for normalization in object_normalizations:
+            if not isinstance(normalization, dict):
+                return None
+            object_id = normalization.get("id")
+            if not isinstance(object_id, str) or object_id not in objects_by_id:
+                return None
+            item = objects_by_id[object_id]
+            reference_values = normalization.get("reference_values")
+            if reference_values is not None:
+                if not isinstance(reference_values, dict):
+                    return None
+                for key, value in reference_values.items():
+                    if (
+                        not isinstance(key, str)
+                        or not (key.endswith("_ref") or key.endswith("_refs"))
+                        or (
+                            value is not None
+                            and not isinstance(value, str)
+                            and not (
+                                isinstance(value, list)
+                                and all(
+                                    isinstance(reference_id, str)
+                                    for reference_id in value
+                                )
+                            )
+                        )
+                    ):
+                        return None
+                    item[key] = deepcopy(value)
+            for key, field in (
+                ("external_reference_indexes", "external_references"),
+                ("kill_chain_phase_indexes", "kill_chain_phases"),
+            ):
+                indexes = normalization.get(key)
+                if indexes is None:
+                    continue
+                values = item.get(field)
+                if (
+                    not isinstance(values, list)
+                    or not isinstance(indexes, list)
+                    or not all(
+                        isinstance(index, int) and 0 <= index < len(values)
+                        for index in indexes
+                    )
+                ):
+                    return None
+                item[field] = [values[index] for index in indexes]
+
+        ordered_elements = [
+            objects_by_id[object_id] for object_id in ordered_object_ids
+        ]
+        incompatible_elements = [
+            objects_by_id[object_id] for object_id in incompatible_object_ids
+        ]
+        return ignored_object_count, incompatible_elements, ordered_elements
+
     def import_bundle(
         self,
         stix_bundle: Dict,
@@ -3799,21 +3894,31 @@ class OpenCTIStix2:
             raise ValueError("JSON data type is not a STIX2 bundle")
         if "objects" not in stix_bundle or len(stix_bundle["objects"]) == 0:
             raise ValueError("JSON data objects is empty")
-        stix2_splitter = OpenCTIStix2Splitter()
-        _, incompatible_elements, ordered_elements = (
-            stix2_splitter.prepare_bundle_for_import(
-                stix_bundle,
-                False,
-                cleanup_inconsistent_bundle,
-            )
-        )
         bundle_id = stix_bundle["id"]
-        ignored_elements_count = max(
-            len(stix_bundle["objects"])
-            - len(ordered_elements)
-            - len(incompatible_elements),
-            0,
+        backend_preparation = self._prepare_bundle_from_backend_plan(
+            stix_bundle, backend_batch_plan
         )
+        if backend_preparation is None:
+            stix2_splitter = OpenCTIStix2Splitter()
+            _, incompatible_elements, ordered_elements = (
+                stix2_splitter.prepare_bundle_for_import(
+                    stix_bundle,
+                    False,
+                    cleanup_inconsistent_bundle,
+                )
+            )
+            ignored_elements_count = max(
+                len(stix_bundle["objects"])
+                - len(ordered_elements)
+                - len(incompatible_elements),
+                0,
+            )
+        else:
+            (
+                ignored_elements_count,
+                incompatible_elements,
+                ordered_elements,
+            ) = backend_preparation
         backend_execution_phases = self._build_backend_execution_phases(
             backend_batch_plan
         )

@@ -107,7 +107,14 @@ export interface BatchQueueMessage {
     }>;
     ignored_object_count: number;
     incompatible_object_ids: string[];
+    object_normalizations: Array<{
+      external_reference_indexes?: number[];
+      id: string;
+      kill_chain_phase_indexes?: number[];
+      reference_values?: Record<string, string | string[] | null>;
+    }>;
     object_count: number;
+    ordered_object_ids: string[];
     planned_object_count: number;
     version: 1;
   };

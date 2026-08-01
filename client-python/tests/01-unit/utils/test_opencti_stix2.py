@@ -434,6 +434,90 @@ def test_import_bundle_batch_prefers_backend_execution_phases(
     ]
 
 
+def test_import_bundle_batch_uses_backend_preparation_without_legacy_splitter(
+    monkeypatch,
+) -> None:
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+
+    def fail_prepare_bundle_for_import(*args, **kwargs):
+        raise AssertionError(
+            "backend-admitted bundles must not rerun legacy preparation"
+        )
+
+    monkeypatch.setattr(
+        OpenCTIStix2Splitter,
+        "prepare_bundle_for_import",
+        fail_prepare_bundle_for_import,
+    )
+
+    imported_items = []
+
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
+        imported_items.append(item.copy())
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    imported, rejected = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--11111111-1111-4111-8111-111111111111",
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                    "created_by_ref": "identity--missing",
+                    "external_references": [
+                        {"source_name": "feed", "external_id": "1"},
+                        {"source_name": "feed", "external_id": "1"},
+                        {"url": "https://example.test/a"},
+                    ],
+                },
+                {
+                    "type": "identity",
+                    "id": "identity--22222222-2222-4222-8222-222222222222",
+                },
+            ],
+        },
+        backend_batch_plan={
+            "version": 1,
+            "ordered_object_ids": [
+                "identity--22222222-2222-4222-8222-222222222222",
+                "indicator--11111111-1111-4111-8111-111111111111",
+            ],
+            "ignored_object_count": 0,
+            "incompatible_object_ids": [],
+            "object_normalizations": [
+                {
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                    "reference_values": {"created_by_ref": None},
+                    "external_reference_indexes": [0, 2],
+                }
+            ],
+            "execution_phases": [],
+        },
+    )
+
+    assert rejected == []
+    assert imported == [
+        {"id": "identity--22222222-2222-4222-8222-222222222222", "type": "identity"},
+        {"id": "indicator--11111111-1111-4111-8111-111111111111", "type": "indicator"},
+    ]
+    assert [item["id"] for item in imported_items] == [
+        "identity--22222222-2222-4222-8222-222222222222",
+        "indicator--11111111-1111-4111-8111-111111111111",
+    ]
+    assert imported_items[1]["created_by_ref"] is None
+    assert imported_items[1]["external_references"] == [
+        {"source_name": "feed", "external_id": "1"},
+        {"url": "https://example.test/a"},
+    ]
+
+
 def test_extract_embedded_storage_path_ignores_query_string(
     opencti_stix2: OpenCTIStix2,
 ):

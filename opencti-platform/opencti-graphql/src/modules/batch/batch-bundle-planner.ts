@@ -1,10 +1,17 @@
 import { STIX_EXT_OCTI } from '../../types/stix-2-1-extensions';
 
+export interface BatchBundleObjectNormalization {
+  externalReferenceIndexes?: number[];
+  killChainPhaseIndexes?: number[];
+  referenceValues?: Record<string, string | string[] | null>;
+}
+
 export interface BatchBundlePlanObject {
   dependencyIds: string[];
   executionPhase: number;
   id: string;
   index: number;
+  normalization?: BatchBundleObjectNormalization;
   type: string;
 }
 
@@ -19,6 +26,7 @@ export interface BatchBundlePlan {
   incompatibleObjectIds: string[];
   objectCount: number;
   objects: BatchBundlePlanObject[];
+  orderedObjectIds: string[];
   plannedObjectCount: number;
 }
 
@@ -30,6 +38,7 @@ type IndexedBundleObject = {
   id: string;
   index: number;
   object: Record<string, any>;
+  originalObject: Record<string, any>;
   type: string;
 };
 
@@ -47,16 +56,16 @@ const getObjectInternalIds = (object: Record<string, any>): string[] => {
 
 const isReferenceKey = (key: string): boolean => key.endsWith('_ref') || key.endsWith('_refs');
 
+const isReferenceValue = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+
 const toReferenceIds = (key: string, value: unknown): string[] => {
   if (!isReferenceKey(key) || value === null || value === undefined) {
     return [];
   }
   if (key.endsWith('_refs')) {
-    return Array.isArray(value)
-      ? value.filter((reference): reference is string => typeof reference === 'string' && reference.length > 0)
-      : [];
+    return Array.isArray(value) ? value.filter(isReferenceValue) : [];
   }
-  return typeof value === 'string' && value.length > 0 ? [value] : [];
+  return isReferenceValue(value) ? [value] : [];
 };
 
 const indexBundleObjects = (objects: Record<string, any>[]) => {
@@ -77,7 +86,8 @@ const indexBundleObjects = (objects: Record<string, any>[]) => {
     canonicalObjects.set(object.id, {
       id: object.id,
       index: firstIndexes.get(object.id) as number,
-      object,
+      object: structuredClone(object),
+      originalObject: object,
       type: object.type,
     });
     aliases.set(object.id, object.id);
@@ -88,47 +98,175 @@ const indexBundleObjects = (objects: Record<string, any>[]) => {
   return { aliases, canonicalObjects, ignoredObjectCount };
 };
 
-const isMissingReference = (referenceId: string, aliases: Map<string, string>): boolean => {
-  return !aliases.has(referenceId);
+const buildEmbeddedReferenceKey = (value: Record<string, any>, kind: 'external_references' | 'kill_chain_phases'): string | null => {
+  if (kind === 'external_references') {
+    if (value.url !== undefined && value.url !== null) {
+      return JSON.stringify({ url: value.url });
+    }
+    if (value.source_name !== undefined && value.source_name !== null
+      && value.external_id !== undefined && value.external_id !== null) {
+      return JSON.stringify({ source_name: value.source_name, external_id: value.external_id });
+    }
+    return null;
+  }
+  return JSON.stringify({ phase_name: value.phase_name, kill_chain_name: value.kill_chain_name });
 };
 
-const isCompatibleObject = (
-  object: IndexedBundleObject,
+const deduplicateEmbeddedValues = (
+  values: unknown,
+  kind: 'external_references' | 'kill_chain_phases',
+): { indexes?: number[]; values: unknown } => {
+  if (!Array.isArray(values)) {
+    return { values };
+  }
+  const retainedIndexes: number[] = [];
+  const retainedValues: unknown[] = [];
+  const keys = new Set<string>();
+  values.forEach((value, index) => {
+    if (!value || typeof value !== 'object') {
+      return;
+    }
+    const key = buildEmbeddedReferenceKey(value as Record<string, any>, kind);
+    if (key !== null && !keys.has(key)) {
+      keys.add(key);
+      retainedIndexes.push(index);
+      retainedValues.push(value);
+    }
+  });
+  if (retainedIndexes.length === values.length) {
+    return { values };
+  }
+  return { indexes: retainedIndexes, values: retainedValues };
+};
+
+const valuesDiffer = (left: unknown, right: unknown): boolean => JSON.stringify(left) !== JSON.stringify(right);
+
+const buildObjectNormalization = (object: IndexedBundleObject): BatchBundleObjectNormalization | undefined => {
+  const referenceValues: Record<string, string | string[] | null> = {};
+  Object.entries(object.object).forEach(([key, value]) => {
+    if (isReferenceKey(key) && valuesDiffer(value, object.originalObject[key])) {
+      referenceValues[key] = value as string | string[] | null;
+    }
+  });
+
+  const externalReferences = deduplicateEmbeddedValues(object.originalObject.external_references, 'external_references');
+  const killChainPhases = deduplicateEmbeddedValues(object.originalObject.kill_chain_phases, 'kill_chain_phases');
+  const normalization: BatchBundleObjectNormalization = {};
+  if (Object.keys(referenceValues).length > 0) {
+    normalization.referenceValues = referenceValues;
+  }
+  if (externalReferences.indexes) {
+    normalization.externalReferenceIndexes = externalReferences.indexes;
+  }
+  if (killChainPhases.indexes) {
+    normalization.killChainPhaseIndexes = killChainPhases.indexes;
+  }
+  return Object.keys(normalization).length > 0 ? normalization : undefined;
+};
+
+const normalizeBundleObjects = (
+  indexedObjects: IndexedBundleObject[],
   aliases: Map<string, string>,
+  canonicalObjects: Map<string, IndexedBundleObject>,
   cleanupInconsistentBundle: boolean,
-): boolean => {
-  if (!cleanupInconsistentBundle) {
-    return true;
-  }
-  if (object.type === 'relationship') {
-    return typeof object.object.source_ref === 'string'
-      && typeof object.object.target_ref === 'string'
-      && !isMissingReference(object.object.source_ref, aliases)
-      && !isMissingReference(object.object.target_ref, aliases);
-  }
-  if (object.type === 'sighting') {
-    return typeof object.object.sighting_of_ref === 'string'
-      && !isMissingReference(object.object.sighting_of_ref, aliases)
-      && Array.isArray(object.object.where_sighted_refs)
-      && object.object.where_sighted_refs.some((referenceId: unknown) => (
-        typeof referenceId === 'string' && !isMissingReference(referenceId, aliases)
-      ));
-  }
-  return true;
+): Set<string> => {
+  const enlistedObjectIds = new Set<string>();
+  const incompatibleObjectIds = new Set<string>();
+  const referenceGraph = new Map<string, string[]>();
+
+  const enlistObject = (lookupId: string, parentIds: string[]): number => {
+    const canonicalId = aliases.get(lookupId);
+    if (!canonicalId) {
+      return 0;
+    }
+    const object = canonicalObjects.get(canonicalId);
+    if (!object) {
+      return 0;
+    }
+    if (enlistedObjectIds.has(canonicalId) || incompatibleObjectIds.has(canonicalId)) {
+      return 1;
+    }
+
+    const objectRefs = referenceGraph.get(canonicalId) ?? [];
+    referenceGraph.set(canonicalId, objectRefs);
+    let dependencyCount = 1;
+
+    Object.entries(object.object).forEach(([key, value]) => {
+      if (key.endsWith('_refs') && value !== null && value !== undefined) {
+        const retainedRefs: string[] = [];
+        const refs = Array.isArray(value) ? value : [];
+        refs.filter(isReferenceValue).forEach((referenceId) => {
+          const referenceCanonicalId = aliases.get(referenceId);
+          const isMissingReference = referenceCanonicalId === undefined;
+          const referencedObjectRefs = referenceCanonicalId ? referenceGraph.get(referenceCanonicalId) : undefined;
+          const isDependencyBackEdge = referencedObjectRefs?.includes(canonicalId) === true;
+          const shouldRetain = !(cleanupInconsistentBundle && isMissingReference)
+            && referenceCanonicalId !== canonicalId
+            && !parentIds.includes(referenceCanonicalId ?? referenceId)
+            && !isDependencyBackEdge;
+          if (!shouldRetain) {
+            return;
+          }
+          if (referenceCanonicalId) {
+            objectRefs.push(referenceCanonicalId);
+            dependencyCount += enlistObject(referenceCanonicalId, [...parentIds, referenceCanonicalId]);
+          }
+          if (!retainedRefs.includes(referenceId)) {
+            retainedRefs.push(referenceId);
+          }
+        });
+        object.object[key] = retainedRefs;
+      } else if (key.endsWith('_ref')) {
+        const referenceId = isReferenceValue(value) ? value : undefined;
+        const referenceCanonicalId = referenceId ? aliases.get(referenceId) : undefined;
+        const isMissingReference = referenceId !== undefined && referenceCanonicalId === undefined;
+        const referencedObjectRefs = referenceCanonicalId ? referenceGraph.get(referenceCanonicalId) : undefined;
+        const isDependencyBackEdge = referencedObjectRefs?.includes(canonicalId) === true;
+        const shouldRetain = referenceId !== undefined
+          && !(cleanupInconsistentBundle && isMissingReference)
+          && referenceCanonicalId !== canonicalId
+          && !parentIds.includes(referenceCanonicalId ?? referenceId)
+          && !isDependencyBackEdge;
+        if (shouldRetain && referenceId) {
+          if (referenceCanonicalId) {
+            objectRefs.push(referenceCanonicalId);
+            dependencyCount += enlistObject(referenceCanonicalId, [...parentIds, referenceCanonicalId]);
+          }
+        } else {
+          object.object[key] = null;
+        }
+      } else if (key === 'external_references') {
+        object.object[key] = deduplicateEmbeddedValues(value, key).values;
+      } else if (key === 'kill_chain_phases') {
+        object.object[key] = deduplicateEmbeddedValues(value, key).values;
+      }
+    });
+
+    const isCompatible = object.type === 'relationship'
+      ? isReferenceValue(object.object.source_ref) && isReferenceValue(object.object.target_ref)
+      : object.type === 'sighting'
+        ? isReferenceValue(object.object.sighting_of_ref) && Array.isArray(object.object.where_sighted_refs) && object.object.where_sighted_refs.length > 0
+        : true;
+    if (isCompatible) {
+      enlistedObjectIds.add(canonicalId);
+    } else {
+      incompatibleObjectIds.add(canonicalId);
+    }
+    return dependencyCount;
+  };
+
+  indexedObjects.forEach((object) => enlistObject(object.id, []));
+  return incompatibleObjectIds;
 };
 
 const collectDependencyIds = (
   object: IndexedBundleObject,
   aliases: Map<string, string>,
   compatibleObjectIds: Set<string>,
-  cleanupInconsistentBundle: boolean,
 ): string[] => {
   const dependencyIds: string[] = [];
   Object.entries(object.object).forEach(([key, value]) => {
     toReferenceIds(key, value).forEach((referenceId) => {
-      if (cleanupInconsistentBundle && isMissingReference(referenceId, aliases)) {
-        return;
-      }
       const canonicalId = aliases.get(referenceId);
       if (!canonicalId || canonicalId === object.id || !compatibleObjectIds.has(canonicalId)) {
         return;
@@ -193,24 +331,28 @@ export const planStixBundleObjects = (
   const cleanupInconsistentBundle = options.cleanupInconsistentBundle === true;
   const { aliases, canonicalObjects, ignoredObjectCount } = indexBundleObjects(objects);
   const indexedObjects = Array.from(canonicalObjects.values()).sort((left, right) => left.index - right.index);
-  const compatibleObjects = indexedObjects.filter((object) => isCompatibleObject(object, aliases, cleanupInconsistentBundle));
+  const incompatibleObjectIds = normalizeBundleObjects(indexedObjects, aliases, canonicalObjects, cleanupInconsistentBundle);
+  const compatibleObjects = indexedObjects.filter((object) => !incompatibleObjectIds.has(object.id));
   const compatibleObjectIds = new Set(compatibleObjects.map((object) => object.id));
   const plannedObjects = assignExecutionPhases(compatibleObjects.map((object) => ({
-    dependencyIds: collectDependencyIds(object, aliases, compatibleObjectIds, cleanupInconsistentBundle),
+    dependencyIds: collectDependencyIds(object, aliases, compatibleObjectIds),
     executionPhase: 0,
     id: object.id,
     index: object.index,
+    normalization: buildObjectNormalization(object),
     type: object.type,
   })));
+  const executionPhases = buildExecutionPhases(plannedObjects);
 
   return {
-    executionPhases: buildExecutionPhases(plannedObjects),
+    executionPhases,
     ignoredObjectCount,
     incompatibleObjectIds: indexedObjects
-      .filter((object) => !compatibleObjectIds.has(object.id))
+      .filter((object) => incompatibleObjectIds.has(object.id))
       .map((object) => object.id),
     objectCount: objects.length,
     objects: plannedObjects,
+    orderedObjectIds: executionPhases.flatMap((phase) => phase.objectIds),
     plannedObjectCount: plannedObjects.length,
   };
 };
