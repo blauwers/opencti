@@ -8,6 +8,13 @@ import type { BatchGraphqlFileInput, BatchGraphqlOperationInput } from './batch-
 
 type BatchGraphqlOperationResult = Record<string, unknown> | null | undefined;
 type BatchGraphqlResultBindings = Map<string, unknown>;
+type PreparedBatchGraphqlOperation = {
+  document: DocumentNode;
+  files?: BatchGraphqlFileInput[] | null;
+  operationIndex: number;
+  operationName?: string | null;
+  variables: Record<string, unknown>;
+};
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 
@@ -159,31 +166,41 @@ const validateOperationDocument = (
 const executeOperation = async (
   schema: GraphQLSchema,
   context: AuthContext,
-  operation: BatchGraphqlOperationInput,
-  operationIndex: number,
+  operation: PreparedBatchGraphqlOperation,
   resultBindings: BatchGraphqlResultBindings,
 ): Promise<BatchGraphqlOperationResult> => {
-  const { document, variables } = validateOperationDocument(schema, operation, operationIndex);
   const resolvedVariables = hydrateOperationFiles(
-    replaceResultTokens(variables, resultBindings) as Record<string, unknown>,
+    replaceResultTokens(operation.variables, resultBindings) as Record<string, unknown>,
     operation.files,
-    operationIndex,
+    operation.operationIndex,
   );
   const result = await execute({
     schema,
-    document,
+    document: operation.document,
     contextValue: context,
     operationName: operation.operationName ?? undefined,
     variableValues: resolvedVariables,
   }) as ExecutionResult<BatchGraphqlOperationResult>;
   if (result.errors && result.errors.length > 0) {
     throw FunctionalError('Batch GraphQL operation failed', {
-      operation_index: operationIndex,
+      operation_index: operation.operationIndex,
       errors: result.errors.map((error) => error.message),
     });
   }
-  registerResultBindings(result.data, operationIndex, resultBindings);
+  registerResultBindings(result.data, operation.operationIndex, resultBindings);
   return result.data;
+};
+
+const prepareBatchGraphqlOperations = (
+  schema: GraphQLSchema,
+  operations: BatchGraphqlOperationInput[],
+): PreparedBatchGraphqlOperation[] => {
+  return operations.map((operation, operationIndex) => ({
+    ...validateOperationDocument(schema, operation, operationIndex),
+    files: operation.files,
+    operationIndex,
+    operationName: operation.operationName,
+  }));
 };
 
 export const executeBatchGraphqlOperations = async (
@@ -195,10 +212,11 @@ export const executeBatchGraphqlOperations = async (
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
+  const preparedOperations = prepareBatchGraphqlOperations(schema, operations);
   const resultBindings: BatchGraphqlResultBindings = new Map();
-  const mutations = operations.map((operation, operationIndex) => ({
+  const mutations = preparedOperations.map((operation) => ({
     kind: BatchMutationKind.GraphqlOperation,
-    executeWrite: () => executeOperation(schema, context, operation, operationIndex, resultBindings),
+    executeWrite: () => executeOperation(schema, context, operation, resultBindings),
   }));
   return executeBatchMutations(mutations, options);
 };

@@ -142,6 +142,18 @@ describe('batch GraphQL operation executor', () => {
     expect(calls).toEqual([]);
   });
 
+  it('prepares the full operation plan before starting resolver writes', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    await expect(executeBatchGraphqlOperations(schema, {} as any, [
+      { query: 'mutation Record { record(value: "first") }' },
+      { query: 'query Status { status }' },
+    ])).rejects.toThrow('Batch GraphQL operations must contain exactly one mutation operation');
+
+    expect(calls).toEqual([]);
+  });
+
   it('substitutes prior result tokens and hydrates file inputs before execution', async () => {
     const calls: string[] = [];
     const schema = buildSchema(calls);
