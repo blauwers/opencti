@@ -453,7 +453,7 @@ describe('formSubmit', () => {
     expect(draftInput.objectParticipant).toBeUndefined();
   });
 
-  it('should send bundle with no_split:true to prevent race condition with multiple workers', async () => {
+  it('should send bundle with explicit unsplit routing metadata', async () => {
     const input = {
       formId: 'form-1',
       values: JSON.stringify({ name: 'Test Individual' }),
@@ -468,7 +468,7 @@ describe('formSubmit', () => {
     const pushSpy = vi.mocked(rabbitmq.pushToWorkerForConnector);
     expect(pushSpy).toHaveBeenCalledOnce();
     const message = pushSpy.mock.calls[0][1];
-    expect(message).toMatchObject({ no_split: true });
+    expect(message).toMatchObject({ no_split: true, split_bundles: false });
   });
 
   it('should bypass mandatory attributes when creating draft from form intake', async () => {

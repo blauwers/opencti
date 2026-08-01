@@ -400,6 +400,7 @@ class OpenCTIStix2:
         types: List = None,
         work_id: str = None,
         objects_max_refs: int = 0,
+        cleanup_inconsistent_bundle: bool = False,
     ) -> Tuple[list, list]:
         """Import a STIX2 bundle from JSON data.
 
@@ -413,11 +414,21 @@ class OpenCTIStix2:
         :type work_id: str, optional
         :param objects_max_refs: Maximum object references; rejects import if exceeded
         :type objects_max_refs: int, optional
+        :param cleanup_inconsistent_bundle: Whether to remove missing references while
+            preparing the bundle for import
+        :type cleanup_inconsistent_bundle: bool, optional
         :return: Tuple of (imported objects, objects with too many dependencies)
         :rtype: Tuple[list, list]
         """
         data = json.loads(json_data)
-        return self.import_bundle(data, update, types, work_id, objects_max_refs)
+        return self.import_bundle(
+            data,
+            update,
+            types,
+            work_id,
+            objects_max_refs,
+            cleanup_inconsistent_bundle,
+        )
 
     def resolve_author(self, title: str) -> Optional[Identity]:
         """Resolve an author identity from a title string.
@@ -3666,6 +3677,7 @@ class OpenCTIStix2:
         types: List = None,
         work_id: str = None,
         objects_max_refs: int = 0,
+        cleanup_inconsistent_bundle: bool = False,
     ) -> Tuple[list, list]:
         """Import a complete STIX2 bundle into OpenCTI.
 
@@ -3680,6 +3692,9 @@ class OpenCTIStix2:
         :param objects_max_refs: Maximum number of object references allowed; objects exceeding
             this limit will be rejected. Set to 0 to disable the limit.
         :type objects_max_refs: int, optional
+        :param cleanup_inconsistent_bundle: Whether to remove missing references while
+            preparing the bundle for import
+        :type cleanup_inconsistent_bundle: bool, optional
         :return: Tuple of (list of successfully imported elements, list of failed/too-large elements)
         :rtype: Tuple[list, list]
         :raises ValueError: If the bundle is not properly formatted or empty
@@ -3690,21 +3705,29 @@ class OpenCTIStix2:
             raise ValueError("JSON data type is not a STIX2 bundle")
         if "objects" not in stix_bundle or len(stix_bundle["objects"]) == 0:
             raise ValueError("JSON data objects is empty")
-        event_version = (
-            stix_bundle["x_opencti_event_version"]
-            if "x_opencti_event_version" in stix_bundle
-            else None
-        )
-
         stix2_splitter = OpenCTIStix2Splitter()
-        _, incompatible_elements, bundles = (
-            stix2_splitter.split_bundle_with_expectations(
-                stix_bundle, False, event_version
+        _, incompatible_elements, ordered_elements = (
+            stix2_splitter.prepare_bundle_for_import(
+                stix_bundle,
+                False,
+                cleanup_inconsistent_bundle,
             )
         )
+        bundle_id = stix_bundle["id"]
+        ignored_elements_count = max(
+            len(stix_bundle["objects"])
+            - len(ordered_elements)
+            - len(incompatible_elements),
+            0,
+        )
 
-        # Report every element ignored during bundle splitting
+        # Report every element ignored during bundle preparation.
         if work_id is not None:
+            # Import preparation can collapse duplicate STIX ids into one item.
+            # The intact transport path still adds expectations per submitted
+            # object, so acknowledge those suppressed duplicates here.
+            for _ in range(ignored_elements_count):
+                self.opencti.work.report_expectation(work_id, None)
             for incompatible_element in incompatible_elements:
                 self.opencti.work.report_expectation(
                     work_id,
@@ -3716,41 +3739,37 @@ class OpenCTIStix2:
                     },
                 )
 
-        # Import every element in a specific order
+        # Import every element in dependency order while retaining the original bundle id.
         imported_elements = []
         too_large_elements_bundles = []
-        for bundle in bundles:
-            bundle_id = bundle["id"]
-            for item in bundle["objects"]:
-                # If item is considered too large, meaning that it has a number of refs higher than inputted objects_max_refs, do not import it
-                nb_refs = OpenCTIStix2Utils.compute_object_refs_number(item)
-                if 0 < objects_max_refs <= nb_refs:
-                    too_large_element_message = "Too large element in bundle"
-                    worker_logger.warning(too_large_element_message)
-                    item["rejection_info"] = {
-                        "reject_reason": "ELEMENT_TOO_LARGE",
-                        "objects_max_refs": objects_max_refs,
-                    }
-                    self.opencti.work.report_expectation(
-                        work_id,
-                        {
-                            "error": too_large_element_message,
-                            "source": "Element "
-                            + item["id"]
-                            + " is too large and couldn't be processed",
-                        },
-                    )
-                    too_large_elements_bundles.append(item)
+        for item in ordered_elements:
+            # If item is considered too large, meaning that it has a number of refs higher than inputted objects_max_refs, do not import it
+            nb_refs = OpenCTIStix2Utils.compute_object_refs_number(item)
+            if 0 < objects_max_refs <= nb_refs:
+                too_large_element_message = "Too large element in bundle"
+                worker_logger.warning(too_large_element_message)
+                item["rejection_info"] = {
+                    "reject_reason": "ELEMENT_TOO_LARGE",
+                    "objects_max_refs": objects_max_refs,
+                }
+                self.opencti.work.report_expectation(
+                    work_id,
+                    {
+                        "error": too_large_element_message,
+                        "source": "Element "
+                        + item["id"]
+                        + " is too large and couldn't be processed",
+                    },
+                )
+                too_large_elements_bundles.append(item)
+            else:
+                failed_item = self.import_item_with_retries(
+                    item, update, types, work_id, bundle_id
+                )
+                if failed_item is not None:
+                    too_large_elements_bundles.append(failed_item)
                 else:
-                    failed_item = self.import_item_with_retries(
-                        item, update, types, work_id, bundle_id
-                    )
-                    if failed_item is not None:
-                        too_large_elements_bundles.append(failed_item)
-                    else:
-                        imported_elements.append(
-                            {"id": item["id"], "type": item["type"]}
-                        )
+                    imported_elements.append({"id": item["id"], "type": item["type"]})
 
         return imported_elements, too_large_elements_bundles
 

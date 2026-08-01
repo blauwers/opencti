@@ -1,8 +1,10 @@
 import datetime
+from unittest.mock import MagicMock
 
 import pytest
 
 from pycti.utils.opencti_stix2 import OpenCTIStix2
+from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
 
 @pytest.fixture
@@ -134,6 +136,103 @@ def test_import_bundle_from_file(opencti_stix2: OpenCTIStix2, caplog) -> None:
     for record in caplog.records:
         assert record.levelname == "ERROR"
     assert "The bundle file does not exist" in caplog.text
+
+
+def test_import_bundle_keeps_original_bundle_id_without_legacy_split(
+    monkeypatch,
+) -> None:
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+
+    def fail_legacy_split(*args, **kwargs):
+        raise AssertionError("default import must not materialize legacy child bundles")
+
+    monkeypatch.setattr(
+        OpenCTIStix2Splitter, "split_bundle_with_expectations", fail_legacy_split
+    )
+
+    imported_calls = []
+
+    def fake_import_item_with_retries(item, update, types, work_id, bundle_id):
+        imported_calls.append((item["id"], bundle_id))
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    bundle_id = "bundle--11111111-1111-4111-8111-111111111111"
+    imported, rejected = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": bundle_id,
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                    "created_by_ref": "identity--22222222-2222-4222-8222-222222222222",
+                },
+                {
+                    "type": "identity",
+                    "id": "identity--22222222-2222-4222-8222-222222222222",
+                },
+            ],
+        }
+    )
+
+    assert rejected == []
+    assert imported == [
+        {"id": "identity--22222222-2222-4222-8222-222222222222", "type": "identity"},
+        {"id": "indicator--11111111-1111-4111-8111-111111111111", "type": "indicator"},
+    ]
+    assert imported_calls == [
+        ("identity--22222222-2222-4222-8222-222222222222", bundle_id),
+        ("indicator--11111111-1111-4111-8111-111111111111", bundle_id),
+    ]
+
+
+def test_import_bundle_reports_duplicate_objects_suppressed_during_preparation(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    imported_calls = []
+
+    def fake_import_item_with_retries(item, update, types, work_id, bundle_id):
+        imported_calls.append((item["id"], bundle_id))
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    bundle_id = "bundle--11111111-1111-4111-8111-111111111111"
+    imported, rejected = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": bundle_id,
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                },
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                },
+            ],
+        },
+        work_id="work--1",
+    )
+
+    assert rejected == []
+    assert imported == [
+        {"id": "indicator--11111111-1111-4111-8111-111111111111", "type": "indicator"}
+    ]
+    assert imported_calls == [
+        ("indicator--11111111-1111-4111-8111-111111111111", bundle_id)
+    ]
+    opencti.work.report_expectation.assert_called_once_with("work--1", None)
 
 
 def test_extract_embedded_storage_path_ignores_query_string(

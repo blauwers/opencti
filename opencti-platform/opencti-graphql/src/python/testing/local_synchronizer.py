@@ -50,12 +50,6 @@ class TestLocalSynchronizer:
         )
         # Target
         self.opencti_target_client = OpenCTIApiClient(target_url, target_token)
-        self.opencti_target_helper = OpenCTIConnectorHelper(
-            {
-                "opencti": {"url": self.target_url, "token": self.target_token},
-                "connector": config,
-            }
-        )
 
     def _process_message(self, msg):
         if msg.event in ("create", "update", "merge", "delete"):
@@ -87,12 +81,12 @@ class TestLocalSynchronizer:
                 self.opencti_target_client.stix2.import_bundle(bundle, True)
             elif msg.event == "merge":
                 sources = data["context"]["sources"]
-                object_ids = list(map(lambda element: element["id"], sources))
-                self.opencti_target_helper.api.stix.merge(
-                    id=data["data"]["id"], object_ids=object_ids
+                self.opencti_target_client.stix.merge(
+                    id=data["data"]["id"],
+                    object_ids=list(map(lambda element: element["id"], sources)),
                 )
             elif msg.event == "delete":
-                self.opencti_target_helper.api.stix.delete(id=data["data"]["id"])
+                self.opencti_target_client.stix.delete(id=data["data"]["id"])
             if self.count_number >= self.consuming_count:
                 self.stream.stop()
 

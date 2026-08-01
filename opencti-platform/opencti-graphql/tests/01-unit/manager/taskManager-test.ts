@@ -114,7 +114,7 @@ describe('TaskManager sendResultToQueue tests', () => {
     vi.clearAllMocks();
   });
 
-  it('should send each object individually when forceNoSplit is not set', async () => {
+  it('should send all objects in a single bundle by default', async () => {
     const objects = [
       { id: 'object-1', type: 'indicator' },
       { id: 'object-2', type: 'malware' },
@@ -123,28 +123,25 @@ describe('TaskManager sendResultToQueue tests', () => {
 
     await sendResultToQueue(context, user, task, objects);
 
-    // Each object should be sent in its own bundle call
-    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(3);
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
 
-    // Each call should have exactly 1 object in the bundle
-    for (let i = 0; i < 3; i += 1) {
-      const call = vi.mocked(pushToWorkerForConnector).mock.calls[i];
-      expect(call[0]).toBe('connector-456');
-      const message = call[1] as { type: string; content: string; work_id: string; no_split: boolean };
-      expect(message.type).toBe('bundle');
-      expect(message.work_id).toBe('work-123');
-      expect(message.no_split).toBe(false);
-      const bundle = JSON.parse(Buffer.from(message.content, 'base64').toString('utf-8'));
-      expect(bundle.type).toBe('bundle');
-      expect(bundle.objects).toHaveLength(1);
-      expect(bundle.objects[0].id).toBe(objects[i].id);
-    }
+    const call = vi.mocked(pushToWorkerForConnector).mock.calls[0];
+    expect(call[0]).toBe('connector-456');
+    const message = call[1] as { type: string; content: string; work_id: string; no_split: boolean; split_bundles: boolean };
+    expect(message.type).toBe('bundle');
+    expect(message.work_id).toBe('work-123');
+    expect(message.no_split).toBe(true);
+    expect(message.split_bundles).toBe(false);
+    const bundle = JSON.parse(Buffer.from(message.content, 'base64').toString('utf-8'));
+    expect(bundle.type).toBe('bundle');
+    expect(bundle.objects).toHaveLength(3);
+    expect(bundle.objects.map((o: { id: string }) => o.id)).toEqual(['object-1', 'object-2', 'object-3']);
 
-    // updateExpectationsNumber should be called for each single-object bundle
-    expect(updateExpectationsNumber).toHaveBeenCalledTimes(3);
+    expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
+    expect(updateExpectationsNumber).toHaveBeenCalledWith(context, user, 'work-123', 3);
   });
 
-  it('should send all objects in a single bundle when forceNoSplit is true', async () => {
+  it('should keep the legacy forceNoSplit option harmless', async () => {
     const objects = [
       { id: 'object-1', type: 'indicator' },
       { id: 'object-2', type: 'malware' },
@@ -158,10 +155,11 @@ describe('TaskManager sendResultToQueue tests', () => {
 
     const call = vi.mocked(pushToWorkerForConnector).mock.calls[0];
     expect(call[0]).toBe('connector-456');
-    const message = call[1] as { type: string; content: string; work_id: string; no_split: boolean };
+    const message = call[1] as { type: string; content: string; work_id: string; no_split: boolean; split_bundles: boolean };
     expect(message.type).toBe('bundle');
     expect(message.work_id).toBe('work-123');
     expect(message.no_split).toBe(true);
+    expect(message.split_bundles).toBe(false);
 
     // All objects should be in the single bundle
     const bundle = JSON.parse(Buffer.from(message.content, 'base64').toString('utf-8'));
@@ -172,6 +170,21 @@ describe('TaskManager sendResultToQueue tests', () => {
     // updateExpectationsNumber should be called once with the total count
     expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
     expect(updateExpectationsNumber).toHaveBeenCalledWith(context, user, 'work-123', 3);
+  });
+
+  it('should only request bundle splitting when explicitly asked', async () => {
+    const objects = [
+      { id: 'object-1', type: 'indicator' },
+      { id: 'object-2', type: 'malware' },
+    ];
+
+    await sendResultToQueue(context, user, task, objects, { splitBundles: true });
+
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+    const message = vi.mocked(pushToWorkerForConnector).mock.calls[0][1] as { no_split: boolean; split_bundles: boolean };
+    expect(message.no_split).toBe(false);
+    expect(message.split_bundles).toBe(true);
+    expect(updateExpectationsNumber).not.toHaveBeenCalled();
   });
 
   it('should not call pushToWorkerForConnector when objects array is empty', async () => {

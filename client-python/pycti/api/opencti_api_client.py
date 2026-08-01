@@ -1155,6 +1155,12 @@ class OpenCTIApiClient:
         :type bundle: str
         :param work_id: the work ID to associate with the bundle
         :type work_id: str, optional
+        :param split_bundles: whether to explicitly request historical bundle
+            splitting
+        :type split_bundles: bool, optional
+        :param cleanup_inconsistent_bundle: whether to clean missing references
+            during import preparation
+        :type cleanup_inconsistent_bundle: bool, optional
         :return: returns the query response for the bundle push
         :rtype: dict
         """
@@ -1162,19 +1168,27 @@ class OpenCTIApiClient:
         connector_id = kwargs.get("connector_id", None)
         work_id = kwargs.get("work_id", None)
         bundle = kwargs.get("bundle", None)
+        split_bundles = kwargs.get("split_bundles", False) is True
+        cleanup_inconsistent_bundle = kwargs.get("cleanup_inconsistent_bundle", False)
 
         if connector_id is not None and bundle is not None:
             self.app_logger.info(
                 "Pushing a bundle to queue through API", {connector_id}
             )
             mutation = """
-                    mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String) {
-                        stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id)
+                    mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean) {
+                        stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle)
                     }
                  """
             return self.query(
                 mutation,
-                {"connectorId": connector_id, "bundle": bundle, "work_id": work_id},
+                {
+                    "connectorId": connector_id,
+                    "bundle": bundle,
+                    "work_id": work_id,
+                    "split_bundles": split_bundles,
+                    "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
+                },
             )
         else:
             self.app_logger.error(

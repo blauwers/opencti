@@ -83,7 +83,7 @@ testUpdatedCounter['data-source'] = 1;
 testUpdatedCounter['external-reference'] = 1;
 testUpdatedCounter.grouping = 3;
 testUpdatedCounter.incident = 3;
-testUpdatedCounter.indicator = 30;
+testUpdatedCounter.indicator = 31;
 testUpdatedCounter.label = 1;
 testUpdatedCounter['malware-analysis'] = 3;
 testUpdatedCounter.note = 3;
@@ -108,7 +108,6 @@ testMergedCounter.identity = 1;
 testMergedCounter.report = 3;
 testMergedCounter.file = 3;
 testMergedCounter.artifact = 1;
-testMergedCounter['attack-pattern'] = 1;
 
 export const testDeletedCounter: Record<string, number> = {};
 testDeletedCounter.artifact = 3;

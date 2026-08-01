@@ -132,6 +132,38 @@ def test_split_cyclic_bundle():
             )
 
 
+def test_prepare_bundle_for_import_returns_ordered_elements_without_wrappers():
+    stix_splitter = OpenCTIStix2Splitter()
+    bundle = {
+        "type": "bundle",
+        "id": "bundle--11111111-1111-4111-8111-111111111111",
+        "objects": [
+            {
+                "type": "indicator",
+                "id": "indicator--11111111-1111-4111-8111-111111111111",
+                "created_by_ref": "identity--22222222-2222-4222-8222-222222222222",
+            },
+            {
+                "type": "identity",
+                "id": "identity--22222222-2222-4222-8222-222222222222",
+            },
+        ],
+    }
+
+    expectations, incompatible_items, elements = (
+        stix_splitter.prepare_bundle_for_import(bundle, use_json=False)
+    )
+
+    assert expectations == 2
+    assert incompatible_items == []
+    assert [element["id"] for element in elements] == [
+        "identity--22222222-2222-4222-8222-222222222222",
+        "indicator--11111111-1111-4111-8111-111111111111",
+    ]
+    assert all(element["type"] != "bundle" for element in elements)
+    assert all("x_opencti_seq" not in element for element in elements)
+
+
 def test_create_bundle():
     stix_splitter = OpenCTIStix2Splitter()
     report = Report(

@@ -6,6 +6,7 @@ import { READ_INDEX_STIX_DOMAIN_OBJECTS } from '../../../database/utils';
 import { generateStandardId } from '../../../schema/identifier';
 import { elBatchIdsWithRelCount, elUpdate } from '../../../database/engine';
 import type { BasicStoreEntity } from '../../../types/store';
+import type { EventOpts } from '../../../types/event';
 import { mergeEntities } from '../../../database/middleware';
 import * as R from 'ramda';
 import type { SanityOperationRunOutput } from '../dataSanity-operations';
@@ -44,7 +45,7 @@ export const computeCollisionGroup = async (context: AuthContext, entityType: st
   return collisionGroups;
 };
 
-export const migrateEntityType = async (context: AuthContext, entityType: string) => {
+export const migrateEntityType = async (context: AuthContext, entityType: string, opts: EventOpts = {}) => {
   const collisionGroups = await computeCollisionGroup(context, entityType);
   logApp.info(`${message} > ${collisionGroups.length} ${entityType} collision group(s) to merge`);
 
@@ -82,7 +83,7 @@ export const migrateEntityType = async (context: AuthContext, entityType: string
       if (target.standard_id !== newId) {
         await elUpdate(context, target._index, target.internal_id, { doc: { standard_id: newId } });
       }
-      await mergeEntities(context, DATA_SANITY_MANAGER_USER, target.internal_id, sources.map((s) => s.internal_id));
+      await mergeEntities(context, DATA_SANITY_MANAGER_USER, target.internal_id, sources.map((s) => s.internal_id), opts);
       mergedEntities += sources.length;
       // Use logApp.info so the operator can follow merge progress in the migration log channel.
       logApp.info(

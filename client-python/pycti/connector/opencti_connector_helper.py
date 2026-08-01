@@ -3495,7 +3495,8 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         """Send a STIX2 bundle to the OpenCTI platform.
 
         Processes and sends a STIX2 bundle to OpenCTI via the message queue or API.
-        The bundle is split into smaller chunks and sent with proper sequencing.
+        Bundles are sent intact by default. The historical child-bundle split path
+        remains available only when explicitly requested with ``split_bundles=True``.
         Supports validation workflows, draft mode, and directory export.
 
         :param bundle: Valid STIX2 bundle as a JSON string
@@ -3534,8 +3535,12 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         :type send_to_directory_retention: int, optional
         :param send_to_s3: Whether to upload bundle to S3 (default: self.bundle_send_to_s3)
         :type send_to_s3: bool, optional
-        :param no_split: Whether to send without splitting (default: False)
+        :param no_split: Legacy compatibility flag. Intact bundle transport is now the
+            default, so this value is ignored by current routing.
         :type no_split: bool, optional
+        :param split_bundles: Whether to explicitly use the historical child-bundle
+            split path (default: False)
+        :type split_bundles: bool, optional
 
         :return: List of processed bundle chunks
         :rtype: list
@@ -3565,7 +3570,10 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             "send_to_directory_retention", self.bundle_send_to_directory_retention
         )
         bundle_send_to_s3 = kwargs.get("send_to_s3", self.bundle_send_to_s3)
-        no_split = kwargs.get("no_split", False)
+        split_bundles = kwargs.get("split_bundles", False) is True
+        # Keep this field on queue messages for mixed-version deployments: old
+        # workers still use it, while current workers route only on split_bundles.
+        no_split = not split_bundles
 
         # In case of enrichment ingestion, ensure the sharing if needed
         if self.enrichment_shared_organizations is not None:
@@ -3697,10 +3705,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             )
             self._send_bundle_to_s3(json.dumps(message_bundle), bundle_file)
 
-        if no_split:
-            bundles = [bundle]
-            expectations_number = 1
-        else:
+        if split_bundles:
             stix2_splitter = OpenCTIStix2Splitter()
             expectations_number, _, bundles = (
                 stix2_splitter.split_bundle_with_expectations(
@@ -3710,6 +3715,21 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                     cleanup_inconsistent_bundle=cleanup_inconsistent_bundle,
                 )
             )
+        else:
+            bundle_data = json.loads(bundle)
+            if "objects" not in bundle_data or len(bundle_data["objects"]) == 0:
+                bundles = []
+                expectations_number = 0
+            else:
+                if "id" not in bundle_data:
+                    bundle_data["id"] = "bundle--" + str(uuid.uuid4())
+                if event_version is not None:
+                    bundle_data["x_opencti_event_version"] = event_version
+                bundle = json.dumps(bundle_data)
+                bundles = [bundle]
+                # The current importer still reports progress per submitted object,
+                # including objects collapsed during import preparation.
+                expectations_number = len(bundle_data["objects"])
 
         if len(bundles) == 0:
             self.metric.inc("error_count")
@@ -3759,12 +3779,18 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                         update=update,
                         draft_id=draft_id,
                         no_split=no_split,
+                        split_bundles=split_bundles,
+                        cleanup_inconsistent_bundle=cleanup_inconsistent_bundle,
                     )
                 channel.close()
                 pika_connection.close()
             elif self.queue_protocol == "api":
                 self.api.send_bundle_to_api(
-                    connector_id=self.connector_id, bundle=bundle, work_id=work_id
+                    connector_id=self.connector_id,
+                    bundle=bundle,
+                    work_id=work_id,
+                    split_bundles=split_bundles,
+                    cleanup_inconsistent_bundle=cleanup_inconsistent_bundle,
                 )
                 self.metric.inc("bundle_send")
             else:
@@ -3800,7 +3826,9 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         update = kwargs.get("update", False)
         entities_types = kwargs.get("entities_types", None)
         draft_id = kwargs.get("draft_id", None)
-        no_split = kwargs.get("no_split", False)
+        split_bundles = kwargs.get("split_bundles", False) is True
+        no_split = not split_bundles
+        cleanup_inconsistent_bundle = kwargs.get("cleanup_inconsistent_bundle", False)
 
         if entities_types is None:
             entities_types = []
@@ -3824,6 +3852,8 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             "update": update,
             "draft_id": draft_id,
             "no_split": no_split,
+            "split_bundles": split_bundles,
+            "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
         }
         if work_id is not None:
             message["work_id"] = work_id

@@ -53,10 +53,67 @@ class OpenCTIStix2Splitter:
         Sets up internal caches for tracking processed elements,
         references, and incompatible items.
         """
+        self.reset()
+
+    def reset(self):
+        """Reset the splitter state before preparing a new bundle."""
         self.cache_index = {}
         self.cache_refs = {}
         self.elements = []
         self.incompatible_items = []
+
+    @staticmethod
+    def _load_bundle_data(bundle, use_json):
+        """Load and validate a bundle, preserving dict inputs in place."""
+        if use_json:
+            try:
+                bundle_data = json.loads(bundle)
+            except json.JSONDecodeError as e:
+                raise Exception(f"File data is not a valid JSON: {e}")
+        else:
+            bundle_data = bundle
+
+        if "objects" not in bundle_data:
+            raise Exception("File data is not a valid bundle")
+        if "id" not in bundle_data:
+            bundle_data["id"] = "bundle--" + str(uuid.uuid4())
+        return bundle_data
+
+    def _prepare_bundle_elements(self, bundle_data, cleanup_inconsistent_bundle):
+        """Normalize references and order bundle elements by dependency count."""
+        self.reset()
+        raw_data = {}
+
+        # Build flat list of elements
+        for item in bundle_data["objects"]:
+            raw_data[item["id"]] = item
+            for internal_id in self.get_internal_ids_in_extension(item):
+                raw_data[internal_id] = item
+        for item in bundle_data["objects"]:
+            self.enlist_element(item["id"], raw_data, cleanup_inconsistent_bundle, [])
+
+        self.elements.sort(key=lambda elem: elem["nb_deps"])
+        return len(self.elements), self.incompatible_items, self.elements
+
+    def prepare_bundle_for_import(
+        self,
+        bundle,
+        use_json=True,
+        cleanup_inconsistent_bundle=False,
+    ) -> Tuple[int, list, list]:
+        """Prepare a valid STIX2 bundle for ordered import without splitting it.
+
+        :param bundle: the STIX2 bundle to prepare
+        :type bundle: str or dict
+        :param use_json: whether the bundle is JSON string (True) or dict (False)
+        :type use_json: bool
+        :param cleanup_inconsistent_bundle: whether to cleanup inconsistent references
+        :type cleanup_inconsistent_bundle: bool
+        :return: tuple of (number of expectations, incompatible items, ordered elements)
+        :rtype: Tuple[int, list, list]
+        """
+        bundle_data = self._load_bundle_data(bundle, use_json)
+        return self._prepare_bundle_elements(bundle_data, cleanup_inconsistent_bundle)
 
     def get_internal_ids_in_extension(self, item):
         """Get internal IDs from OpenCTI extensions in a STIX object.
@@ -260,56 +317,19 @@ class OpenCTIStix2Splitter:
         :return: tuple of (number of expectations, incompatible items, list of bundles)
         :rtype: Tuple[int, list, list]
         """
-        if use_json:
-            try:
-                bundle_data = json.loads(bundle)
-            except json.JSONDecodeError as e:
-                raise Exception(f"File data is not a valid JSON: {e}")
-        else:
-            bundle_data = bundle
-
-        if "objects" not in bundle_data:
-            raise Exception("File data is not a valid bundle")
-        if "id" not in bundle_data:
-            bundle_data["id"] = "bundle--" + str(uuid.uuid4())
-
-        raw_data = {}
-
-        # Build flat list of elements
-        for item in bundle_data["objects"]:
-            raw_data[item["id"]] = item
-            for internal_id in self.get_internal_ids_in_extension(item):
-                raw_data[internal_id] = item
-        for item in bundle_data["objects"]:
-            self.enlist_element(item["id"], raw_data, cleanup_inconsistent_bundle, [])
-
-        # Build the bundles
-        bundles = []
-
-        def by_dep_size(elem):
-            """Get the dependency count for sorting elements.
-
-            :param elem: Element dictionary containing nb_deps
-            :type elem: dict
-            :return: Number of dependencies
-            :rtype: int
-            """
-            return elem["nb_deps"]
-
-        self.elements.sort(key=by_dep_size)
-
-        elements_with_deps = list(
-            map(lambda e: {"nb_deps": e["nb_deps"], "elements": [e]}, self.elements)
+        bundle_data = self._load_bundle_data(bundle, use_json)
+        number_expectations, incompatible_items, elements = (
+            self._prepare_bundle_elements(bundle_data, cleanup_inconsistent_bundle)
         )
 
-        number_expectations = 0
-        for entity in elements_with_deps:
-            number_expectations += len(entity["elements"])
+        # Build the legacy child bundles only for callers explicitly requesting split output.
+        bundles = []
+        for element in elements:
             bundles.append(
                 self.stix2_create_bundle(
                     bundle_data["id"],
-                    entity["nb_deps"],
-                    entity["elements"],
+                    element["nb_deps"],
+                    [element],
                     use_json,
                     event_version,
                 )
@@ -317,7 +337,7 @@ class OpenCTIStix2Splitter:
 
         return (
             number_expectations,
-            self.incompatible_items,
+            incompatible_items,
             bundles,
         )
 

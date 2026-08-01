@@ -54,7 +54,15 @@ export const stixObjectMerge = async (context, user, targetId, sourceIds) => {
   return mergeEntities(context, user, targetId, sourceIds);
 };
 
-export const sendStixBundle = async (context, user, connectorId, bundle, work_id) => {
+export const sendStixBundle = async (
+  context,
+  user,
+  connectorId,
+  bundle,
+  work_id,
+  split_bundles = false,
+  cleanup_inconsistent_bundle = false,
+) => {
   try {
     // 01. Simple check bundle
     const jsonBundle = JSON.parse(bundle);
@@ -66,15 +74,15 @@ export const sendStixBundle = async (context, user, connectorId, bundle, work_id
     if (!connector) {
       throw UnsupportedError('Invalid connector', { connectorId });
     }
+    const splitBundles = split_bundles === true;
     let target_work_id = work_id;
     if (isEmptyField(work_id)) {
       const workName = `${connector.name} run @ ${now()}`;
       const work = await createWork(context, user, connector, workName, connector.internal_id, { receivedTime: now() });
       target_work_id = work.id;
-      if (jsonBundle.objects.length === 1) {
-        // Only add explicit expectation if the worker will not split anything
-        await updateExpectationsNumber(context, context.user, target_work_id, jsonBundle.objects.length);
-      }
+    }
+    if (!splitBundles) {
+      await updateExpectationsNumber(context, user, target_work_id, jsonBundle.objects.length);
     }
     const content = Buffer.from(bundle, 'utf-8').toString('base64');
     await pushToWorkerForConnector(connectorId, {
@@ -83,6 +91,9 @@ export const sendStixBundle = async (context, user, connectorId, bundle, work_id
       content,
       work_id: target_work_id,
       update: true,
+      no_split: !splitBundles,
+      split_bundles: splitBundles,
+      cleanup_inconsistent_bundle: cleanup_inconsistent_bundle === true,
     });
     return true;
   } catch (err) {

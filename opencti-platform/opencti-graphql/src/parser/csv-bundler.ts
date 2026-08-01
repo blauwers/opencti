@@ -13,6 +13,7 @@ import { isEmptyField } from '../database/utils';
 import conf, { logApp } from '../config/conf';
 import type { StixBundle, StixObject } from '../types/stix-2-1-common';
 import { pushToWorkerForConnector } from '../database/rabbitmq';
+import { updateExpectationsNumber } from '../domain/work';
 
 import { convertStoreToStix_2_1 } from '../database/stix-2-1-converter';
 
@@ -33,7 +34,7 @@ export interface CsvBundlerIngestionOpts {
   draftId?: string;
 }
 
-const sendBundleToWorker = async (bundle: BundleBuilder, opts: CsvBundlerIngestionOpts) => {
+const sendBundleToWorker = async (context: AuthContext, bundle: BundleBuilder, opts: CsvBundlerIngestionOpts) => {
   // Handle container
   if (opts.entity && isStixDomainObjectContainer(opts.entity.entity_type)) {
     const refs = bundle.ids();
@@ -46,6 +47,7 @@ const sendBundleToWorker = async (bundle: BundleBuilder, opts: CsvBundlerIngesti
   const bundleContentAsString = Buffer.from(JSON.stringify(bundleBuilt), 'utf-8').toString('base64');
 
   logApp.debug(`${LOG_PREFIX} push bundle to worker with ${objectCount} objects`);
+  await updateExpectationsNumber(context, opts.applicantUser, opts.workId, objectCount);
   await pushToWorkerForConnector(opts.connectorId, {
     type: 'bundle',
     update: true,
@@ -53,6 +55,8 @@ const sendBundleToWorker = async (bundle: BundleBuilder, opts: CsvBundlerIngesti
     work_id: opts.workId,
     content: bundleContentAsString,
     draft_id: opts.draftId ?? '',
+    no_split: true,
+    split_bundles: false,
   });
   return objectCount;
 };
@@ -105,7 +109,7 @@ const internalGenerateBundles = async (
           } else {
             let objectSentCount = bundleBuilder.objects.length;
             if (sendBundles) {
-              objectSentCount = await sendBundleToWorker(bundleBuilder, opts);
+              objectSentCount = await sendBundleToWorker(context, bundleBuilder, opts);
             }
             totalBundleSend += 1;
             totalObjectSend += objectSentCount;
@@ -123,7 +127,7 @@ const internalGenerateBundles = async (
     if (bundleBuilder.objects.length > 0) {
       let objectSentCount = bundleBuilder.objects.length;
       if (sendBundles) {
-        objectSentCount = await sendBundleToWorker(bundleBuilder, opts);
+        objectSentCount = await sendBundleToWorker(context, bundleBuilder, opts);
       }
       totalObjectSend += objectSentCount;
       totalBundleSend += 1;

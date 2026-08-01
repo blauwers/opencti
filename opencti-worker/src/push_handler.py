@@ -11,6 +11,22 @@ from pika.exceptions import NackError, UnroutableError
 from pycti import OpenCTIApiClient, OpenCTIStix2Splitter, __version__
 
 
+def should_split_bundles(data: Dict[str, Any], content: Dict[str, Any]) -> bool:
+    return len(content["objects"]) > 1 and data.get("split_bundles") is True
+
+
+def should_add_legacy_default_split_expectations(
+    data: Dict[str, Any], content: Dict[str, Any]
+) -> bool:
+    # Old producers omitted split_bundles and relied on the worker split branch
+    # to add expectations unless they explicitly sent no_split=True.
+    return (
+        len(content["objects"]) > 1
+        and "split_bundles" not in data
+        and data.get("no_split") is not True
+    )
+
+
 @dataclass(unsafe_hash=True)
 class PushHandler:  # pylint: disable=too-many-instance-attributes
     logger: Any
@@ -121,11 +137,25 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 # Standard event with STIX information
                 if "objects" not in content or len(content["objects"]) == 0:
                     raise ValueError("JSON data type is not a STIX2 bundle")
-                if len(content["objects"]) == 1 or data.get("no_split", False):
+                if not should_split_bundles(data, content):
+                    if (
+                        work_id is not None
+                        and should_add_legacy_default_split_expectations(data, content)
+                    ):
+                        work_alive = self.api.work.add_expectations(
+                            work_id, len(content["objects"])
+                        )
+                        if not work_alive:
+                            return "ack"
                     update = data.get("update", False)
                     imported_items, too_large_items_bundles = (
                         self.api.stix2.import_bundle_from_json(
-                            raw_content, update, types, work_id, self.objects_max_refs
+                            raw_content,
+                            update,
+                            types,
+                            work_id,
+                            self.objects_max_refs,
+                            data.get("cleanup_inconsistent_bundle", False),
                         )
                     )
                     if len(too_large_items_bundles) > 0:
@@ -159,7 +189,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                         too_large_item_bundle,
                                     )
                 else:
-                    # As bundle is received as complete, split and requeue
+                    # Bundle splitting was explicitly requested, split and requeue.
                     # Create a specific channel to push the split bundles
                     with pika.BlockingConnection(
                         self.pika_parameters
@@ -174,7 +204,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                             stix2_splitter = OpenCTIStix2Splitter()
                             expectations, _, bundles = (
                                 stix2_splitter.split_bundle_with_expectations(
-                                    content, False, event_version
+                                    content,
+                                    False,
+                                    event_version,
+                                    data.get("cleanup_inconsistent_bundle", False),
                                 )
                             )
                             # Add expectations to the work

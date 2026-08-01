@@ -23,7 +23,7 @@ export class BundleBuilder {
   /**
    * Check if bundle object can be added to the current bundle or if a new bundle is required to use upsert feature.
    * If there is the same stix id but with different content => it need to be in another bundle because
-   * Same stix id on the one bundle are removed from processing during worker split process (worker see them as duplicate).
+   * Same stix ids in one bundle are removed during import preparation because they are seen as duplicates.
    * @param objectsToAdd
    */
   canAddObjects(objectsToAdd: StixObject[]) {

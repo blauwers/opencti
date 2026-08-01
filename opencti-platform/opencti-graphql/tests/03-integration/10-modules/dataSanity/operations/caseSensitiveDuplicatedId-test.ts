@@ -106,7 +106,10 @@ describe('Operation caseSensitiveDuplicatedId coverage', () => {
     expect(beforeMerge2).toBeDefined();
 
     // Run the actual merge
-    const result = await migrateEntityType(testContext, ENTITY_TYPE_ATTACK_PATTERN);
+    // These fixtures are inserted directly into Elasticsearch, so they do not have
+    // replayable create events in the raw stream. Do not emit a merge event that a
+    // fresh sync target can never apply.
+    const result = await migrateEntityType(testContext, ENTITY_TYPE_ATTACK_PATTERN, { publishStreamEvent: false });
 
     // At least our collision group should have been merged
     expect(result.collisions).toBeGreaterThanOrEqual(1);

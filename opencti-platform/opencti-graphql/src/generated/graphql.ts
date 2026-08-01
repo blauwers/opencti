@@ -19603,7 +19603,9 @@ export type MutationStatusTemplateFieldPatchArgs = {
 
 export type MutationStixBundlePushArgs = {
   bundle: Scalars['String']['input'];
+  cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
   connectorId: Scalars['String']['input'];
+  split_bundles?: InputMaybe<Scalars['Boolean']['input']>;
   work_id?: InputMaybe<Scalars['String']['input']>;
 };
 

@@ -256,8 +256,8 @@ const buildAndSendBundle = async (context, user, task, objects, opts) => {
   // Send actions to queue
   const stixBundle = JSON.stringify({ id: uuidv4(), type: 'bundle', objects });
   const content = Buffer.from(stixBundle, 'utf-8').toString('base64');
-  // Only add explicit expectation if the worker will not split anything
-  if (objects.length === 1 || opts.forceNoSplit) {
+  const splitBundles = opts.splitBundles === true;
+  if (!splitBundles) {
     await updateExpectationsNumber(context, user, task.work_id, objects.length);
   }
   await pushToWorkerForConnector(task.connector_id, {
@@ -266,19 +266,14 @@ const buildAndSendBundle = async (context, user, task, objects, opts) => {
     content,
     work_id: task.work_id,
     draft_id: task.draft_context ?? null,
-    no_split: opts.forceNoSplit ?? false,
+    no_split: !splitBundles,
+    split_bundles: splitBundles,
   });
 };
 
 export const sendResultToQueue = async (context, user, task, objects, opts = {}) => {
-  const { forceNoSplit } = opts;
-  if (forceNoSplit === true) {
+  if (objects.length > 0) {
     await buildAndSendBundle(context, user, task, objects, opts);
-  } else {
-    for (let index = 0; index < objects.length; index += 1) {
-      const splitObject = objects[index];
-      await buildAndSendBundle(context, user, task, [splitObject], opts);
-    }
   }
 };
 
@@ -510,7 +505,7 @@ const sharingOperationCallback = async (context, user, task, actionType, operati
     for (let index = 0; index < elements.length; index += 1) {
       const element = elements[index];
       // in case of container we need to share all inner objects
-      // We also need to push a no split bundle directly
+      // Keep container sharing in one bundle so direct-container semantics remain scoped together.
       if (isStixDomainObjectContainer(element.entity_type)) {
         const containerObjects = [];
         const sharingElements = await getContainerObjects(context, user, element.internal_id, { all: true });
@@ -528,7 +523,7 @@ const sharingOperationCallback = async (context, user, task, actionType, operati
         container.extensions[STIX_EXT_OCTI].sharing_direct_container = true;
         containerObjects.push(container);
         // Send actions to queue
-        await sendResultToQueue(context, user, task, containerObjects, { forceNoSplit: true });
+        await sendResultToQueue(context, user, task, containerObjects);
       } else {
         // If not a container add in global bundle
         objects.push(buildBundleElement(element, actionType, operations));

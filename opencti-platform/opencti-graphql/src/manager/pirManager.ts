@@ -64,6 +64,8 @@ const pirFlagElementToQueue = async (
     applicant_id: PIR_MANAGER_USER.id,
     update: true,
     content,
+    no_split: true,
+    split_bundles: false,
   };
   await pushToWorkerForConnector(pir.internal_id, message);
 };
@@ -87,6 +89,8 @@ const pirUnflagElementFromQueue = async (
     applicant_id: PIR_MANAGER_USER.id,
     update: true,
     content,
+    no_split: true,
+    split_bundles: false,
   };
   await pushToWorkerForConnector(pir.internal_id, message);
 };
