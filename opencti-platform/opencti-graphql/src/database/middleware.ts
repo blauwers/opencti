@@ -620,6 +620,10 @@ export const storeLoadByIdWithRefs = async <T extends StoreObject>(
   if (!id) {
     return null;
   }
+  const batchLoader = isBatchWriteBoundaryOpen() ? context.batch?.storeLoadByIdWithRefsBatchLoader : undefined;
+  if (batchLoader) {
+    return await batchLoader.load({ id, opts, user }) as T | null;
+  }
   const elements = await storeLoadByIdsWithRefs(context, user, [id], opts);
   return elements.length > 0 ? elements[0] as T : null;
 };

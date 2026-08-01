@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elIndex, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
-import { deleteElementById, mergeEntities } from '../../../src/database/middleware';
+import { deleteElementById, mergeEntities, storeLoadByIdWithRefs } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { elIndexFiles } from '../../../src/database/file-search';
 import { fileToReadStream, uploadToStorage } from '../../../src/database/file-storage';
@@ -26,6 +26,8 @@ import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
 import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { redisDeleteWorks, redisGetWork } from '../../../src/database/redis';
+import { computeLoaders } from '../../../src/http/httpAuthenticatedContext';
+import { executionContext } from '../../../src/utils/access';
 
 describe('batch engine writes', () => {
   let malware: any;
@@ -580,6 +582,35 @@ describe('batch engine writes', () => {
     const committedRelation = await internalLoadById(testContext, ADMIN_USER, relation.internal_id) as any;
     expect(committedRelation.fromId).toBe(source.internal_id);
     expect(committedRelation.toId).toBe(target.internal_id);
+  });
+
+  it('loads hydrated entities created earlier in the same batch through the request batch loader', async () => {
+    const batchContext = executionContext('batch-hydrated-read', ADMIN_USER);
+    batchContext.batch = computeLoaders(batchContext, ADMIN_USER);
+    let created: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          created = await addMalware(batchContext, ADMIN_USER, { name: `Batch hydrated read ${uuidv4()}` });
+          cleanupMalwares.push(created);
+          return created;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const [byInternalId, byStandardId] = await Promise.all([
+            storeLoadByIdWithRefs(batchContext, ADMIN_USER, created.internal_id, { type: ENTITY_TYPE_MALWARE }),
+            storeLoadByIdWithRefs(batchContext, ADMIN_USER, created.standard_id, { type: ENTITY_TYPE_MALWARE }),
+          ]);
+          expect(byInternalId?.internal_id).toBe(created.internal_id);
+          expect(byStandardId?.internal_id).toBe(created.internal_id);
+          return null;
+        },
+      },
+    ]);
   });
 
   it('deduplicates repeated relation creation inside one backend batch scope', async () => {

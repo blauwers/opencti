@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
-import { createExistingEntityIdsBatchLoader, createInputResolveRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
+import { createExistingEntityIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
 
 vi.mock('../../../../src/database/middleware-loader', () => ({
   internalFindByIds: vi.fn(),
@@ -154,5 +154,88 @@ describe('batch reference loader', () => {
     expect(internalFindByIds).toHaveBeenCalledTimes(2);
     expect(first).toEqual([]);
     expect(second.map((element) => element.internal_id)).toEqual(['indicator--one']);
+  });
+
+  it('coalesces same-user hydrated reads with matching options', async () => {
+    const loadByIdsWithRefs = vi.fn().mockResolvedValue([
+      {
+        internal_id: 'identity--internal',
+        standard_id: 'identity--shared',
+        entity_type: 'Identity',
+      },
+      {
+        internal_id: 'marking-definition--internal',
+        standard_id: 'marking-definition--shared',
+        entity_type: 'Marking-Definition',
+      },
+    ] as any);
+
+    const loader = createStoreLoadByIdWithRefsBatchLoader(context, loadByIdsWithRefs);
+    const [identity, marking] = await Promise.all([
+      loader.load({ id: 'identity--shared', opts: { onlyMarking: false }, user }),
+      loader.load({ id: 'marking-definition--shared', opts: { onlyMarking: false }, user }),
+    ]);
+
+    expect(loadByIdsWithRefs).toHaveBeenCalledTimes(1);
+    expect(loadByIdsWithRefs).toHaveBeenCalledWith(context, user, [
+      'identity--shared',
+      'marking-definition--shared',
+    ], { onlyMarking: false });
+    expect(identity).toEqual(expect.objectContaining({ internal_id: 'identity--internal' }));
+    expect(marking).toEqual(expect.objectContaining({ internal_id: 'marking-definition--internal' }));
+  });
+
+  it('keeps hydrated reads with different users or options in separate probes', async () => {
+    const otherUser = {} as any;
+    const loadByIdsWithRefs = vi.fn()
+      .mockResolvedValueOnce([{
+        internal_id: 'identity--one',
+        standard_id: 'identity--shared',
+        entity_type: 'Identity',
+      }] as any)
+      .mockResolvedValueOnce([{
+        internal_id: 'indicator--one',
+        standard_id: 'indicator--shared',
+        entity_type: 'Indicator',
+      }] as any)
+      .mockResolvedValueOnce([{
+        internal_id: 'identity--two',
+        standard_id: 'identity--shared-two',
+        entity_type: 'Identity',
+      }] as any);
+
+    const loader = createStoreLoadByIdWithRefsBatchLoader(context, loadByIdsWithRefs);
+    await Promise.all([
+      loader.load({ id: 'identity--shared', opts: { type: 'Identity' }, user }),
+      loader.load({ id: 'indicator--shared', opts: { type: 'Indicator' }, user }),
+      loader.load({ id: 'identity--shared-two', opts: { type: 'Identity' }, user: otherUser }),
+    ]);
+
+    expect(loadByIdsWithRefs).toHaveBeenCalledTimes(3);
+    expect(loadByIdsWithRefs).toHaveBeenCalledWith(context, user, ['identity--shared'], { type: 'Identity' });
+    expect(loadByIdsWithRefs).toHaveBeenCalledWith(context, user, ['indicator--shared'], { type: 'Indicator' });
+    expect(loadByIdsWithRefs).toHaveBeenCalledWith(context, otherUser, ['identity--shared-two'], { type: 'Identity' });
+  });
+
+  it('does not cache hydrated reads across ticks', async () => {
+    const loadByIdsWithRefs = vi.fn()
+      .mockResolvedValueOnce([{
+        internal_id: 'identity--one',
+        standard_id: 'identity--shared',
+        entity_type: 'Identity',
+      }] as any)
+      .mockResolvedValueOnce([{
+        internal_id: 'identity--two',
+        standard_id: 'identity--shared',
+        entity_type: 'Identity',
+      }] as any);
+
+    const loader = createStoreLoadByIdWithRefsBatchLoader(context, loadByIdsWithRefs);
+    const first = await loader.load({ id: 'identity--shared', user });
+    const second = await loader.load({ id: 'identity--shared', user });
+
+    expect(loadByIdsWithRefs).toHaveBeenCalledTimes(2);
+    expect(first?.internal_id).toBe('identity--one');
+    expect(second?.internal_id).toBe('identity--two');
   });
 });
