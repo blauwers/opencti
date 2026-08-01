@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, isTransitoryError, prepareElementForIndexing } from '../../../src/database/engine';
+import { buildLocalMustFilter, extractBulkOperationErrors, isTransitoryError, prepareElementForIndexing } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 
 describe('prepareElementForIndexing testing', () => {
@@ -111,6 +111,23 @@ describe('buildLocalMustFilter testing', () => {
         ],
       },
     });
+  });
+});
+
+describe('extractBulkOperationErrors testing', () => {
+  it('extracts errors from mixed bulk action kinds', () => {
+    const indexError = { type: 'index_error' };
+    const updateError = { type: 'update_error' };
+    const deleteError = { type: 'delete_error' };
+    const createError = { type: 'create_error' };
+
+    expect(extractBulkOperationErrors([
+      { index: { error: indexError } },
+      { update: { error: updateError } },
+      { delete: { error: deleteError } },
+      { create: { error: createError } },
+      { index: { status: 201 } },
+    ])).toEqual([indexError, updateError, deleteError, createError]);
   });
 });
 

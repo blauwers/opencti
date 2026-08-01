@@ -4266,10 +4266,16 @@ export const elAttributeValues = async (
 };
 // endregion
 
+export const extractBulkOperationErrors = (items: any[] = []) => {
+  return items.flatMap((item) => Object.values(item ?? {})
+    .map((operation: any) => operation?.error)
+    .filter((error) => error !== undefined));
+};
+
 export const elBulk = async (context: AuthContext, args: any) => {
   return elRawBulk(context, args).then((data) => {
     if (data.errors) {
-      const errors = data.items.map((i: any) => i.index?.error || i.update?.error).filter((f: any) => f !== undefined);
+      const errors = extractBulkOperationErrors(data.items);
       if (errors.filter((err: any) => err.type !== DOCUMENT_MISSING_EXCEPTION).length > 0) {
         throw DatabaseError('Bulk indexing fail', { errors });
       }
