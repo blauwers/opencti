@@ -24,7 +24,7 @@ import { addFilter } from '../../utils/filtering/filtering-utils';
 import { ENTITY_TYPE_CAMPAIGN, ENTITY_TYPE_INTRUSION_SET, ENTITY_TYPE_MALWARE } from '../../schema/stixDomainObject';
 import { ENTITY_TYPE_THREAT_ACTOR } from '../../schema/general';
 import { RELATION_FROM_TYPES_FILTER } from '../../utils/filtering/filtering-constants';
-import { elUpdate } from '../../database/engine';
+import { elUpdateWithBufferedApply } from '../../database/engine';
 import { getPirWithAccessCheck } from './pir-checkPirAccess';
 
 /**
@@ -129,7 +129,11 @@ export const updatePirInformationOnEntity = async (context: AuthContext, user: A
       } else ctx._source['pir_information'] = params.new_pir_information;
     `;
   // call elUpdate directly to avoid generating stream events and modifying the updated_at of the entity
-  return elUpdate(context, stixDomainObject._index, entityId, { script: { source, lang: 'painless', params } });
+  return elUpdateWithBufferedApply(context, stixDomainObject._index, entityId, { script: { source, lang: 'painless', params } }, (existing) => {
+    const currentInformation = Array.isArray(existing.pir_information) ? existing.pir_information : [];
+    const otherInformation = currentInformation.filter((information) => !params.pir_ids.includes(information.pir_id));
+    return { ...existing, pir_information: [...otherInformation, ...params.new_pir_information] };
+  });
 };
 
 /**

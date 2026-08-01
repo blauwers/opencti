@@ -9,6 +9,7 @@ import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/b
 import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS } from '../../../src/database/utils';
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
+import { updatePirInformationOnEntity } from '../../../src/modules/pir/pir-utils';
 import { FilterMode, FilterOperator } from '../../../src/generated/graphql';
 import { buildRefRelationKey } from '../../../src/schema/general';
 import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
@@ -487,5 +488,36 @@ describe('batch engine writes', () => {
     await elReplace(testContext, revertDraftMalware._index, revertDraftMalware._id ?? revertDraftMalware.internal_id, {
       doc: { draft_ids: [] },
     });
+  });
+
+  it('keeps PIR information script updates inside the batch boundary until commit', async () => {
+    const pirMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch PIR update ${uuidv4()}` });
+    cleanupMalwares.push(pirMalware);
+    const pirId = `pir--${uuidv4()}`;
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await updatePirInformationOnEntity(testContext, ADMIN_USER, pirMalware.internal_id, pirId, 78);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await internalLoadById(testContext, ADMIN_USER, pirMalware.internal_id) as any;
+          expect(buffered?.pir_information).toEqual(expect.arrayContaining([
+            expect.objectContaining({ pir_id: pirId, pir_score: 78 }),
+          ]));
+          throw new Error('abort PIR update batch');
+        },
+      },
+    ])).rejects.toThrow('abort PIR update batch');
+
+    const committed = await internalLoadById(testContext, ADMIN_USER, pirMalware.internal_id) as any;
+    expect(committed?.pir_information ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ pir_id: pirId }),
+    ]));
   });
 });
