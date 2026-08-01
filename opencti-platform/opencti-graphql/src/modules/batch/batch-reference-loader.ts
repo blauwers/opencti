@@ -12,6 +12,15 @@ export type InputResolveRefsBatchLoader = {
   load: (id: string) => Promise<BasicStoreObject[]>;
 };
 
+type ExistingEntityIdsLookup = {
+  ids: string[];
+  type: string;
+};
+
+export type ExistingEntityIdsBatchLoader = {
+  load: (lookup: ExistingEntityIdsLookup) => Promise<BasicStoreObject[]>;
+};
+
 export const createInputResolveRefsBatchLoader = (
   context: AuthContext,
   user: AuthUser,
@@ -50,5 +59,46 @@ export const createInputResolveRefsBatchLoader = (
   });
   return {
     load: (id: string) => dataLoader.load(id),
+  };
+};
+
+export const createExistingEntityIdsBatchLoader = (
+  context: AuthContext,
+  user: AuthUser,
+): ExistingEntityIdsBatchLoader => {
+  const loadFn = async (lookups: ReadonlyArray<ExistingEntityIdsLookup>): Promise<BasicStoreObject[][]> => {
+    const idsByType = new Map<string, Set<string>>();
+    for (let index = 0; index < lookups.length; index += 1) {
+      const lookup = lookups[index];
+      const typeIds = idsByType.get(lookup.type) ?? new Set<string>();
+      lookup.ids.filter((id) => isNotEmptyField(id)).forEach((id) => typeIds.add(id));
+      idsByType.set(lookup.type, typeIds);
+    }
+
+    const resolvedByType = new Map<string, BasicStoreObject[]>();
+    await Promise.all(Array.from(idsByType.entries()).map(async ([type, ids]) => {
+      const resolvedElements = ids.size === 0
+        ? []
+        : await internalFindByIds<BasicStoreObject>(context, user, Array.from(ids), { type }) as BasicStoreObject[];
+      resolvedByType.set(type, resolvedElements);
+    }));
+
+    return lookups.map((lookup) => {
+      const expectedIds = new Set(lookup.ids.filter((id) => isNotEmptyField(id)));
+      if (expectedIds.size === 0) {
+        return [];
+      }
+      return (resolvedByType.get(lookup.type) ?? []).filter((element) => {
+        return getInstanceIds(element).some((id) => expectedIds.has(id));
+      });
+    });
+  };
+
+  const dataLoader = new DataLoader<ExistingEntityIdsLookup, BasicStoreObject[]>(loadFn, {
+    maxBatchSize: MAX_BATCH_SIZE,
+    cache: false,
+  });
+  return {
+    load: (lookup: ExistingEntityIdsLookup) => dataLoader.load(lookup),
   };
 };

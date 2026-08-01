@@ -3677,7 +3677,7 @@ export const getExistingEntities = async (
   type: string,
 ) => {
   const participantIds = getInputIds(type, input);
-  const existingByIdsPromise = internalFindByIds(context, SYSTEM_USER, participantIds, { type }) as Promise<BasicStoreBase[]>;
+  const existingByIdsPromise = findExistingEntitiesByIds(context, participantIds, type) as Promise<BasicStoreBase[]>;
   let existingByHashedPromise;
   if (isStixCyberObservableHashedObservable(type)) {
     existingByHashedPromise = listEntitiesByHashes(context, user, type, input.hashes);
@@ -3686,6 +3686,17 @@ export const getExistingEntities = async (
   const existingEntities: any[] = [];
   pushAll(existingEntities, R.uniqBy((e) => e.internal_id, [...existingByIds, ...(existingByHashed ?? [])]));
   return existingEntities;
+};
+const findExistingEntitiesByIds = (
+  context: AuthContext,
+  ids: string[],
+  type: string,
+) => {
+  const batchLoader = isBatchWriteBoundaryOpen() ? context.batch?.existingEntityIdsBatchLoader : undefined;
+  if (batchLoader) {
+    return batchLoader.load({ ids, type });
+  }
+  return internalFindByIds(context, SYSTEM_USER, ids, { type });
 };
 type CreateEntityRawOpts = PatchAttributeOpts & CreateEventOpts & {
   fromRule?: string;
@@ -3765,7 +3776,7 @@ const internalCreateEntityRaw = async (
     // Check if the entity exists, must be done with SYSTEM USER to really find it.
     const existingEntities: BasicStoreObject[] = [];
     const finderIds = [...participantIds, ...(context.previousStandard ? [context.previousStandard] : [])];
-    const existingByIdsPromise = internalFindByIds(context, SYSTEM_USER, finderIds, { type }) as Promise<BasicStoreObject[]>;
+    const existingByIdsPromise = findExistingEntitiesByIds(context, finderIds, type) as Promise<BasicStoreObject[]>;
     // Hash are per definition keys.
     // When creating a hash, we can check all hashes to update or merge the result
     // Generating multiple standard ids could be a solution but to complex to implements

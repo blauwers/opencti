@@ -4,7 +4,7 @@ import { authenticateUserFromRequest, userWithOrigin, batchCreator, batchCreator
 import { isNotEmptyField } from '../database/utils';
 import { logApp } from '../config/conf';
 import { batchLoader } from '../database/middleware';
-import { createInputResolveRefsBatchLoader } from '../modules/batch/batch-reference-loader';
+import { createExistingEntityIdsBatchLoader, createInputResolveRefsBatchLoader } from '../modules/batch/batch-reference-loader';
 import { batchInternalRels, batchMarkingDefinitions } from '../domain/stixCoreObject';
 import { elBatchIds, elBatchIdsWithRelCount } from '../database/engine';
 import { batchStixDomainObjects } from '../domain/stixDomainObject';
@@ -24,6 +24,7 @@ export const computeLoaders = (executeContext, user) => {
     creatorBatchLoader: batchLoader(batchCreator, executeContext, user),
     idsBatchLoader: batchLoader(elBatchIds, executeContext, user),
     idsBatchLoaderWithCount: batchLoader(elBatchIdsWithRelCount, executeContext, user),
+    existingEntityIdsBatchLoader: createExistingEntityIdsBatchLoader(executeContext, SYSTEM_USER),
     inputResolveRefsBatchLoader: createInputResolveRefsBatchLoader(executeContext, user),
     markingsBatchLoader: batchLoader(batchMarkingDefinitions, executeContext, user),
     // Specific loaders
