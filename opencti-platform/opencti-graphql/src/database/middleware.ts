@@ -58,6 +58,7 @@ import {
   elHistogramCount,
   elIndexElements,
   elList,
+  elListBufferedElements,
   elMarkElementsAsDraftDelete,
   elPaginate,
   elUpdateElement,
@@ -1472,13 +1473,27 @@ const listEntitiesByHashes = async (
   if (searchHashes.length === 0) {
     return [];
   }
-  return topEntitiesList(context, user, [type], {
+  const committedEntities = await topEntitiesList(context, user, [type], {
     filters: {
       mode: FilterMode.And,
       filters: [{ key: ['hashes.*'], values: searchHashes, operator: FilterOperator.Wildcard }],
       filterGroups: [],
     },
     noFiltersChecking: true,
+  });
+  if (!isBatchWriteBoundaryOpen()) {
+    return committedEntities;
+  }
+  const bufferedEntities = await elListBufferedElements<BasicStoreEntity>(context, user, undefined, type);
+  const candidateIds = R.uniq([...committedEntities, ...bufferedEntities].map((entity) => entity.internal_id));
+  if (candidateIds.length === 0) {
+    return [];
+  }
+  const visibleEntities = await internalFindByIds<BasicStoreEntity>(context, user, candidateIds, { type }) as BasicStoreEntity[];
+  const searchHashSet = new Set(searchHashes);
+  return visibleEntities.filter((entity) => {
+    const entityHashes = extractNotFuzzyHashValues(entity.hashes ?? {});
+    return entityHashes.some((hash) => searchHashSet.has(hash));
   });
 };
 export const hashMergeValidation = (instances: { hashes?: { [k: string]: string } }[]) => {
