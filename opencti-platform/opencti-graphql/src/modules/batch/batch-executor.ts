@@ -15,6 +15,7 @@ export enum BatchSideEffectKind {
   FileLifecycle = 'FILE_LIFECYCLE',
   WorkLifecycle = 'WORK_LIFECYCLE',
   ConnectorDispatch = 'CONNECTOR_DISPATCH',
+  StreamPublication = 'STREAM_PUBLICATION',
 }
 
 export interface BatchSideEffect {

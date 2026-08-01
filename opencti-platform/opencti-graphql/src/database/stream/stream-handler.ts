@@ -23,6 +23,7 @@ import { getDraftContext } from '../../utils/draftContext';
 import { rawRedisStreamClient } from '../redis-stream';
 import { telemetry } from '../../config/tracing';
 import { logApp } from '../../config/conf';
+import { BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../../modules/batch/batch-executor';
 
 const streamClient: RawStreamClient = rawRedisStreamClient;
 export const initializeStreamStack = async () => {
@@ -31,21 +32,32 @@ export const initializeStreamStack = async () => {
   }
 };
 
+const pushToStreamNow = async <T extends BaseEvent> (context: AuthContext, user: AuthUser, event: T) => {
+  if (STREAM_FULL_DEBUG_ACTIVATED) {
+    logApp.info('Pushing event to stream', { event });
+  }
+  const pushToStreamFn = async () => {
+    await streamClient.rawPushToStream(event);
+  };
+  await telemetry(context, user, 'INSERT STREAM', {
+    [ATTR_DB_NAMESPACE]: 'stream_engine',
+    // Deprecated attribute to be removed when transition done
+    [SEMATTRS_DB_NAME]: 'stream_engine',
+  }, pushToStreamFn);
+};
+
 const pushToStream = async <T extends BaseEvent> (context: AuthContext, user: AuthUser, event: T, opts: EventOpts = {}) => {
   const draftContext = getDraftContext(context, user);
   const eventToPush = { ...event, event_id: context.eventId };
   if (!draftContext && isStreamPublishable(opts)) {
-    if (STREAM_FULL_DEBUG_ACTIVATED) {
-      logApp.info('Pushing event to stream', { event: eventToPush });
+    if (isBatchWriteBoundaryOpen()) {
+      await registerBatchSideEffect({
+        kind: BatchSideEffectKind.StreamPublication,
+        execute: () => pushToStreamNow(context, user, eventToPush),
+      });
+      return;
     }
-    const pushToStreamFn = async () => {
-      await streamClient.rawPushToStream(eventToPush);
-    };
-    await telemetry(context, user, 'INSERT STREAM', {
-      [ATTR_DB_NAMESPACE]: 'stream_engine',
-      // Deprecated attribute to be removed when transition done
-      [SEMATTRS_DB_NAME]: 'stream_engine',
-    }, pushToStreamFn);
+    await pushToStreamNow(context, user, eventToPush);
   }
 };
 
