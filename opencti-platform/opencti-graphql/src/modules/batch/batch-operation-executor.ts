@@ -17,6 +17,7 @@ type PreparedBatchGraphqlOperation = {
 };
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
+const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 
 export const buildBatchGraphqlResultToken = (operationIndex: number, path: string[]): string => {
   return `${BATCH_RESULT_TOKEN_PREFIX}:${operationIndex}:${path.join('.')}`;
@@ -104,6 +105,42 @@ const hydrateOperationFiles = (
   }
   files.forEach((file) => setValueAtPath(variables, file.path, buildUploadValue(file), operationIndex));
   return variables;
+};
+
+const validateOperationFiles = (
+  variables: Record<string, unknown>,
+  files: BatchGraphqlFileInput[] | null | undefined,
+  operationIndex: number,
+): void => {
+  if (!files || files.length === 0) {
+    return;
+  }
+  const candidateVariables = structuredClone(variables);
+  files.forEach((file) => setValueAtPath(candidateVariables, file.path, null, operationIndex));
+};
+
+const validateOperationResultTokens = (value: unknown, operationIndex: number): void => {
+  if (typeof value === 'string' && value.startsWith(BATCH_RESULT_TOKEN_PREFIX)) {
+    const match = value.match(BATCH_RESULT_TOKEN_PATTERN);
+    if (!match) {
+      throw FunctionalError('Invalid batch GraphQL result token', { operation_index: operationIndex, token: value });
+    }
+    const dependencyIndex = Number(match[1]);
+    if (dependencyIndex >= operationIndex) {
+      throw FunctionalError('Batch GraphQL result token must reference a prior operation', {
+        operation_index: operationIndex,
+        dependency_operation_index: dependencyIndex,
+      });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => validateOperationResultTokens(item, operationIndex));
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    Object.values(value).forEach((item) => validateOperationResultTokens(item, operationIndex));
+  }
 };
 
 const parseVariables = (variables: string | null | undefined, operationIndex: number): Record<string, unknown> => {
@@ -195,12 +232,17 @@ const prepareBatchGraphqlOperations = (
   schema: GraphQLSchema,
   operations: BatchGraphqlOperationInput[],
 ): PreparedBatchGraphqlOperation[] => {
-  return operations.map((operation, operationIndex) => ({
-    ...validateOperationDocument(schema, operation, operationIndex),
-    files: operation.files,
-    operationIndex,
-    operationName: operation.operationName,
-  }));
+  return operations.map((operation, operationIndex) => {
+    const prepared = validateOperationDocument(schema, operation, operationIndex);
+    validateOperationFiles(prepared.variables, operation.files, operationIndex);
+    validateOperationResultTokens(prepared.variables, operationIndex);
+    return {
+      ...prepared,
+      files: operation.files,
+      operationIndex,
+      operationName: operation.operationName,
+    };
+  });
 };
 
 export const executeBatchGraphqlOperations = async (

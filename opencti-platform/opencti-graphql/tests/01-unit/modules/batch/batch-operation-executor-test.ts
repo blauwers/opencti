@@ -154,6 +154,35 @@ describe('batch GraphQL operation executor', () => {
     expect(calls).toEqual([]);
   });
 
+  it('rejects invalid upload paths and forward result tokens before starting resolver writes', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    await expect(executeBatchGraphqlOperations(schema, {} as any, [
+      { query: 'mutation Record { record(value: "first") }' },
+      {
+        query: 'mutation Upload($file: Upload!) { upload(file: $file) }',
+        variables: JSON.stringify({ file: null }),
+        files: [{
+          path: 'missing',
+          name: 'sample.txt',
+          mimeType: 'text/plain',
+          data: Buffer.from('payload').toString('base64'),
+        }],
+      },
+    ])).rejects.toThrow('Invalid batch GraphQL file path');
+
+    await expect(executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Echo($value: String!) { echo(value: $value) }',
+        variables: JSON.stringify({ value: buildBatchGraphqlResultToken(1, ['record']) }),
+      },
+      { query: 'mutation Record { record(value: "later") }' },
+    ])).rejects.toThrow('Batch GraphQL result token must reference a prior operation');
+
+    expect(calls).toEqual([]);
+  });
+
   it('substitutes prior result tokens and hydrates file inputs before execution', async () => {
     const calls: string[] = [];
     const schema = buildSchema(calls);
