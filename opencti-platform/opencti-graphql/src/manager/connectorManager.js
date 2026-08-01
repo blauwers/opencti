@@ -4,7 +4,7 @@ import { lockResources } from '../lock/master-lock';
 import conf, { booleanConf, logApp } from '../config/conf';
 import { TYPE_LOCK_ERROR } from '../config/errors';
 import { connectors } from '../database/repository';
-import { elList, elUpdate } from '../database/engine';
+import { elList, elUpdateWithBufferedApply } from '../database/engine';
 import { executionContext, SYSTEM_USER } from '../utils/access';
 import { READ_INDEX_HISTORY } from '../database/utils';
 import { now } from '../utils/format';
@@ -45,13 +45,18 @@ const closeOldWorks = async (context, connector) => {
             const sourceScript = `ctx._source['status'] = "complete";
                 ctx._source['completed_time'] = params.completed_time;
                 ctx._source['completed_number'] = params.completed_number;`;
-            await elUpdate(context, element._index, element.internal_id, {
+            await elUpdateWithBufferedApply(context, element._index, element.internal_id, {
               script: {
                 source: sourceScript,
                 lang: 'painless',
                 params,
               },
-            });
+            }, (existing) => ({
+              ...existing,
+              status: 'complete',
+              completed_time: params.completed_time,
+              completed_number: params.completed_number,
+            }));
             logApp.info('Work completed by force due to age', { workId: element.internal_id });
           }
         } catch (e) {

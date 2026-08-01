@@ -9,7 +9,7 @@ import { fileToReadStream, uploadToStorage } from '../../../src/database/file-st
 import { getFileContent } from '../../../src/database/raw-file-storage';
 import { findById as findDocumentById, IMPORT_STORAGE_PATH } from '../../../src/modules/internal/document/document-domain';
 import { addMalware } from '../../../src/domain/malware';
-import { createWork, loadWorkById } from '../../../src/domain/work';
+import { addDraftContext, createWork, loadWorkById, pingWork, updateReceivedTime } from '../../../src/domain/work';
 import { addStixCyberObservable, stixCyberObservableDelete } from '../../../src/domain/stixCyberObservable';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, BatchSideEffectKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
@@ -334,6 +334,64 @@ describe('batch engine writes', () => {
     expect(execution.sideEffectKinds).toContain(BatchSideEffectKind.WorkLifecycle);
     const committedRedisWork = await redisGetWork(committedWork.id);
     expect(committedRedisWork?.is_initialized).toBe('true');
+  });
+
+  it('keeps work script updates inside an aborted batch', async () => {
+    const work = await createWork(testContext, ADMIN_USER, buildWorkConnector(), `Batch script abort ${uuidv4()}`, 'batch-source') as any;
+    cleanupWorkIds.push(work.id);
+    const draftContext = `draft--${uuidv4()}`;
+    const message = `batch script message ${uuidv4()}`;
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await pingWork(testContext, ADMIN_USER, work.id);
+          await addDraftContext(testContext, ADMIN_USER, work.id, draftContext);
+          await updateReceivedTime(testContext, ADMIN_USER, work.id, message);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await loadWorkById(testContext, ADMIN_USER, work.id) as any;
+          expect(buffered.status).toBe('progress');
+          expect(buffered.draft_context).toBe(draftContext);
+          expect(buffered.messages).toContainEqual(expect.objectContaining({ message }));
+          throw new Error('abort work script batch');
+        },
+      },
+    ])).rejects.toThrow('abort work script batch');
+
+    const committed = await loadWorkById(testContext, ADMIN_USER, work.id) as any;
+    expect(committed.status).toBe('wait');
+    expect(committed.draft_context).toBeUndefined();
+    expect(committed.messages).toEqual([]);
+  });
+
+  it('materializes work script updates after batch commit', async () => {
+    const work = await createWork(testContext, ADMIN_USER, buildWorkConnector(), `Batch script commit ${uuidv4()}`, 'batch-source') as any;
+    cleanupWorkIds.push(work.id);
+    const draftContext = `draft--${uuidv4()}`;
+    const message = `batch committed script message ${uuidv4()}`;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await pingWork(testContext, ADMIN_USER, work.id);
+          await addDraftContext(testContext, ADMIN_USER, work.id, draftContext);
+          await updateReceivedTime(testContext, ADMIN_USER, work.id, message);
+          return null;
+        },
+      },
+    ]);
+
+    const committed = await loadWorkById(testContext, ADMIN_USER, work.id) as any;
+    expect(committed.status).toBe('progress');
+    expect(committed.draft_context).toBe(draftContext);
+    expect(committed.messages).toContainEqual(expect.objectContaining({ message }));
   });
 
   it('buffers connection rewrites and exposes them to later mutations in the same batch', async () => {

@@ -3,7 +3,7 @@ import * as R from 'ramda';
 import { logApp } from '../config/conf';
 import { AlreadyDeletedError, DatabaseError } from '../config/errors';
 import { IMPORT_CSV_CONNECTOR, IMPORT_CSV_CONNECTOR_ID } from '../connector/importCsv/importCsv';
-import { elDeleteInstances, elIndex, elLoadById, elPaginate, elRawDeleteByQuery, elUpdate, ES_MINIMUM_FIXED_PAGINATION } from '../database/engine';
+import { elDeleteInstances, elIndex, elLoadById, elPaginate, elRawDeleteByQuery, elUpdateWithBufferedApply, ES_MINIMUM_FIXED_PAGINATION } from '../database/engine';
 import { internalLoadById } from '../database/middleware-loader';
 import {
   redisAcquireWorkCompletionFlag,
@@ -154,7 +154,10 @@ export const pingWork = async (context, user, workId) => {
   const currentWork = await loadWorkById(context, user, workId);
   const params = { updated_at: now() };
   const source = 'ctx._source["updated_at"] = params.updated_at;';
-  await elUpdate(context, currentWork._index, workId, { script: { source, lang: 'painless', params } });
+  await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => ({
+    ...existing,
+    updated_at: params.updated_at,
+  }));
   return workId;
 };
 
@@ -280,7 +283,10 @@ const updateWorkTaskToComplete = async (context, user, work) => {
   const associatedTask = await internalLoadById(context, user, associatedTaskId, { type: ENTITY_TYPE_BACKGROUND_TASK });
   if (associatedTask) {
     const sourceScriptUpdateWork = 'ctx._source["work_completed"] = "true"';
-    await elUpdate(context, associatedTask._index, associatedTaskId, { script: { source: sourceScriptUpdateWork, lang: 'painless' } });
+    await elUpdateWithBufferedApply(context, associatedTask._index, associatedTaskId, { script: { source: sourceScriptUpdateWork, lang: 'painless' } }, (existing) => ({
+      ...existing,
+      work_completed: 'true',
+    }));
     // If this task was spawned by a workflow async action, report the result back to the workflow
     if (associatedTask.workflow_action_id && associatedTask.workflow_instance_id) {
       const workflowStatus = work.errors?.length > 0 ? 'failed' : 'success';
@@ -331,6 +337,11 @@ const countIngestionObjectsProcessed = (work, objectsCount) => {
     .catch((reason) => logApp.warn('Error acquiring work completion flag for telemetry', { reason }));
 };
 
+const appendWorkEntry = (existing, key, entry) => {
+  const entries = Array.isArray(existing[key]) ? existing[key] : [];
+  return { ...existing, [key]: [...entries, entry] };
+};
+
 export const reportExpectation = async (context, user, workId, errorData) => {
   const timestamp = now();
   await redisUpdateWorkFigures(workId);
@@ -373,7 +384,25 @@ export const reportExpectation = async (context, user, workId, errorData) => {
         // import-side pipelines only, first completion only).
         countIngestionObjectsProcessed(currentWork, total);
       }
-      await elUpdate(context, currentWork._index, workId, { script: { source: sourceScript, lang: 'painless', params } });
+      await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source: sourceScript, lang: 'painless', params } }, (existing) => {
+        let updated = { ...existing };
+        if (isComplete) {
+          updated = {
+            ...updated,
+            status: 'complete',
+            completed_number: params.completed_number,
+            completed_time: params.now,
+          };
+        }
+        if (errorData && (updated.errors?.length ?? 0) < 100) {
+          updated = appendWorkEntry(updated, 'errors', {
+            timestamp: params.now,
+            message: params.error,
+            source: params.source,
+          });
+        }
+        return updated;
+      });
       // If work is associated to a task, we also need to update work to completed on the task
       if (isComplete) {
         await updateWorkTaskToComplete(context, user, currentWork);
@@ -420,7 +449,11 @@ export const updateExpectationsNumber = async (context, user, workId, expectatio
   const params = { updated_at: now(), import_expected_number: expectations };
   let source = 'ctx._source.updated_at = params.updated_at;';
   source += 'ctx._source["import_expected_number"] = ctx._source["import_expected_number"] + params.import_expected_number;';
-  await elUpdate(context, currentWork._index, workId, { script: { source, lang: 'painless', params } });
+  await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => ({
+    ...existing,
+    updated_at: params.updated_at,
+    import_expected_number: (existing.import_expected_number ?? 0) + params.import_expected_number,
+  }));
   return workId;
 };
 
@@ -441,7 +474,11 @@ export const addDraftContext = async (context, user, workId, draftContext) => {
   const params = { updated_at: now(), draft_context: draftContext };
   let source = 'ctx._source.updated_at = params.updated_at;';
   source += 'ctx._source["draft_context"] =  params.draft_context;';
-  await elUpdate(context, currentWork._index, workId, { script: { source, lang: 'painless', params } });
+  await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => ({
+    ...existing,
+    updated_at: params.updated_at,
+    draft_context: params.draft_context,
+  }));
   return workId;
 };
 
@@ -458,7 +495,16 @@ export const updateReceivedTime = async (context, user, workId, message) => {
     source += 'ctx._source.messages.add(["timestamp": params.received_time, "message": params.message]); ';
   }
   // Update elastic
-  await elUpdate(context, currentWork._index, workId, { script: { source, lang: 'painless', params } });
+  await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+    const updated = {
+      ...existing,
+      status: 'progress',
+      received_time: params.received_time,
+    };
+    return isNotEmptyField(message)
+      ? appendWorkEntry(updated, 'messages', { timestamp: params.received_time, message: params.message })
+      : updated;
+  });
   return workId;
 };
 
@@ -494,6 +540,25 @@ export const updateProcessedTime = async (context, user, workId, message, inErro
     }
   }
   // Update elastic
-  await elUpdate(context, currentWork._index, workId, { script: { source, lang: 'painless', params } });
+  await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+    let updated = {
+      ...existing,
+      processed_time: params.processed_time,
+    };
+    if (isComplete) {
+      updated = {
+        ...updated,
+        status: 'complete',
+        import_expected_number: params.completed_number,
+        completed_number: params.completed_number,
+        completed_time: params.processed_time,
+      };
+    }
+    if (isNotEmptyField(message)) {
+      const key = inError ? 'errors' : 'messages';
+      updated = appendWorkEntry(updated, key, { timestamp: params.processed_time, message: params.message });
+    }
+    return updated;
+  });
   return workId;
 };
