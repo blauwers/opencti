@@ -194,7 +194,7 @@ import { schemaRelationsRefDefinition } from '../schema/schema-relationsRef';
 import type { FiltersWithNested } from './middleware-loader';
 import { pushAll, unshiftAll } from '../utils/arrayUtil';
 import { getRoleAssumerWithWebIdentity } from '../utils/awsSdk';
-import { elConvertHits, elConvertHitsToMap, INNER_HITS_WINDOWS_SIZE } from './engine-data-converter';
+import { elConvertHits, elConvertHitsToMap, INNER_HITS_WINDOWS_SIZE, rebuildResolvedRelationFields } from './engine-data-converter';
 import { isEsScriptFilterEnabled } from './engine-config';
 import { AbortError } from 'node-fetch';
 import {
@@ -2024,6 +2024,21 @@ const applyBufferedUpdate = <T extends Record<string, any>>(existing: T | undefi
   return updated as T;
 };
 
+const applyBufferedVisibleUpdate = <T extends Record<string, any>>(
+  existing: T | undefined,
+  patch: Record<string, any>,
+): T => {
+  const updated = applyBufferedUpdate(existing, patch);
+  return rebuildResolvedRelationFields(updated, existing);
+};
+
+const applyBufferedVisibleOperation = <T extends Record<string, any>>(
+  existing: T,
+  apply: (current: Record<string, any>) => Record<string, any>,
+): T => {
+  return rebuildResolvedRelationFields(apply(existing) as T, existing);
+};
+
 const getBufferedWriteElements = (
   write: Exclude<BufferedEngineWrite, BufferedBulkUpdateWrite>,
 ): BasicStoreBase[] => {
@@ -2048,7 +2063,7 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
       write.operations.forEach((operation) => {
         const existing = mergedHits.get(operation.internalId);
         if (existing && matchesBufferedEngineElement(existing, ids, types, indices) && matchesBufferedEngineIndex(existing._index, operation.index)) {
-          mergedHits.set(operation.internalId, operation.apply(existing) as T);
+          mergedHits.set(operation.internalId, applyBufferedVisibleOperation(existing, operation.apply));
         }
       });
       return;
@@ -2070,7 +2085,7 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
         return;
       }
       if (write.kind === 'update') {
-        mergedHits.set(element.internal_id, applyBufferedUpdate(existing, element));
+        mergedHits.set(element.internal_id, applyBufferedVisibleUpdate(existing, element));
         return;
       }
       mergedHits.set(element.internal_id, element as T);
@@ -2261,7 +2276,7 @@ export const elFindBufferedElementsByIds = async <T extends BasicStoreBase>(
       write.operations.forEach((operation) => {
         const existing = bufferedHits.get(operation.internalId);
         if (existing && matchesBufferedEngineElement(existing, processIds, types, computedIndices) && matchesBufferedEngineIndex(existing._index, operation.index)) {
-          bufferedHits.set(operation.internalId, operation.apply(existing) as T);
+          bufferedHits.set(operation.internalId, applyBufferedVisibleOperation(existing, operation.apply));
         }
       });
       return;
@@ -2283,7 +2298,7 @@ export const elFindBufferedElementsByIds = async <T extends BasicStoreBase>(
         return;
       }
       if (write.kind === 'update') {
-        bufferedHits.set(element.internal_id, applyBufferedUpdate(existing, element) as T);
+        bufferedHits.set(element.internal_id, applyBufferedVisibleUpdate(existing, element) as T);
         return;
       }
       bufferedHits.set(element.internal_id, element as T);

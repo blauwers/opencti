@@ -48,6 +48,46 @@ export const elRebuildRelation = (concept: { internal_id: string; base_type: str
   return concept;
 };
 
+const getRelationTypeFromIndexKey = (key: string) => {
+  const rel = key.substring(REL_INDEX_PREFIX.length);
+  const [relType] = rel.split('.');
+  return relType;
+};
+
+const applyResolvedRelationField = (data: Record<string, any>, key: string, value: any) => {
+  const relType = getRelationTypeFromIndexKey(key);
+  const relValues = Array.isArray(value) ? value : [];
+  if (isSingleRelationsRef(data.entity_type, relType)) {
+    data[relType] = R.head(relValues);
+  } else {
+    const relData = [...(data[relType] ?? []), ...relValues];
+    data[relType] = isStixRefUnidirectionalRelationship(relType) ? R.uniq(relData) : relData;
+  }
+};
+
+export const rebuildResolvedRelationFields = <T extends Record<string, any>>(
+  data: T,
+  previous?: Record<string, any>,
+): T => {
+  const rebuilt = { ...data } as Record<string, any>;
+  const relationTypes = new Set<string>();
+  [previous, rebuilt].forEach((element) => {
+    if (!element) {
+      return;
+    }
+    Object.keys(element)
+      .filter((key) => key.startsWith(REL_INDEX_PREFIX))
+      .forEach((key) => relationTypes.add(getRelationTypeFromIndexKey(key)));
+  });
+  relationTypes.forEach((relType) => {
+    delete rebuilt[relType];
+  });
+  Object.entries(rebuilt)
+    .filter(([key]) => key.startsWith(REL_INDEX_PREFIX))
+    .forEach(([key, value]) => applyResolvedRelationField(rebuilt, key, value));
+  return rebuilt as T;
+};
+
 const processInnerHits = (data: Record<string, any>, innerHits: any, internalId: string) => {
   Object.keys(innerHits).forEach((innerHitKey) => {
     const nestedHits = innerHits[innerHitKey];
@@ -101,14 +141,7 @@ const elDataConverter = <T>(esHit: any): T => {
       data[key] = val;
     } else if (key.startsWith(REL_INDEX_PREFIX)) {
       // Rebuild rel to stix attributes
-      const rel = key.substring(REL_INDEX_PREFIX.length);
-      const [relType] = rel.split('.');
-      if (isSingleRelationsRef(data.entity_type, relType)) {
-        data[relType] = R.head(val);
-      } else {
-        const relData = [...(data[relType] ?? []), ...val];
-        data[relType] = isStixRefUnidirectionalRelationship(relType) ? R.uniq(relData) : relData;
-      }
+      applyResolvedRelationField(data, key, val);
     } else {
       data[key] = val;
     }

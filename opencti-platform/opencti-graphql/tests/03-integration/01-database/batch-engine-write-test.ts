@@ -497,6 +497,8 @@ describe('batch engine writes', () => {
           expect(bufferedRelation.toName).toBe(replacementTarget.name);
           expect(bufferedSource[relationKey]).toContain(replacementTarget.internal_id);
           expect(bufferedSource[relationKey]).not.toContain(originalTarget.internal_id);
+          expect(bufferedSource[RELATION_RELATED_TO]).toContain(replacementTarget.internal_id);
+          expect(bufferedSource[RELATION_RELATED_TO]).not.toContain(originalTarget.internal_id);
           return null;
         },
       },
@@ -508,6 +510,8 @@ describe('batch engine writes', () => {
     expect(committedRelation.toName).toBe(replacementTarget.name);
     expect(committedSource[relationKey]).toContain(replacementTarget.internal_id);
     expect(committedSource[relationKey]).not.toContain(originalTarget.internal_id);
+    expect(committedSource[RELATION_RELATED_TO]).toContain(replacementTarget.internal_id);
+    expect(committedSource[RELATION_RELATED_TO]).not.toContain(originalTarget.internal_id);
   });
 
   it('buffers relation cleanup updates before deleting linked elements', async () => {
@@ -534,6 +538,7 @@ describe('batch engine writes', () => {
         executeWrite: async () => {
           const bufferedSource = await internalLoadById(testContext, ADMIN_USER, source.internal_id) as any;
           expect(bufferedSource[relationKey]).not.toContain(target.internal_id);
+          expect(bufferedSource[RELATION_RELATED_TO]).not.toContain(target.internal_id);
           return null;
         },
       },
@@ -541,6 +546,7 @@ describe('batch engine writes', () => {
 
     const committedSource = await internalLoadById(testContext, ADMIN_USER, source.internal_id) as any;
     expect(committedSource[relationKey]).not.toContain(target.internal_id);
+    expect(committedSource[RELATION_RELATED_TO]).not.toContain(target.internal_id);
     await expect(internalLoadById(testContext, ADMIN_USER, target.internal_id)).resolves.toBeUndefined();
   });
 
