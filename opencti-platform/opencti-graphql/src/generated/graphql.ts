@@ -19663,6 +19663,7 @@ export type MutationStixBundlePushArgs = {
   cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
   connectorId: Scalars['String']['input'];
   split_bundles?: InputMaybe<Scalars['Boolean']['input']>;
+  wait_until?: InputMaybe<BatchWaitUntil>;
   work_id?: InputMaybe<Scalars['String']['input']>;
 };
 

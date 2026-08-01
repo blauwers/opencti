@@ -3541,6 +3541,10 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         :param split_bundles: Whether to explicitly use the historical child-bundle
             split path (default: False)
         :type split_bundles: bool, optional
+        :param wait_until: Batch consistency mode for direct queue delivery.
+            Supported values are "MATERIALIZED" and "COMMITTED"
+            (default: "MATERIALIZED")
+        :type wait_until: str, optional
 
         :return: List of processed bundle chunks
         :rtype: list
@@ -3571,6 +3575,10 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         )
         bundle_send_to_s3 = kwargs.get("send_to_s3", self.bundle_send_to_s3)
         split_bundles = kwargs.get("split_bundles", False) is True
+        wait_until_requested = "wait_until" in kwargs
+        batch_wait_until = kwargs.get("wait_until", "MATERIALIZED")
+        if batch_wait_until not in ["MATERIALIZED", "COMMITTED"]:
+            raise ValueError("wait_until must be MATERIALIZED or COMMITTED")
         # Keep this field on queue messages for mixed-version deployments: old
         # workers still use it, while current workers route only on split_bundles.
         no_split = not split_bundles
@@ -3780,6 +3788,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                         draft_id=draft_id,
                         no_split=no_split,
                         split_bundles=split_bundles,
+                        batch_wait_until=batch_wait_until,
                         cleanup_inconsistent_bundle=cleanup_inconsistent_bundle,
                     )
                 channel.close()
@@ -3791,6 +3800,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                     work_id=work_id,
                     split_bundles=split_bundles,
                     cleanup_inconsistent_bundle=cleanup_inconsistent_bundle,
+                    wait_until=batch_wait_until if wait_until_requested else None,
                 )
                 self.metric.inc("bundle_send")
             else:
@@ -3828,6 +3838,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         draft_id = kwargs.get("draft_id", None)
         split_bundles = kwargs.get("split_bundles", False) is True
         no_split = not split_bundles
+        batch_wait_until = kwargs.get("batch_wait_until", "MATERIALIZED")
         cleanup_inconsistent_bundle = kwargs.get("cleanup_inconsistent_bundle", False)
 
         if entities_types is None:
@@ -3853,6 +3864,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             "draft_id": draft_id,
             "no_split": no_split,
             "split_bundles": split_bundles,
+            "batch_wait_until": batch_wait_until,
             "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
         }
         if work_id is not None:

@@ -541,6 +541,16 @@ class OpenCTIApiClient:
         """
         self.request_headers["opencti-work-id"] = work_id
 
+    def set_batch_wait_until(self, wait_until):
+        """Set the batch consistency header for mutation execution.
+
+        :param wait_until: consistency mode requested by the admitted batch
+        :type wait_until: str
+        """
+        self.request_headers["opencti-batch-wait-until"] = (
+            "" if wait_until is None else str(wait_until)
+        )
+
     def set_synchronized_upsert_header(self, synchronized):
         """Set the synchronized upsert header.
 
@@ -1161,6 +1171,8 @@ class OpenCTIApiClient:
         :param cleanup_inconsistent_bundle: whether to clean missing references
             during import preparation
         :type cleanup_inconsistent_bundle: bool, optional
+        :param wait_until: batch consistency mode requested by the caller
+        :type wait_until: str, optional
         :return: returns the query response for the bundle push
         :rtype: dict
         """
@@ -1170,26 +1182,36 @@ class OpenCTIApiClient:
         bundle = kwargs.get("bundle", None)
         split_bundles = kwargs.get("split_bundles", False) is True
         cleanup_inconsistent_bundle = kwargs.get("cleanup_inconsistent_bundle", False)
+        wait_until = kwargs.get("wait_until", None)
+        if wait_until is not None and wait_until not in ["MATERIALIZED", "COMMITTED"]:
+            raise ValueError("wait_until must be MATERIALIZED or COMMITTED")
 
         if connector_id is not None and bundle is not None:
             self.app_logger.info(
                 "Pushing a bundle to queue through API", {connector_id}
             )
-            mutation = """
-                    mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean) {
-                        stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle)
-                    }
-                 """
-            return self.query(
-                mutation,
-                {
-                    "connectorId": connector_id,
-                    "bundle": bundle,
-                    "work_id": work_id,
-                    "split_bundles": split_bundles,
-                    "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
-                },
-            )
+            if wait_until is None:
+                mutation = """
+                        mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean) {
+                            stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle)
+                        }
+                     """
+            else:
+                mutation = """
+                        mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean, $wait_until: BatchWaitUntil) {
+                            stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle, wait_until: $wait_until)
+                        }
+                     """
+            variables = {
+                "connectorId": connector_id,
+                "bundle": bundle,
+                "work_id": work_id,
+                "split_bundles": split_bundles,
+                "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
+            }
+            if wait_until is not None:
+                variables["wait_until"] = wait_until
+            return self.query(mutation, variables)
         else:
             self.app_logger.error(
                 "[bundle push] Missing parameter: connector_id or bundle"

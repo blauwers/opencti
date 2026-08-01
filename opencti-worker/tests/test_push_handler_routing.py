@@ -128,10 +128,15 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
     handler = build_handler()
 
     result = handler.handle_message(
-        build_message(split_bundles=False, work_id="work--1")
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            batch_wait_until="COMMITTED",
+        )
     )
 
     assert result == "ack"
+    handler.api.set_batch_wait_until.assert_called_once_with("COMMITTED")
     handler.api.stix2.import_bundle_from_json.assert_called_once()
     assert (
         handler.api.stix2.import_bundle_from_json.call_args.kwargs[

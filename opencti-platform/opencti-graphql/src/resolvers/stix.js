@@ -68,7 +68,7 @@ const stixResolvers = {
       delete: ({ forceDelete }) => stixDelete(context, context.user, id, { forceDelete }),
       merge: ({ stixObjectsIds }) => stixObjectMerge(context, context.user, id, stixObjectsIds),
     }),
-    stixBundlePush: (_, { connectorId, bundle, work_id, split_bundles, cleanup_inconsistent_bundle }, context) => sendStixBundle(
+    stixBundlePush: (_, { connectorId, bundle, work_id, split_bundles, cleanup_inconsistent_bundle, wait_until }, context) => sendStixBundle(
       context,
       context.user,
       connectorId,
@@ -76,6 +76,7 @@ const stixResolvers = {
       work_id,
       split_bundles,
       cleanup_inconsistent_bundle,
+      wait_until,
     ),
   },
   StixObject: {

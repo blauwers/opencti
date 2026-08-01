@@ -183,6 +183,7 @@ import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
 import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
 import { BatchMutationKind, BatchSideEffectKind, executeSingleBatchMutation, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
 import {
@@ -2402,6 +2403,7 @@ type UpdateAttributeMetaResolvedOpts = {
   commitMessage?: string;
   bypassIndividualUpdate?: boolean;
   bypassValidation?: boolean;
+  waitUntil?: BatchWaitUntil;
 };
 export const updateAttributeMetaResolved = async <T extends StoreObject>(
   context: AuthContext,
@@ -2918,6 +2920,7 @@ export const updateAttribute = async <T extends StoreObject>(
   inputs: EditInput[],
   opts: { noEnrich?: boolean } & UpdateAttributeOpts = {},
 ) => {
+  const waitUntil = opts.waitUntil ?? context.batchWaitUntil;
   return executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
     executeWrite: async () => {
@@ -2935,7 +2938,7 @@ export const updateAttribute = async <T extends StoreObject>(
       kind: BatchSideEffectKind.AutoEnrichment,
       execute: () => triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase),
     }] : []),
-  });
+  }, { waitUntil });
 };
 type PatchAttributeOpts = UpdateAttributeOpts & {
   operations?: Record<string, undefined | 'add' | 'remove' | 'replace'>;
@@ -3322,6 +3325,7 @@ type CreateRelationRawOpts = UpdateEventOpts & {
   references?: string[];
   commitMessage?: string;
   restore?: boolean;
+  waitUntil?: BatchWaitUntil;
 };
 export const createRelationRaw = async (
   context: AuthContext,
@@ -3539,10 +3543,11 @@ export const createRelation = async (
   input: Record<string, any>,
   opts: CreateRelationRawOpts = {},
 ) => {
+  const waitUntil = opts.waitUntil ?? context.batchWaitUntil;
   const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.CreateRelation,
     executeWrite: () => createRelationRaw(context, user, input, opts),
-  });
+  }, { waitUntil });
   return data.element;
 };
 type RuleContent = {
@@ -3625,6 +3630,7 @@ type CreateEntityRawOpts = PatchAttributeOpts & CreateEventOpts & {
   fromRuleDeletion?: boolean;
   bypassValidation?: boolean;
   bypassMandatoryAttributes?: boolean;
+  waitUntil?: BatchWaitUntil;
 };
 const cleanEntityForIdsCollision = (
   input: Record<string, any>,
@@ -3995,6 +4001,7 @@ export const createEntity = async (
   opts: { complete?: boolean } & CreateEntityRawOpts = {},
 ) => {
   const isCompleteResult = opts.complete === true;
+  const waitUntil = opts.waitUntil ?? context.batchWaitUntil;
   // volumes of objects relationships must be controlled
   const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.CreateEntity,
@@ -4014,7 +4021,7 @@ export const createEntity = async (
       }
       return [];
     },
-  });
+  }, { waitUntil });
   return isCompleteResult ? data : data.element;
 };
 

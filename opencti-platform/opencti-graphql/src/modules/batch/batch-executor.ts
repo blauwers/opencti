@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { logApp } from '../../config/conf';
 import { BatchExecutionMode, BatchWaitUntil } from './batch-types';
 
 export enum BatchMutationKind {
@@ -25,14 +26,20 @@ export interface BatchMutation<T> {
 
 export interface BatchExecutionOptions {
   executionMode?: BatchExecutionMode;
-  waitUntil?: BatchWaitUntil;
+  waitUntil?: BatchWaitUntil | string;
 }
+
+type NormalizedBatchExecutionOptions = {
+  executionMode: BatchExecutionMode;
+  waitUntil: BatchWaitUntil;
+};
 
 export interface BatchExecutionResult<T> {
   executionMode: BatchExecutionMode;
   waitUntil: BatchWaitUntil;
   results: T[];
   sideEffectKinds: BatchSideEffectKind[];
+  materialized: boolean;
 }
 
 interface BatchExecutionState {
@@ -40,10 +47,11 @@ interface BatchExecutionState {
 }
 
 const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionState>();
+const pendingMaterializations = new Set<Promise<void>>();
 
-const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): Required<BatchExecutionOptions> => ({
+const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
   executionMode: options.executionMode ?? BatchExecutionMode.Compatibility,
-  waitUntil: options.waitUntil ?? BatchWaitUntil.Materialized,
+  waitUntil: options.waitUntil === BatchWaitUntil.Committed ? BatchWaitUntil.Committed : BatchWaitUntil.Materialized,
 });
 
 const executeWrites = async <T>(
@@ -78,6 +86,17 @@ export const registerBatchSideEffect = async (sideEffect: BatchSideEffect): Prom
   await sideEffect.execute();
 };
 
+const trackPendingMaterialization = (materialization: Promise<void>) => {
+  pendingMaterializations.add(materialization);
+  materialization
+    .catch((cause) => logApp.error('Batch materialization failed after committed response', { cause }))
+    .finally(() => pendingMaterializations.delete(materialization));
+};
+
+export const waitForPendingBatchMaterializations = async (): Promise<void> => {
+  await Promise.allSettled(Array.from(pendingMaterializations));
+};
+
 export const executeBatchMutations = async <T>(
   mutations: BatchMutation<T>[],
   options: BatchExecutionOptions = {},
@@ -90,17 +109,25 @@ export const executeBatchMutations = async <T>(
       ...normalizedOptions,
       results,
       sideEffectKinds: existingState.sideEffects.map((sideEffect) => sideEffect.kind),
+      materialized: false,
     };
   }
 
   const state: BatchExecutionState = { sideEffects: [] };
   return batchExecutionStorage.run(state, async () => {
     const results = await executeWrites(mutations, state);
-    await materializeSideEffects(state);
+    const materialization = materializeSideEffects(state);
+    const hasSideEffects = state.sideEffects.length > 0;
+    if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
+      await materialization;
+    } else {
+      trackPendingMaterialization(materialization);
+    }
     return {
       ...normalizedOptions,
       results,
       sideEffectKinds: state.sideEffects.map((sideEffect) => sideEffect.kind),
+      materialized: normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects,
     };
   });
 };

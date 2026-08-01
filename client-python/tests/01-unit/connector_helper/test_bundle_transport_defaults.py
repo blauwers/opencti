@@ -2,6 +2,8 @@ import json
 from unittest import TestCase
 from unittest.mock import MagicMock
 
+import pytest
+
 from pycti.connector.opencti_connector_helper import OpenCTIConnectorHelper
 
 
@@ -90,3 +92,9 @@ class TestBundleTransportDefaults(TestCase):
 
         self.assertEqual(len(bundles), 1)
         self.assertEqual(len(json.loads(bundles[0])["objects"]), 2)
+
+    def test_wait_until_rejects_unknown_consistency_mode(self):
+        with pytest.raises(ValueError):
+            self._helper().send_stix2_bundle(
+                self._bundle(), send_to_queue=False, wait_until="LATER"
+            )

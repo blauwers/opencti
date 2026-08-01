@@ -11,7 +11,7 @@ import {
   buildBatchQueueMessage,
   prepareBundleSubmission,
 } from '../../../src/modules/batch/batch-domain';
-import { submitStixBundle } from '../../../src/domain/stix';
+import { sendStixBundle, submitStixBundle } from '../../../src/domain/stix';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { pushToWorkerForConnector } from '../../../src/database/rabbitmq';
 import { createWork, updateExpectationsNumber } from '../../../src/domain/work';
@@ -221,5 +221,25 @@ describe('submitStixBundle', () => {
     expect(createWork).toHaveBeenCalledTimes(1);
     expect(admission.workId).toBe('work-created');
     expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-created', 1);
+  });
+
+  it('lets the compatibility mutation request committed-only execution', async () => {
+    await expect(sendStixBundle(
+      testContext,
+      ADMIN_USER,
+      'connector-1',
+      bundle,
+      'work-1',
+      false,
+      false,
+      BatchWaitUntil.Committed,
+    )).resolves.toBe(true);
+
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.objectContaining({
+        batch_wait_until: BatchWaitUntil.Committed,
+      }),
+    );
   });
 });

@@ -5,6 +5,7 @@ import {
   executeBatchMutations,
   executeSingleBatchMutation,
   registerBatchSideEffect,
+  waitForPendingBatchMaterializations,
 } from '../../../../src/modules/batch/batch-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
@@ -35,6 +36,7 @@ describe('batch executor', () => {
       waitUntil: BatchWaitUntil.Materialized,
       results: ['entity-result', 'relation-result'],
       sideEffectKinds: [],
+      materialized: true,
     });
   });
 
@@ -51,6 +53,7 @@ describe('batch executor', () => {
 
     expect(execution.executionMode).toBe(BatchExecutionMode.Bulk);
     expect(execution.waitUntil).toBe(BatchWaitUntil.Committed);
+    expect(execution.materialized).toBe(true);
   });
 
   it('returns the singular result while preserving fail-fast behavior', async () => {
@@ -155,5 +158,39 @@ describe('batch executor', () => {
 
     expect(execution).toBe('result');
     expect(calls).toEqual(['outside-effect', 'write', 'write-complete', 'deferred-effect']);
+  });
+
+  it('returns committed results before deferred materialization finishes', async () => {
+    const calls: string[] = [];
+    let releaseMaterialization: (() => void) | undefined;
+    const materializationGate = new Promise<void>((resolve) => {
+      releaseMaterialization = resolve;
+    });
+
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          calls.push('write');
+          return 'result';
+        },
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push('side-effect-started');
+            await materializationGate;
+            calls.push('side-effect-complete');
+          },
+        }],
+      },
+    ], { waitUntil: BatchWaitUntil.Committed });
+
+    expect(execution.materialized).toBe(false);
+    expect(calls).toEqual(['write', 'side-effect-started']);
+
+    releaseMaterialization?.();
+    await waitForPendingBatchMaterializations();
+
+    expect(calls).toEqual(['write', 'side-effect-started', 'side-effect-complete']);
   });
 });

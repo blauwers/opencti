@@ -92,11 +92,13 @@ export const sendStixBundle = async (
   work_id,
   split_bundles = false,
   cleanup_inconsistent_bundle = false,
+  wait_until = /** @type {string | null | undefined} */ (undefined),
 ) => {
   try {
     await submitStixBundle(context, user, connectorId, bundle, work_id, {
       splitBundles: split_bundles,
       cleanupInconsistentBundle: cleanup_inconsistent_bundle,
+      waitUntil: wait_until,
     });
     return true;
   } catch (err) {
