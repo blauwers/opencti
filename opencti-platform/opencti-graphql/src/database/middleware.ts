@@ -1916,13 +1916,14 @@ const loadMergeEntitiesDependencies = async (
   return data;
 };
 
-export const mergeEntities = async (
+type MergeEntitiesOpts = { locks?: string[]; chosenFields?: Record<string, any>; waitUntil?: BatchWaitUntil } & EventOpts;
+const mergeEntitiesInWriteBoundary = async (
   context: AuthContext,
   user: AuthUser,
   targetEntityId: string,
   sourceEntityIds: string[],
-  opts: { locks?: string[]; chosenFields?: Record<string, any> } & EventOpts = {},
-) => {
+  opts: MergeEntitiesOpts = {},
+): Promise<any> => {
   // Pre-checks
   if (sourceEntityIds.includes(targetEntityId)) {
     throw FunctionalError('Cannot merge entities, same ID detected in source and destination', {
@@ -1968,9 +1969,14 @@ export const mergeEntities = async (
     // Temporary stored the deleted elements to prevent concurrent problem at creation
     await redisAddDeletions(sources.map((s) => s.internal_id), getDraftContext(context, user));
     // - END TRANSACTION
-    return await storeLoadById(context, user, target.id, ABSTRACT_STIX_OBJECT).then((finalStixCoreObject) => {
-      return notify(BUS_TOPICS[ABSTRACT_STIX_CORE_OBJECT].EDIT_TOPIC, finalStixCoreObject, user);
+    const finalStixCoreObject = await storeLoadById(context, user, target.id, ABSTRACT_STIX_OBJECT);
+    await registerBatchSideEffect({
+      kind: BatchSideEffectKind.CompatibilityProjection,
+      execute: async () => {
+        await notify(BUS_TOPICS[ABSTRACT_STIX_CORE_OBJECT].EDIT_TOPIC, finalStixCoreObject, user);
+      },
     });
+    return finalStixCoreObject;
   } catch (err: any) {
     if (err.name === TYPE_LOCK_ERROR) {
       throw LockTimeoutError({ participantIds });
@@ -1979,6 +1985,20 @@ export const mergeEntities = async (
   } finally {
     if (lock) await lock.unlock();
   }
+};
+
+export const mergeEntities = async (
+  context: AuthContext,
+  user: AuthUser,
+  targetEntityId: string,
+  sourceEntityIds: string[],
+  opts: MergeEntitiesOpts = {},
+): Promise<any> => {
+  const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
+  return executeSingleBatchMutation({
+    kind: BatchMutationKind.MergeEntities,
+    executeWrite: () => mergeEntitiesInWriteBoundary(context, user, targetEntityId, sourceEntityIds, opts),
+  }, { waitUntil });
 };
 
 export const transformPatchToInput = (
