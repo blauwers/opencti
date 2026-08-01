@@ -12,6 +12,7 @@ import {
   BatchWaitUntil,
   type PreparedBundleSubmission,
 } from './batch-types';
+import { planStixBundleObjects } from './batch-bundle-planner';
 
 const BUNDLE_PREFIX = 'bundle--';
 const batchContractError = (message: string, code: BatchAdmissionErrorCode, data: Record<string, unknown> = {}) => {
@@ -134,6 +135,14 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
   const { executionPreference, executionMode, executionReason, eligibleExecutionModes } = normalizeExecutionPreference(options);
   const waitUntil = normalizeWaitUntil(options.waitUntil);
   const idempotencyKey = normalizeIdempotencyKey(options.idempotencyKey, bundleId);
+  let bundlePlan;
+  try {
+    bundlePlan = planStixBundleObjects(jsonBundle.objects, {
+      cleanupInconsistentBundle: options.cleanupInconsistentBundle === true,
+    });
+  } catch (cause) {
+    throw batchContractError('Invalid stix bundle payload', BatchAdmissionErrorCode.InvalidBundle, { cause });
+  }
   const objectTypes = Array.from(new Set(jsonBundle.objects
     .map((object: Record<string, unknown>) => object?.type)
     .filter((type: unknown): type is string => typeof type === 'string')));
@@ -141,6 +150,7 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
   return {
     bundle: JSON.stringify(normalizedBundle),
     bundleId,
+    bundlePlan,
     objects: jsonBundle.objects,
     objectCount: jsonBundle.objects.length,
     objectTypes,
@@ -165,6 +175,7 @@ export const buildBatchAdmission = (
   return {
     batchId: prepared.bundleId,
     bundleId: prepared.bundleId,
+    bundlePlan: prepared.bundlePlan,
     connectorId,
     workId,
     objectCount: prepared.objectCount,
@@ -198,5 +209,16 @@ export const buildBatchQueueMessage = (admission: BatchAdmission, applicantId: s
     batch_eligible_execution_modes: admission.eligibleExecutionModes,
     batch_wait_until: admission.waitUntil,
     batch_idempotency_key: admission.idempotencyKey,
+    batch_plan: {
+      version: 1,
+      object_count: admission.bundlePlan.objectCount,
+      planned_object_count: admission.bundlePlan.plannedObjectCount,
+      ignored_object_count: admission.bundlePlan.ignoredObjectCount,
+      incompatible_object_ids: admission.bundlePlan.incompatibleObjectIds,
+      execution_phases: admission.bundlePlan.executionPhases.map((phase) => ({
+        phase: phase.phase,
+        object_ids: phase.objectIds,
+      })),
+    },
   };
 };

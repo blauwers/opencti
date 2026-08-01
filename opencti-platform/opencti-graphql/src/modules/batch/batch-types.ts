@@ -1,3 +1,5 @@
+import type { BatchBundlePlan } from './batch-bundle-planner';
+
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
 }
@@ -51,6 +53,7 @@ export interface BatchSubmitOptions {
 export interface PreparedBundleSubmission {
   bundle: string;
   bundleId: string;
+  bundlePlan: BatchBundlePlan;
   objects: Record<string, any>[];
   objectCount: number;
   objectTypes: string[];
@@ -66,6 +69,7 @@ export interface PreparedBundleSubmission {
 export interface BatchAdmission {
   batchId: string;
   bundleId: string;
+  bundlePlan: BatchBundlePlan;
   connectorId: string;
   workId: string;
   objectCount: number;
@@ -96,6 +100,17 @@ export interface BatchQueueMessage {
   batch_eligible_execution_modes: BatchExecutionMode[];
   batch_wait_until: BatchWaitUntil;
   batch_idempotency_key: string;
+  batch_plan: {
+    execution_phases: Array<{
+      object_ids: string[];
+      phase: number;
+    }>;
+    ignored_object_count: number;
+    incompatible_object_ids: string[];
+    object_count: number;
+    planned_object_count: number;
+    version: 1;
+  };
 }
 
 export interface BatchGraphqlOperationInput {

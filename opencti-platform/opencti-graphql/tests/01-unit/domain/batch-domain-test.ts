@@ -193,6 +193,26 @@ describe('batch admission contract', () => {
       ],
       batch_wait_until: BatchWaitUntil.Materialized,
       batch_idempotency_key: prepared.bundleId,
+      batch_plan: {
+        version: 1,
+        object_count: 3,
+        planned_object_count: 3,
+        ignored_object_count: 0,
+        incompatible_object_ids: [],
+        execution_phases: [
+          {
+            phase: 0,
+            object_ids: ['identity--11111111-1111-4111-8111-111111111111'],
+          },
+          {
+            phase: 1,
+            object_ids: [
+              'indicator--11111111-1111-4111-8111-111111111111',
+              'indicator--22222222-2222-4222-8222-222222222222',
+            ],
+          },
+        ],
+      },
     });
     expect(JSON.parse(Buffer.from(message.content, 'base64').toString('utf-8'))).toEqual(JSON.parse(prepared.bundle));
   });
