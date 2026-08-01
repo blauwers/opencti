@@ -1,0 +1,166 @@
+import base64
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+BATCH_RESULT_TOKEN_PREFIX = "__opencti_batch_result__"
+
+
+def build_batch_result_token(operation_index: int, path: List[str]) -> str:
+    return f"{BATCH_RESULT_TOKEN_PREFIX}:{operation_index}:{'.'.join(path)}"
+
+
+class BatchMutationPlanUnsupported(Exception):
+    pass
+
+
+@dataclass
+class BatchMutationPlan:
+    operations: List[Dict[str, Any]] = field(default_factory=list)
+
+    @staticmethod
+    def is_mutation(query: str) -> bool:
+        return re.search(r"\bmutation\b", query) is not None
+
+    def capture(
+        self,
+        query: str,
+        variables: Dict[str, Any],
+        files_vars: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        operation_index = len(self.operations)
+        operation: Dict[str, Any] = {
+            "query": query,
+            "variables": json.dumps(variables),
+        }
+        files = self._serialize_files(files_vars)
+        if files:
+            operation["files"] = files
+        self.operations.append(operation)
+        return {"data": self._build_synthetic_data(query, operation_index)}
+
+    @staticmethod
+    def _serialize_files(files_vars: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        serialized_files = []
+        for file_var in files_vars:
+            key = file_var["key"]
+            files = file_var["file"] if file_var["multiple"] else [file_var["file"]]
+            for index, file in enumerate(files):
+                data = file.data.encode("utf-8") if isinstance(file.data, str) else file.data
+                serialized_files.append(
+                    {
+                        "path": f"{key}.{index}" if file_var["multiple"] else key,
+                        "name": file.name,
+                        "mime_type": file.mime,
+                        "data": base64.b64encode(data).decode("utf-8"),
+                    }
+                )
+        return serialized_files
+
+    @classmethod
+    def _build_synthetic_data(cls, query: str, operation_index: int) -> Dict[str, Any]:
+        tokens = cls._tokenize(query)
+        try:
+            selection_index = tokens.index("{")
+        except ValueError as exc:
+            raise BatchMutationPlanUnsupported("Mutation query has no selection set") from exc
+        selection, _ = cls._parse_selection_set(tokens, selection_index)
+        return {
+            response_key: cls._build_synthetic_value(field_name, children, operation_index, [response_key])
+            for response_key, (field_name, children) in selection.items()
+        }
+
+    @staticmethod
+    def _tokenize(query: str) -> List[str]:
+        return re.findall(r"\.\.\.|[_A-Za-z][_0-9A-Za-z]*|[{}()@:!$,\[\]]", query)
+
+    @classmethod
+    def _parse_selection_set(
+        cls, tokens: List[str], index: int
+    ) -> Tuple[Dict[str, Tuple[str, Optional[Dict[str, Any]]]], int]:
+        if index >= len(tokens) or tokens[index] != "{":
+            raise BatchMutationPlanUnsupported("Mutation query has an invalid selection set")
+        selection: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}
+        index += 1
+        while index < len(tokens) and tokens[index] != "}":
+            if tokens[index] == "...":
+                index += 1
+                if index < len(tokens) and tokens[index] == "on":
+                    index += 2
+                    while index < len(tokens) and tokens[index] == "@":
+                        index += 2
+                        if index < len(tokens) and tokens[index] == "(":
+                            index = cls._skip_balanced(tokens, index, "(", ")")
+                    if index < len(tokens) and tokens[index] == "{":
+                        fragment_selection, index = cls._parse_selection_set(
+                            tokens, index
+                        )
+                        selection.update(fragment_selection)
+                    continue
+                if index < len(tokens):
+                    index += 1
+                continue
+            response_key = tokens[index]
+            field_name = response_key
+            index += 1
+            if index < len(tokens) and tokens[index] == ":":
+                index += 1
+                if index >= len(tokens):
+                    raise BatchMutationPlanUnsupported("Mutation query alias is incomplete")
+                field_name = tokens[index]
+                index += 1
+            if index < len(tokens) and tokens[index] == "(":
+                index = cls._skip_balanced(tokens, index, "(", ")")
+            while index < len(tokens) and tokens[index] == "@":
+                index += 2
+                if index < len(tokens) and tokens[index] == "(":
+                    index = cls._skip_balanced(tokens, index, "(", ")")
+            children = None
+            if index < len(tokens) and tokens[index] == "{":
+                children, index = cls._parse_selection_set(tokens, index)
+            selection[response_key] = (field_name, children)
+        if index >= len(tokens) or tokens[index] != "}":
+            raise BatchMutationPlanUnsupported("Mutation query selection set is incomplete")
+        return selection, index + 1
+
+    @staticmethod
+    def _skip_balanced(
+        tokens: List[str], index: int, opening: str, closing: str
+    ) -> int:
+        depth = 0
+        while index < len(tokens):
+            if tokens[index] == opening:
+                depth += 1
+            elif tokens[index] == closing:
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+            index += 1
+        raise BatchMutationPlanUnsupported("Mutation query has unbalanced delimiters")
+
+    @classmethod
+    def _build_synthetic_value(
+        cls,
+        field_name: str,
+        children: Optional[Dict[str, Tuple[str, Optional[Dict[str, Any]]]]],
+        operation_index: int,
+        path: List[str],
+    ) -> Any:
+        if children is not None:
+            if field_name in {"edges", "nodes"}:
+                return []
+            return {
+                response_key: cls._build_synthetic_value(
+                    child_field_name,
+                    child_children,
+                    operation_index,
+                    [*path, response_key],
+                )
+                for response_key, (child_field_name, child_children) in children.items()
+            }
+        if field_name in {"parent_types"}:
+            return []
+        if field_name in {"delete"}:
+            return True
+        return build_batch_result_token(operation_index, path)

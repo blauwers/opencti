@@ -1,4 +1,5 @@
 import datetime
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -278,6 +279,37 @@ def test_import_bundle_can_defer_expectation_reporting_to_batch_boundary(
     ]
     assert observed_expectation_flags == [False]
     opencti.work.report_expectation.assert_not_called()
+
+
+def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    plan = MagicMock()
+
+    @contextmanager
+    def batch_mutation_plan():
+        yield plan
+
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    monkeypatch.setattr(
+        opencti_stix2,
+        "import_bundle",
+        lambda *args, **kwargs: ([{"id": "indicator--1", "type": "indicator"}], []),
+    )
+
+    imported, rejected = opencti_stix2.import_bundle_from_json_batch(
+        '{"type":"bundle","id":"bundle--1","objects":[{"type":"indicator","id":"indicator--1"}]}',
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+    )
+
+    assert imported == [{"id": "indicator--1", "type": "indicator"}]
+    assert rejected == []
+    opencti.execute_batch_mutation_plan.assert_called_once_with(
+        plan,
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+    )
 
 
 def test_extract_embedded_storage_path_ignores_query_string(

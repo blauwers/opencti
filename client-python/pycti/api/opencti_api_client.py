@@ -10,12 +10,14 @@ import shutil
 import signal
 import tempfile
 import threading
+from contextlib import contextmanager
 from typing import Any, Dict, Optional, Tuple, Union
 
 import magic
 import requests
 
 from pycti import __version__
+from pycti.api.opencti_api_batch import BatchMutationPlan
 from pycti.api.opencti_api_connector import OpenCTIApiConnector
 from pycti.api.opencti_api_draft import OpenCTIApiDraft
 from pycti.api.opencti_api_internal_file import OpenCTIApiInternalFile
@@ -267,6 +269,7 @@ class OpenCTIApiClient:
         )
         self.session = requests.session()
         self.session_requests_timeout = requests_timeout
+        self._batch_mutation_plan = None
         # Define the dependencies
         self.work = OpenCTIApiWork(self)
         self.notification = OpenCTIApiNotification(self)
@@ -655,6 +658,11 @@ class OpenCTIApiClient:
         # Batching or mixed upload or not supported
         # Recursively extract File objects from nested dictionaries
         query_var, files_vars = self._extract_files(variables)
+        if (
+            self._batch_mutation_plan is not None
+            and self._batch_mutation_plan.is_mutation(query)
+        ):
+            return self._batch_mutation_plan.capture(query, query_var, files_vars)
 
         query_headers = self.request_headers.copy()
         if disable_impersonate and "opencti-applicant-id" in query_headers:
@@ -766,6 +774,51 @@ class OpenCTIApiClient:
                 return result
         else:
             raise ValueError(r.text)
+
+    @contextmanager
+    def batch_mutation_plan(self):
+        """Capture GraphQL mutations so they can be executed in one backend batch."""
+        if self._batch_mutation_plan is not None:
+            raise ValueError("A batch mutation plan is already active")
+        plan = BatchMutationPlan()
+        self._batch_mutation_plan = plan
+        try:
+            yield plan
+        finally:
+            self._batch_mutation_plan = None
+
+    def execute_batch_mutation_plan(
+        self,
+        plan: BatchMutationPlan,
+        execution_mode: Optional[str] = None,
+        wait_until: Optional[str] = None,
+    ):
+        """Execute a captured mutation plan through the backend batch endpoint."""
+        if len(plan.operations) == 0:
+            return None
+        mutation = """
+            mutation BatchMutationsExecute($operations: [BatchGraphqlOperationInput!]!, $options: BatchExecuteOptionsInput) {
+                batchMutationsExecute(operations: $operations, options: $options) {
+                    operation_count
+                    execution_mode
+                    wait_until
+                    side_effect_kinds
+                    materialized
+                }
+            }
+        """
+        options = {}
+        if execution_mode is not None:
+            options["execution_mode"] = execution_mode
+        if wait_until is not None:
+            options["wait_until"] = wait_until
+        return self.query(
+            mutation,
+            {
+                "operations": plan.operations,
+                "options": options or None,
+            },
+        )
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
         """Get file from the OpenCTI API.

@@ -17,6 +17,7 @@ def build_handler():
     handler.api = MagicMock()
     handler.api.work.add_expectations.return_value = True
     handler.api.stix2.import_bundle_from_json.return_value = ([], [])
+    handler.api.stix2.import_bundle_from_json_batch.return_value = ([], [])
     handler.logger = MagicMock()
     handler.connector_id = "connector--1"
     handler.push_exchange = "push-exchange"
@@ -116,8 +117,11 @@ def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch
     result = handler.handle_message(build_message(split_bundles=False))
 
     assert result == "ack"
-    handler.api.stix2.import_bundle_from_json.assert_called_once()
-    imported_raw_content = handler.api.stix2.import_bundle_from_json.call_args.args[0]
+    handler.api.stix2.import_bundle_from_json.assert_not_called()
+    handler.api.stix2.import_bundle_from_json_batch.assert_called_once()
+    imported_raw_content = handler.api.stix2.import_bundle_from_json_batch.call_args.args[
+        0
+    ]
     assert json.loads(imported_raw_content)["id"] == (
         "bundle--11111111-1111-4111-8111-111111111111"
     )
@@ -137,12 +141,17 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
 
     assert result == "ack"
     handler.api.set_batch_wait_until.assert_called_once_with("COMMITTED")
-    handler.api.stix2.import_bundle_from_json.assert_called_once()
+    handler.api.stix2.import_bundle_from_json.assert_not_called()
+    handler.api.stix2.import_bundle_from_json_batch.assert_called_once()
     assert (
-        handler.api.stix2.import_bundle_from_json.call_args.kwargs[
+        handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs[
             "report_expectations"
         ]
         is False
+    )
+    assert (
+        handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs["wait_until"]
+        == "COMMITTED"
     )
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
 
@@ -175,5 +184,6 @@ def test_handler_requeues_child_bundles_only_for_explicit_split(monkeypatch):
 
     assert result == "ack"
     handler.api.stix2.import_bundle_from_json.assert_not_called()
+    handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
     handler.api.work.add_expectations.assert_called_once_with("work--1", 2)
     assert handler.send_bundle_to_specific_queue.call_count == 2

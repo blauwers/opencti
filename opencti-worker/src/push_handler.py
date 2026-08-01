@@ -168,16 +168,27 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         if not work_alive:
                             return "ack"
                     update = data.get("update", False)
-                    imported_items, too_large_items_bundles = (
-                        self.api.stix2.import_bundle_from_json(
-                            raw_content,
-                            update,
-                            types,
-                            work_id,
-                            self.objects_max_refs,
-                            data.get("cleanup_inconsistent_bundle", False),
-                            report_expectations=not report_batch_expectation,
+                    import_bundle = (
+                        self.api.stix2.import_bundle_from_json
+                        if data.get("split_bundles") is True
+                        else self.api.stix2.import_bundle_from_json_batch
+                    )
+                    import_kwargs = {
+                        "report_expectations": not report_batch_expectation,
+                    }
+                    if data.get("split_bundles") is not True:
+                        import_kwargs["execution_mode"] = data.get(
+                            "batch_execution_mode"
                         )
+                        import_kwargs["wait_until"] = data.get("batch_wait_until")
+                    imported_items, too_large_items_bundles = import_bundle(
+                        raw_content,
+                        update,
+                        types,
+                        work_id,
+                        self.objects_max_refs,
+                        data.get("cleanup_inconsistent_bundle", False),
+                        **import_kwargs,
                     )
                     if report_batch_expectation:
                         self.api.work.report_expectation(

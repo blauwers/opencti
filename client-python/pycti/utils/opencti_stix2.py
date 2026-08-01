@@ -20,6 +20,7 @@ from requests import RequestException, Timeout
 from typing_extensions import deprecated
 
 from pycti.entities.opencti_identity import Identity
+from pycti.api.opencti_api_batch import BatchMutationPlanUnsupported
 from pycti.utils.constants import (
     IdentityTypes,
     LocationTypes,
@@ -434,6 +435,37 @@ class OpenCTIStix2:
             cleanup_inconsistent_bundle,
             report_expectations,
         )
+
+    def import_bundle_from_json_batch(
+        self,
+        json_data: Union[str, bytes],
+        update: bool = False,
+        types: List = None,
+        work_id: str = None,
+        objects_max_refs: int = 0,
+        cleanup_inconsistent_bundle: bool = False,
+        report_expectations: bool = True,
+        execution_mode: str = None,
+        wait_until: str = None,
+    ) -> Tuple[list, list]:
+        """Import a STIX2 bundle through one backend mutation-plan request."""
+        data = json.loads(json_data)
+        with self.opencti.batch_mutation_plan() as plan:
+            imported, rejected = self.import_bundle(
+                data,
+                update,
+                types,
+                work_id,
+                objects_max_refs,
+                cleanup_inconsistent_bundle,
+                report_expectations,
+            )
+        self.opencti.execute_batch_mutation_plan(
+            plan,
+            execution_mode=execution_mode,
+            wait_until=wait_until,
+        )
+        return imported, rejected
 
     def resolve_author(self, title: str) -> Optional[Identity]:
         """Resolve an author identity from a title string.
@@ -3591,6 +3623,8 @@ class OpenCTIStix2:
                 sleep_jitter = round(random.uniform(10, 30), 2)
                 time.sleep(sleep_jitter)
                 processing_count += 1
+            except BatchMutationPlanUnsupported:
+                raise
             except Exception as ex:  # pylint: disable=broad-except
                 error = str(ex)
                 error_msg = traceback.format_exc()
