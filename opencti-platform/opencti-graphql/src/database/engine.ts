@@ -5544,6 +5544,39 @@ const executeBufferedBulkUpdateOperations = async (
   }
 };
 
+type IndexBulkAction = {
+  kind: 'direct' | 'side';
+  body: any[];
+};
+
+const executeIndexBulkActions = async (
+  context: AuthContext,
+  indexingType: string | undefined,
+  actions: IndexBulkAction[],
+) => {
+  const groupsOfActions = R.splitEvery(MAX_BULK_OPERATIONS, actions);
+  for (let index = 0; index < groupsOfActions.length; index += 1) {
+    const actionsBulk = groupsOfActions[index];
+    const body = actionsBulk.flatMap((action) => action.body);
+    if (body.length === 0) {
+      continue;
+    }
+    const directBodyLength = actionsBulk
+      .filter((action) => action.kind === 'direct')
+      .reduce((count, action) => count + action.body.length, 0);
+    const sideBodyLength = actionsBulk
+      .filter((action) => action.kind === 'side')
+      .reduce((count, action) => count + action.body.length, 0);
+    if (directBodyLength > 0) {
+      meterManager.directBulk(directBodyLength, { type: indexingType });
+    }
+    if (sideBodyLength > 0) {
+      meterManager.sideBulk(sideBodyLength, { type: indexingType });
+    }
+    await elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body });
+  }
+};
+
 const elIndexElementsNow = async (
   context: AuthContext,
   user: AuthUser,
@@ -5554,24 +5587,14 @@ const elIndexElementsNow = async (
   const elIndexElementsFn = async () => {
     // 00. Relations must be transformed before indexing.
     const transformedElements = await prepareIndexing(context, user, elements);
-    // 01. Bulk the indexing of row elements
-    // split since there can be a lot of relationships for the same element
-    const transformedElementsSplit = R.splitEvery(MAX_BULK_OPERATIONS, transformedElements);
-    for (let i = 0; i < transformedElementsSplit.length; i += 1) {
-      const elementsBulk = transformedElementsSplit[i];
-      const body = elementsBulk.flatMap((elementDoc) => {
-        const doc = elementDoc;
-        return [
-          { index: { _index: doc._index, _id: doc._id ?? doc.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-          R.pipe(R.dissoc('_index'))(doc),
-        ];
-      });
-      if (body.length > 0) {
-        meterManager.directBulk(body.length, { type: indexingType });
-        await elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body });
-      }
-    }
-    // 02. If relation, generate impacts for from and to sides
+    const bulkActions: IndexBulkAction[] = transformedElements.map((doc) => ({
+      kind: 'direct',
+      body: [
+        { index: { _index: doc._index, _id: doc._id ?? doc.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+        R.pipe(R.dissoc('_index'))(doc),
+      ],
+    }));
+    // 01. If relation, generate impacts for from and to sides
     const cache: Record<string, BasicStoreBase | null | undefined> = {};
     const impactedEntities = R.pipe(
       R.filter((e: BasicStoreBase) => e.base_type === BASE_TYPE_RELATION),
@@ -5673,22 +5696,15 @@ const elIndexElementsNow = async (
       }
       return { ...entity, id: entityId, data: { script: { source, params } } };
     });
-    // bulk update elements (denormalized relations)
-    if (elementsToUpdate.length > 0) {
-      const groupsOfElementsToUpdate = R.splitEvery(MAX_BULK_OPERATIONS, elementsToUpdate);
-      for (let i = 0; i < groupsOfElementsToUpdate.length; i += 1) {
-        const elementsBulk = groupsOfElementsToUpdate[i];
-        const bodyUpdate = elementsBulk.flatMap((doc: any) => [
-          { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-          R.dissoc('_index', doc.data),
-        ]);
-        if (bodyUpdate.length > 0) {
-          meterManager.sideBulk(bodyUpdate.length, { type: indexingType });
-          const bulkPromise = elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body: bodyUpdate });
-          await Promise.all([bulkPromise]);
-        }
-      }
-    }
+    // 02. Commit rows and relation denormalization in one ordered bulk request when possible.
+    bulkActions.push(...elementsToUpdate.map((doc: any) => ({
+      kind: 'side' as const,
+      body: [
+        { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+        R.dissoc('_index', doc.data),
+      ],
+    })));
+    await executeIndexBulkActions(context, indexingType, bulkActions);
     return transformedElements.length;
   };
   return telemetry(context, user, `INSERT ${indexingType}`, {
