@@ -305,6 +305,18 @@ type BufferedEngineState = {
   writes: BufferedEngineWrite[];
 };
 
+type BufferedEngineBulkMetric = {
+  kind: 'direct' | 'side';
+  indexingType: string | undefined;
+};
+
+type BufferedEngineBulkAction = {
+  context: AuthContext;
+  refresh: boolean;
+  body: any[];
+  metric?: BufferedEngineBulkMetric;
+};
+
 export const ROLE_FROM = 'from';
 export const ROLE_TO = 'to';
 export const UNIMPACTED_ENTITIES_ROLE = [
@@ -5368,11 +5380,12 @@ const validateElementsToIndex = (context: AuthContext, user: AuthUser, elements:
   }
 };
 
-const flushBufferedIndexElements = async (writes: BufferedIndexWrite[]) => {
+const buildBufferedIndexActions = async (writes: BufferedIndexWrite[]) => {
   const groups: BufferedIndexWrite[] = [];
   writes.forEach((write) => {
-    const existingGroup = groups.find((group) => group.context === write.context && group.user === write.user);
-    if (existingGroup) {
+    const existingGroup = groups[groups.length - 1];
+    const canAppendToExistingGroup = existingGroup && existingGroup.context === write.context && existingGroup.user === write.user;
+    if (canAppendToExistingGroup) {
       existingGroup.elements.push(...write.elements);
       if (existingGroup.indexingType !== write.indexingType) {
         existingGroup.indexingType = 'batch';
@@ -5385,62 +5398,35 @@ const flushBufferedIndexElements = async (writes: BufferedIndexWrite[]) => {
     }
   });
 
+  const actions: BufferedEngineBulkAction[] = [];
   for (let index = 0; index < groups.length; index += 1) {
     const group = groups[index];
-    await elIndexElementsNow(group.context, group.user, group.indexingType, group.elements);
+    const built = await buildIndexBulkActions(group.context, group.user, group.indexingType, group.elements);
+    actions.push(...built.actions);
   }
+  return actions;
 };
 
-const flushBufferedRawIndexElements = async (writes: BufferedRawIndexWrite[]) => {
-  const groups: Array<{ context: AuthContext; documents: Record<string, any>[] }> = [];
-  writes.forEach((write) => {
-    const existingGroup = groups.find((group) => group.context === write.context);
-    if (existingGroup) {
-      existingGroup.documents.push(...write.documents);
-    } else {
-      groups.push({ context: write.context, documents: [...write.documents] });
-    }
-  });
-
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-    const groupsOfDocuments = R.splitEvery(MAX_BULK_OPERATIONS, group.documents);
-    for (let documentIndex = 0; documentIndex < groupsOfDocuments.length; documentIndex += 1) {
-      const body = groupsOfDocuments[documentIndex].flatMap((document) => [
-        { index: { _index: document._index, _id: document._id ?? document.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-        R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
-      ]);
-      if (body.length > 0) {
-        await elBulk(group.context, { refresh: true, timeout: BULK_TIMEOUT, body });
-      }
-    }
-  }
+const buildBufferedRawIndexActions = (writes: BufferedRawIndexWrite[]): BufferedEngineBulkAction[] => {
+  return writes.flatMap((write) => write.documents.map((document) => ({
+    context: write.context,
+    refresh: true,
+    body: [
+      { index: { _index: document._index, _id: document._id ?? document.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+      R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+    ],
+  })));
 };
 
-const flushBufferedDirectIndexElements = async (writes: BufferedDirectIndexWrite[]) => {
-  const groups: Array<{ context: AuthContext; refresh: boolean; documents: Record<string, any>[] }> = [];
-  writes.forEach((write) => {
-    const existingGroup = groups.find((group) => group.context === write.context && group.refresh === write.refresh);
-    if (existingGroup) {
-      existingGroup.documents.push(...write.documents);
-    } else {
-      groups.push({ context: write.context, refresh: write.refresh, documents: [...write.documents] });
-    }
-  });
-
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-    const groupsOfDocuments = R.splitEvery(MAX_BULK_OPERATIONS, group.documents);
-    for (let documentIndex = 0; documentIndex < groupsOfDocuments.length; documentIndex += 1) {
-      const body = groupsOfDocuments[documentIndex].flatMap((document) => [
-        { index: { _index: document._index, _id: document._id ?? document.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-        R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
-      ]);
-      if (body.length > 0) {
-        await elBulk(group.context, { refresh: group.refresh, timeout: BULK_TIMEOUT, body });
-      }
-    }
-  }
+const buildBufferedDirectIndexActions = (writes: BufferedDirectIndexWrite[]): BufferedEngineBulkAction[] => {
+  return writes.flatMap((write) => write.documents.map((document) => ({
+    context: write.context,
+    refresh: write.refresh,
+    body: [
+      { index: { _index: document._index, _id: document._id ?? document.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+      R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+    ],
+  })));
 };
 
 const getOrCreateBufferedEngineState = (): BufferedEngineState | undefined => {
@@ -5544,37 +5530,188 @@ const executeBufferedBulkUpdateOperations = async (
   }
 };
 
-type IndexBulkAction = {
-  kind: 'direct' | 'side';
-  body: any[];
+const recordBufferedEngineBulkMetrics = (actions: BufferedEngineBulkAction[]) => {
+  const metricGroups = new Map<string, { metric: BufferedEngineBulkMetric; bodyLength: number }>();
+  actions.forEach((action) => {
+    if (!action.metric) {
+      return;
+    }
+    const key = `${action.metric.kind}:${action.metric.indexingType ?? ''}`;
+    const existing = metricGroups.get(key);
+    if (existing) {
+      existing.bodyLength += action.body.length;
+    } else {
+      metricGroups.set(key, { metric: action.metric, bodyLength: action.body.length });
+    }
+  });
+  metricGroups.forEach(({ metric, bodyLength }) => {
+    if (metric.kind === 'direct') {
+      meterManager.directBulk(bodyLength, { type: metric.indexingType });
+    } else {
+      meterManager.sideBulk(bodyLength, { type: metric.indexingType });
+    }
+  });
 };
 
-const executeIndexBulkActions = async (
-  context: AuthContext,
-  indexingType: string | undefined,
-  actions: IndexBulkAction[],
-) => {
-  const groupsOfActions = R.splitEvery(MAX_BULK_OPERATIONS, actions);
-  for (let index = 0; index < groupsOfActions.length; index += 1) {
-    const actionsBulk = groupsOfActions[index];
-    const body = actionsBulk.flatMap((action) => action.body);
-    if (body.length === 0) {
-      continue;
+const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]) => {
+  let segment: BufferedEngineBulkAction[] = [];
+  const flushSegment = async () => {
+    const groupsOfActions = R.splitEvery(MAX_BULK_OPERATIONS, segment);
+    for (let index = 0; index < groupsOfActions.length; index += 1) {
+      const actionsBulk = groupsOfActions[index];
+      const body = actionsBulk.flatMap((action) => action.body);
+      if (body.length === 0) {
+        continue;
+      }
+      recordBufferedEngineBulkMetrics(actionsBulk);
+      await elBulk(actionsBulk[0].context, { refresh: actionsBulk[0].refresh, timeout: BULK_TIMEOUT, body });
     }
-    const directBodyLength = actionsBulk
-      .filter((action) => action.kind === 'direct')
-      .reduce((count, action) => count + action.body.length, 0);
-    const sideBodyLength = actionsBulk
-      .filter((action) => action.kind === 'side')
-      .reduce((count, action) => count + action.body.length, 0);
-    if (directBodyLength > 0) {
-      meterManager.directBulk(directBodyLength, { type: indexingType });
+  };
+  for (let index = 0; index <= actions.length; index += 1) {
+    const action = actions[index];
+    const segmentChanged = segment.length > 0
+      && (!action || action.context !== segment[0].context || action.refresh !== segment[0].refresh);
+    if (segmentChanged) {
+      await flushSegment();
+      segment = [];
     }
-    if (sideBodyLength > 0) {
-      meterManager.sideBulk(sideBodyLength, { type: indexingType });
+    if (action) {
+      segment.push(action);
     }
-    await elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body });
   }
+};
+
+const buildIndexBulkActions = async (
+  context: AuthContext,
+  user: AuthUser,
+  indexingType: string | undefined,
+  elements: Record<string, any>[],
+) => {
+  validateElementsToIndex(context, user, elements);
+  // 00. Relations must be transformed before indexing.
+  const transformedElements = await prepareIndexing(context, user, elements);
+  const actions: BufferedEngineBulkAction[] = transformedElements.map((doc) => ({
+    context,
+    refresh: true,
+    metric: { kind: 'direct', indexingType },
+    body: [
+      { index: { _index: doc._index, _id: doc._id ?? doc.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+      R.pipe(R.dissoc('_index'))(doc),
+    ],
+  }));
+  // 01. If relation, generate impacts for from and to sides
+  const cache: Record<string, BasicStoreBase | null | undefined> = {};
+  const impactedEntities = R.pipe(
+    R.filter((e: BasicStoreBase) => e.base_type === BASE_TYPE_RELATION),
+    R.map((e: StoreRelation) => {
+      const { fromType, fromRole, toType, toRole } = e;
+      const impacts = [];
+      // We impact target entities of the relation only if not global entities like
+      // MarkingDefinition (marking) / KillChainPhase (kill_chain_phase) / Label (tagging)
+      cache[e.fromId] = e.from;
+      cache[e.toId] = e.to;
+      const refField = isStixRefRelationship(e.entity_type) && isInferredIndex(e._index) ? ID_INFERRED : ID_INTERNAL;
+      const relationshipType = e.entity_type;
+      if (isImpactedRole(relationshipType, fromType, toType, fromRole)) {
+        if (relationshipType === RELATION_IN_PIR) {
+          const { pir_score } = e as any;
+          impacts.push({ refField, from: e.fromId, relationshipType, to: e.to, type: e.from?.entity_type, side: 'from', pir_score });
+        } else {
+          impacts.push({ refField, from: e.fromId, relationshipType, to: e.to, type: e.from?.entity_type, side: 'from' });
+        }
+      }
+      if (isImpactedRole(relationshipType, fromType, toType, toRole)) {
+        impacts.push({ refField, from: e.toId, relationshipType, to: e.from, type: e.to?.entity_type, side: 'to' });
+      }
+      return impacts;
+    }),
+    R.flatten,
+    R.groupBy((i) => i.from),
+  )(elements);
+  const elementsToUpdate = Object.keys(impactedEntities).map((entityId) => {
+    const entity = cache[entityId];
+    const targets = impactedEntities[entityId];
+    // Build document fields to update ( per relation type )
+    const targetsByRelation = R.groupBy((i: any) => `${i.relationshipType}|${i.refField}`, targets as any);
+    const targetsElements = Object.keys(targetsByRelation).map((relTypeAndField) => {
+      const [relType, refField] = relTypeAndField.split('|');
+      const data: any = targetsByRelation[relTypeAndField];
+      const resolvedData = data.map((d: any) => {
+        return { id: d.to.internal_id, side: d.side, type: d.type, pir_score: d.pir_score };
+      });
+      return { relation: relType, field: refField, elements: resolvedData };
+    });
+    // Create params and scripted update
+    const params: any = { updated_at: now() };
+    const sources = targetsElements.map((t) => {
+      const field = buildRefRelationKey(t.relation, t.field);
+      let script = `if (ctx._source['${field}'] == null) ctx._source['${field}'] = [];`;
+      if (isStixRefUnidirectionalRelationship(t.relation)) {
+        // don't try to add unidirectional ref rel if already present (issue#7535)
+        script += `for(refId in params['${field}']) {
+          if(!ctx._source['${field}'].contains(refId)) { ctx._source['${field}'].add(refId) }} `;
+      } else {
+        script += `ctx._source['${field}'].addAll(params['${field}']);`;
+      }
+      const fromSide = t.elements.find((e: any) => e.side === 'from');
+      const toSide = t.elements.find((e: any) => e.side === 'to');
+      if (fromSide && isStixRefRelationship(t.relation)) {
+        // updated_at and modified only updated for ref relationships
+        if (isUpdatedAtObject(fromSide.type)) {
+          script += 'ctx._source[\'updated_at\'] = params.updated_at;';
+        }
+        if (isModifiedObject(fromSide.type)) {
+          script += 'ctx._source[\'modified\'] = params.updated_at;';
+        }
+      }
+      // freshness of an entity updated for any relationship
+      if ((fromSide && isUpdatedAtObject(fromSide.type)) || (toSide && isUpdatedAtObject(toSide.type))) {
+        script += 'ctx._source[\'refreshed_at\'] = params.updated_at;';
+      }
+      // Add Pir information for in-pir relationships
+      if (t.relation === RELATION_IN_PIR) {
+        // remove pir_information concerning the pir and add the new pir_information
+        script += `
+            if (ctx._source.containsKey('pir_information') && ctx._source['pir_information'] != null) {
+              ctx._source['pir_information'].removeIf(item -> params.pir_ids.contains(item.pir_id));
+              ctx._source['pir_information'].addAll(params.new_pir_information);
+            } else { ctx._source['pir_information'] = params.new_pir_information; }
+          `;
+      }
+      return script;
+    });
+    // Concat sources scripts by adding a ';' between each script to close each final script line
+    const source = sources.length > 1 ? R.join(' ', sources) : `${R.head(sources)}`;
+    // Construct params
+    for (let index = 0; index < targetsElements.length; index += 1) {
+      const targetElement = targetsElements[index];
+      params[buildRefRelationKey(targetElement.relation, targetElement.field)] = targetElement.elements.map((e: any) => e.id);
+    }
+    // Add new_pir_information params
+    const pirElements = targetsElements.filter((e) => e.relation === RELATION_IN_PIR);
+    for (let index = 0; index < pirElements.length; index += 1) {
+      const pirElement = pirElements[index];
+      params.new_pir_information = pirElement.elements
+        .map((e: any) => ({
+          pir_id: e.id,
+          pir_score: e.pir_score,
+          last_pir_score_date: params.updated_at,
+        }));
+      params.pir_ids = pirElement.elements.map((e: any) => e.id);
+    }
+    return { ...entity, id: entityId, data: { script: { source, params } } };
+  });
+  // 02. Commit rows and relation denormalization in one ordered bulk request when possible.
+  actions.push(...elementsToUpdate.map((doc: any) => ({
+    context,
+    refresh: true,
+    metric: { kind: 'side' as const, indexingType },
+    body: [
+      { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+      R.dissoc('_index', doc.data),
+    ],
+  })));
+  return { actions, indexedCount: transformedElements.length };
 };
 
 const elIndexElementsNow = async (
@@ -5583,129 +5720,10 @@ const elIndexElementsNow = async (
   indexingType: string | undefined,
   elements: Record<string, any>[],
 ) => {
-  validateElementsToIndex(context, user, elements);
   const elIndexElementsFn = async () => {
-    // 00. Relations must be transformed before indexing.
-    const transformedElements = await prepareIndexing(context, user, elements);
-    const bulkActions: IndexBulkAction[] = transformedElements.map((doc) => ({
-      kind: 'direct',
-      body: [
-        { index: { _index: doc._index, _id: doc._id ?? doc.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-        R.pipe(R.dissoc('_index'))(doc),
-      ],
-    }));
-    // 01. If relation, generate impacts for from and to sides
-    const cache: Record<string, BasicStoreBase | null | undefined> = {};
-    const impactedEntities = R.pipe(
-      R.filter((e: BasicStoreBase) => e.base_type === BASE_TYPE_RELATION),
-      R.map((e: StoreRelation) => {
-        const { fromType, fromRole, toType, toRole } = e;
-        const impacts = [];
-        // We impact target entities of the relation only if not global entities like
-        // MarkingDefinition (marking) / KillChainPhase (kill_chain_phase) / Label (tagging)
-        cache[e.fromId] = e.from;
-        cache[e.toId] = e.to;
-        const refField = isStixRefRelationship(e.entity_type) && isInferredIndex(e._index) ? ID_INFERRED : ID_INTERNAL;
-        const relationshipType = e.entity_type;
-        if (isImpactedRole(relationshipType, fromType, toType, fromRole)) {
-          if (relationshipType === RELATION_IN_PIR) {
-            const { pir_score } = e as any;
-            impacts.push({ refField, from: e.fromId, relationshipType, to: e.to, type: e.from?.entity_type, side: 'from', pir_score });
-          } else {
-            impacts.push({ refField, from: e.fromId, relationshipType, to: e.to, type: e.from?.entity_type, side: 'from' });
-          }
-        }
-        if (isImpactedRole(relationshipType, fromType, toType, toRole)) {
-          impacts.push({ refField, from: e.toId, relationshipType, to: e.from, type: e.to?.entity_type, side: 'to' });
-        }
-        return impacts;
-      }),
-      R.flatten,
-      R.groupBy((i) => i.from),
-    )(elements);
-    const elementsToUpdate = Object.keys(impactedEntities).map((entityId) => {
-      const entity = cache[entityId];
-      const targets = impactedEntities[entityId];
-      // Build document fields to update ( per relation type )
-      const targetsByRelation = R.groupBy((i: any) => `${i.relationshipType}|${i.refField}`, targets as any);
-      const targetsElements = Object.keys(targetsByRelation).map((relTypeAndField) => {
-        const [relType, refField] = relTypeAndField.split('|');
-        const data: any = targetsByRelation[relTypeAndField];
-        const resolvedData = data.map((d: any) => {
-          return { id: d.to.internal_id, side: d.side, type: d.type, pir_score: d.pir_score };
-        });
-        return { relation: relType, field: refField, elements: resolvedData };
-      });
-      // Create params and scripted update
-      const params: any = { updated_at: now() };
-      const sources = targetsElements.map((t) => {
-        const field = buildRefRelationKey(t.relation, t.field);
-        let script = `if (ctx._source['${field}'] == null) ctx._source['${field}'] = [];`;
-        if (isStixRefUnidirectionalRelationship(t.relation)) {
-          // don't try to add unidirectional ref rel if already present (issue#7535)
-          script += `for(refId in params['${field}']) {
-          if(!ctx._source['${field}'].contains(refId)) { ctx._source['${field}'].add(refId) }} `;
-        } else {
-          script += `ctx._source['${field}'].addAll(params['${field}']);`;
-        }
-        const fromSide = t.elements.find((e: any) => e.side === 'from');
-        const toSide = t.elements.find((e: any) => e.side === 'to');
-        if (fromSide && isStixRefRelationship(t.relation)) {
-          // updated_at and modified only updated for ref relationships
-          if (isUpdatedAtObject(fromSide.type)) {
-            script += 'ctx._source[\'updated_at\'] = params.updated_at;';
-          }
-          if (isModifiedObject(fromSide.type)) {
-            script += 'ctx._source[\'modified\'] = params.updated_at;';
-          }
-        }
-        // freshness of an entity updated for any relationship
-        if ((fromSide && isUpdatedAtObject(fromSide.type)) || (toSide && isUpdatedAtObject(toSide.type))) {
-          script += 'ctx._source[\'refreshed_at\'] = params.updated_at;';
-        }
-        // Add Pir information for in-pir relationships
-        if (t.relation === RELATION_IN_PIR) {
-          // remove pir_information concerning the pir and add the new pir_information
-          script += `
-            if (ctx._source.containsKey('pir_information') && ctx._source['pir_information'] != null) {
-              ctx._source['pir_information'].removeIf(item -> params.pir_ids.contains(item.pir_id));
-              ctx._source['pir_information'].addAll(params.new_pir_information);
-            } else { ctx._source['pir_information'] = params.new_pir_information; }
-          `;
-        }
-        return script;
-      });
-      // Concat sources scripts by adding a ';' between each script to close each final script line
-      const source = sources.length > 1 ? R.join(' ', sources) : `${R.head(sources)}`;
-      // Construct params
-      for (let index = 0; index < targetsElements.length; index += 1) {
-        const targetElement = targetsElements[index];
-        params[buildRefRelationKey(targetElement.relation, targetElement.field)] = targetElement.elements.map((e: any) => e.id);
-      }
-      // Add new_pir_information params
-      const pirElements = targetsElements.filter((e) => e.relation === RELATION_IN_PIR);
-      for (let index = 0; index < pirElements.length; index += 1) {
-        const pirElement = pirElements[index];
-        params.new_pir_information = pirElement.elements
-          .map((e: any) => ({
-            pir_id: e.id,
-            pir_score: e.pir_score,
-            last_pir_score_date: params.updated_at,
-          }));
-        params.pir_ids = pirElement.elements.map((e: any) => e.id);
-      }
-      return { ...entity, id: entityId, data: { script: { source, params } } };
-    });
-    // 02. Commit rows and relation denormalization in one ordered bulk request when possible.
-    bulkActions.push(...elementsToUpdate.map((doc: any) => ({
-      kind: 'side' as const,
-      body: [
-        { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-        R.dissoc('_index', doc.data),
-      ],
-    })));
-    await executeIndexBulkActions(context, indexingType, bulkActions);
-    return transformedElements.length;
+    const built = await buildIndexBulkActions(context, user, indexingType, elements);
+    await executeBufferedEngineBulkActions(built.actions);
+    return built.indexedCount;
   };
   return telemetry(context, user, `INSERT ${indexingType}`, {
     [ATTR_DB_NAMESPACE]: 'search_engine',
@@ -5717,98 +5735,78 @@ const elIndexElementsNow = async (
   }, elIndexElementsFn);
 };
 
-const flushBufferedUpdateElements = async (writes: BufferedUpdateWrite[]) => {
-  const groups: Array<{ context: AuthContext; user: AuthUser; writes: BufferedUpdateWrite[] }> = [];
-  writes.forEach((write) => {
-    const existingGroup = groups.find((group) => group.context === write.context && group.user === write.user);
-    if (existingGroup) {
-      existingGroup.writes.push(write);
-    } else {
-      groups.push({ context: write.context, user: write.user, writes: [write] });
-    }
-  });
-
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-    const groupsOfUpdates = R.splitEvery(MAX_BULK_OPERATIONS, group.writes);
-    for (let updateIndex = 0; updateIndex < groupsOfUpdates.length; updateIndex += 1) {
-      const bodyUpdate = groupsOfUpdates[updateIndex].flatMap((write) => [
-        {
-          update: {
-            _index: write.instance._index,
-            _id: write.instance._id ?? write.instance.internal_id,
-            retry_on_conflict: ES_RETRY_ON_CONFLICT,
-          },
+const buildBufferedUpdateActions = (writes: BufferedUpdateWrite[]): BufferedEngineBulkAction[] => {
+  return writes.map((write) => ({
+    context: write.context,
+    refresh: true,
+    body: [
+      {
+        update: {
+          _index: write.instance._index,
+          _id: write.instance._id ?? write.instance.internal_id,
+          retry_on_conflict: ES_RETRY_ON_CONFLICT,
         },
-        buildReplaceScriptBody({ doc: write.dataToReplace }),
-      ]);
-      if (bodyUpdate.length > 0) {
-        await elBulk(group.context, { refresh: true, timeout: BULK_TIMEOUT, body: bodyUpdate });
-      }
-    }
-  }
+      },
+      buildReplaceScriptBody({ doc: write.dataToReplace }),
+    ],
+  }));
 };
 
-const flushBufferedDeleteElements = async (writes: BufferedDeleteWrite[]) => {
-  const groups: Array<{ context: AuthContext; forceRefresh: boolean; elements: BasicStoreBase[] }> = [];
-  writes.forEach((write) => {
-    const existingGroup = groups.find((group) => group.context === write.context && group.forceRefresh === write.forceRefresh);
-    if (existingGroup) {
-      existingGroup.elements.push(...write.elements);
-    } else {
-      groups.push({ context: write.context, forceRefresh: write.forceRefresh, elements: [...write.elements] });
-    }
-  });
-
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-    await elDeleteInstancesNow(group.context, group.elements, { forceRefresh: group.forceRefresh });
-  }
+const buildBufferedDeleteActions = (writes: BufferedDeleteWrite[]): BufferedEngineBulkAction[] => {
+  return writes.flatMap((write) => write.elements.map((element) => ({
+    context: write.context,
+    refresh: write.forceRefresh,
+    body: [
+      { delete: { _index: element._index, _id: element._id ?? element.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+    ],
+  })));
 };
 
-const flushBufferedBulkUpdateOperations = async (writes: BufferedBulkUpdateWrite[]) => {
-  const groups: Array<{ context: AuthContext; forceRefresh: boolean; operations: BufferedBulkUpdateOperation[] }> = [];
-  writes.forEach((write) => {
-    const existingGroup = groups.find((group) => group.context === write.context && group.forceRefresh === write.forceRefresh);
-    if (existingGroup) {
-      existingGroup.operations.push(...write.operations);
-    } else {
-      groups.push({ context: write.context, forceRefresh: write.forceRefresh, operations: [...write.operations] });
-    }
-  });
-
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-    await executeBufferedBulkUpdateOperations(group.context, group.operations, group.forceRefresh);
-  }
+const buildBufferedBulkUpdateActions = (writes: BufferedBulkUpdateWrite[]): BufferedEngineBulkAction[] => {
+  return writes.flatMap((write) => write.operations.map((operation) => ({
+    context: write.context,
+    refresh: write.forceRefresh,
+    body: [
+      { update: { _index: operation.index, _id: operation.documentId, retry_on_conflict: operation.retry ?? ES_RETRY_ON_CONFLICT } },
+      operation.body,
+    ],
+  })));
 };
 
 const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
   const orderedWrites = state.writes.slice().sort((left, right) => left.sequence - right.sequence);
   let segment: BufferedEngineWrite[] = [];
+  const actions: BufferedEngineBulkAction[] = [];
+  const appendSegmentActions = async () => {
+    if (segment.length === 0) {
+      return;
+    }
+    if (segment[0].kind === 'index') {
+      actions.push(...await buildBufferedIndexActions(segment as BufferedIndexWrite[]));
+    } else if (segment[0].kind === 'raw-index') {
+      actions.push(...buildBufferedRawIndexActions(segment as BufferedRawIndexWrite[]));
+    } else if (segment[0].kind === 'direct-index') {
+      actions.push(...buildBufferedDirectIndexActions(segment as BufferedDirectIndexWrite[]));
+    } else if (segment[0].kind === 'update') {
+      actions.push(...buildBufferedUpdateActions(segment as BufferedUpdateWrite[]));
+    } else if (segment[0].kind === 'delete') {
+      actions.push(...buildBufferedDeleteActions(segment as BufferedDeleteWrite[]));
+    } else {
+      actions.push(...buildBufferedBulkUpdateActions(segment as BufferedBulkUpdateWrite[]));
+    }
+  };
   for (let index = 0; index <= orderedWrites.length; index += 1) {
     const write = orderedWrites[index];
     const kindChanged = segment.length > 0 && (!write || write.kind !== segment[0].kind);
     if (kindChanged) {
-      if (segment[0].kind === 'index') {
-        await flushBufferedIndexElements(segment as BufferedIndexWrite[]);
-      } else if (segment[0].kind === 'raw-index') {
-        await flushBufferedRawIndexElements(segment as BufferedRawIndexWrite[]);
-      } else if (segment[0].kind === 'direct-index') {
-        await flushBufferedDirectIndexElements(segment as BufferedDirectIndexWrite[]);
-      } else if (segment[0].kind === 'update') {
-        await flushBufferedUpdateElements(segment as BufferedUpdateWrite[]);
-      } else if (segment[0].kind === 'delete') {
-        await flushBufferedDeleteElements(segment as BufferedDeleteWrite[]);
-      } else {
-        await flushBufferedBulkUpdateOperations(segment as BufferedBulkUpdateWrite[]);
-      }
+      await appendSegmentActions();
       segment = [];
     }
     if (write) {
       segment.push(write);
     }
   }
+  await executeBufferedEngineBulkActions(actions);
 };
 
 export const elIndexElements = async (

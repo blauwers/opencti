@@ -208,6 +208,48 @@ describe('batch engine writes', () => {
     await expect(internalLoadById(testContext, ADMIN_USER, deletedMalware.internal_id)).resolves.toBeUndefined();
   });
 
+  it('commits mixed create update and delete writes through one batch boundary', async () => {
+    const mixedDeletedMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch mixed delete ${uuidv4()}` });
+    cleanupMalwares.push(mixedDeletedMalware);
+    let mixedCreatedMalware: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          mixedCreatedMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch mixed create ${uuidv4()}` });
+          cleanupMalwares.push(mixedCreatedMalware);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdateElement(testContext, ADMIN_USER, {
+            ...mixedCreatedMalware,
+            description: 'mixed buffered update',
+          });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elDeleteInstances(testContext, [mixedDeletedMalware]);
+          const bufferedCreated = await internalLoadById(testContext, ADMIN_USER, mixedCreatedMalware.internal_id) as any;
+          const bufferedDeleted = await internalLoadById(testContext, ADMIN_USER, mixedDeletedMalware.internal_id);
+          expect(bufferedCreated?.description).toBe('mixed buffered update');
+          expect(bufferedDeleted).toBeUndefined();
+          return null;
+        },
+      },
+    ]);
+
+    const committedCreated = await internalLoadById(testContext, ADMIN_USER, mixedCreatedMalware.internal_id) as any;
+    expect(committedCreated?.description).toBe('mixed buffered update');
+    await expect(internalLoadById(testContext, ADMIN_USER, mixedDeletedMalware.internal_id)).resolves.toBeUndefined();
+  });
+
   it('buffers direct document and replace updates inside the batch boundary', async () => {
     const rawUpdateMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch raw update ${uuidv4()}` });
     cleanupMalwares.push(rawUpdateMalware);
