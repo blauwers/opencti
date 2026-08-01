@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { elDeleteElements, elDeleteInstances, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById } from '../../../src/database/middleware';
-import { internalLoadById } from '../../../src/database/middleware-loader';
+import { fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { addMalware } from '../../../src/domain/malware';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
@@ -244,5 +244,85 @@ describe('batch engine writes', () => {
     const committedSource = await internalLoadById(testContext, ADMIN_USER, source.internal_id) as any;
     expect(committedSource[relationKey]).not.toContain(target.internal_id);
     await expect(internalLoadById(testContext, ADMIN_USER, target.internal_id)).resolves.toBeUndefined();
+  });
+
+  it('keeps nested entity and relation creation in one backend batch scope', async () => {
+    let source: any;
+    let target: any;
+    let relation: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          source = await addMalware(testContext, ADMIN_USER, { name: `Batch nested source ${uuidv4()}` });
+          cleanupMalwares.push(source);
+          return source;
+        },
+      },
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          target = await addMalware(testContext, ADMIN_USER, { name: `Batch nested target ${uuidv4()}` });
+          cleanupMalwares.push(target);
+          return target;
+        },
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => {
+          relation = await addStixCoreRelationship(testContext, ADMIN_USER, {
+            relationship_type: RELATION_RELATED_TO,
+            fromId: source.id,
+            toId: target.id,
+          });
+          return relation;
+        },
+      },
+    ]);
+
+    const committedRelation = await internalLoadById(testContext, ADMIN_USER, relation.internal_id) as any;
+    expect(committedRelation.fromId).toBe(source.internal_id);
+    expect(committedRelation.toId).toBe(target.internal_id);
+  });
+
+  it('deduplicates repeated relation creation inside one backend batch scope', async () => {
+    const source = await addMalware(testContext, ADMIN_USER, { name: `Batch duplicate source ${uuidv4()}` });
+    const target = await addMalware(testContext, ADMIN_USER, { name: `Batch duplicate target ${uuidv4()}` });
+    cleanupMalwares.push(source, target);
+    let firstRelation: any;
+    let secondRelation: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => {
+          firstRelation = await addStixCoreRelationship(testContext, ADMIN_USER, {
+            relationship_type: RELATION_RELATED_TO,
+            fromId: source.id,
+            toId: target.id,
+          });
+          return firstRelation;
+        },
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => {
+          secondRelation = await addStixCoreRelationship(testContext, ADMIN_USER, {
+            relationship_type: RELATION_RELATED_TO,
+            fromId: source.id,
+            toId: target.id,
+          });
+          return secondRelation;
+        },
+      },
+    ]);
+
+    expect(secondRelation.internal_id).toBe(firstRelation.internal_id);
+    const committedRelations = await fullRelationsList(testContext, ADMIN_USER, RELATION_RELATED_TO, {
+      fromId: source.internal_id,
+      toId: target.internal_id,
+    });
+    expect(committedRelations).toHaveLength(1);
   });
 });

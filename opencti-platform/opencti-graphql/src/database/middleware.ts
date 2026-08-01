@@ -182,7 +182,7 @@ import {
 import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
 import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
-import { BatchMutationKind, BatchSideEffectKind, executeSingleBatchMutation, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import { BatchMutationKind, BatchSideEffectKind, executeSingleBatchMutation, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../modules/batch/batch-executor';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
@@ -3270,6 +3270,11 @@ export const getExistingRelations = async (
   const { from, to, relationship_type: relationshipType } = input;
   const { fromRule } = opts;
   const existingRelationships: StoreProxyRelation[] = [];
+  const inputIds = getInputIds(relationshipType, input, false);
+  if (isBatchWriteBoundaryOpen()) {
+    const bufferedRelationships = await internalFindByIds<BasicStoreRelation>(context, SYSTEM_USER, inputIds, { type: relationshipType }) as StoreProxyRelation[];
+    pushAll(existingRelationships, bufferedRelationships);
+  }
   if (fromRule) {
     // In case inferred rule, try to find the relation with basic filters
     // Only in inferred indices.
@@ -3286,7 +3291,7 @@ export const getExistingRelations = async (
     const deduplicationFilters = buildRelationDeduplicationFilters(input);
     const searchFilters = {
       mode: FilterMode.Or,
-      filters: [{ key: ['ids'], values: getInputIds(relationshipType, input, false) }],
+      filters: [{ key: ['ids'], values: inputIds }],
       filterGroups: [{
         mode: FilterMode.And,
         filters: [
@@ -3316,7 +3321,7 @@ export const getExistingRelations = async (
     const manualRelationships = await topRelationsList(context, SYSTEM_USER, relationshipType, manualArgs);
     pushAll(existingRelationships, manualRelationships);
   }
-  return existingRelationships;
+  return R.uniqBy((relation) => relation.internal_id, existingRelationships);
 };
 type CreateRelationRawOpts = UpdateEventOpts & {
   fromRule?: string;
