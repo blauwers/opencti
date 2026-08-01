@@ -16,9 +16,10 @@ export const buildTestConfig = (include: string[]) => defineConfig({
       reporter: ['text', 'json', 'html'],
       clean: false,
     },
-    alias: {
-      graphql: fileURLToPath(new URL('node_modules/graphql/index.js', import.meta.url)),
-    },
+    alias: [{
+      find: /^graphql$/,
+      replacement: fileURLToPath(new URL('node_modules/graphql/index.js', import.meta.url)),
+    }],
   },
 });
 

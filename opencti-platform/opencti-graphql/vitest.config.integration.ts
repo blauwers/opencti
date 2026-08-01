@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import graphql from '@rollup/plugin-graphql';
 import { BaseSequencer, type TestSpecification } from 'vitest/node';
@@ -20,6 +21,10 @@ export const buildIntegrationTestConfig = (include: string[]) => defineConfig({
     },
     maxWorkers: 1,
     isolate: false,
+    alias: [{
+      find: /^graphql$/,
+      replacement: fileURLToPath(new URL('node_modules/graphql/index.js', import.meta.url)),
+    }],
     sequence: {
       shuffle: false,
       sequencer: class Sequencer extends BaseSequencer {
