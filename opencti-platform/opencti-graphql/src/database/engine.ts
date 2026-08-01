@@ -247,6 +247,14 @@ type BufferedIndexWrite = {
   elements: Record<string, any>[];
 };
 
+type BufferedRawIndexWrite = {
+  kind: 'raw-index';
+  sequence: number;
+  context: AuthContext;
+  documents: Record<string, any>[];
+  overlayElements: BasicStoreBase[];
+};
+
 type BufferedUpdateWrite = {
   kind: 'update';
   sequence: number;
@@ -281,7 +289,7 @@ type BufferedBulkUpdateWrite = {
   forceRefresh: boolean;
 };
 
-type BufferedEngineWrite = BufferedIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite | BufferedBulkUpdateWrite;
+type BufferedEngineWrite = BufferedIndexWrite | BufferedRawIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite | BufferedBulkUpdateWrite;
 
 type BufferedEngineState = {
   nextSequence: number;
@@ -1952,13 +1960,28 @@ const getOrderedBufferedEngineWrites = (): BufferedEngineWrite[] => {
   return (getBufferedEngineState()?.writes ?? []).slice().sort((left, right) => left.sequence - right.sequence);
 };
 
+const matchesBufferedEngineIndex = (elementIndex: string | undefined, requestedIndex: string): boolean => {
+  if (!elementIndex) {
+    return false;
+  }
+  if (requestedIndex.endsWith('*')) {
+    return elementIndex.startsWith(requestedIndex.slice(0, -1));
+  }
+  return elementIndex === requestedIndex || elementIndex.startsWith(`${requestedIndex}-`);
+};
+
 const matchesBufferedEngineElement = (
   element: Record<string, any>,
   ids: string[],
   types: string | string[] | null | undefined,
+  indices: string | string[] | null | undefined,
 ): boolean => {
   const elementIds = getInstanceIds(element);
   if (!elementIds.some((id) => ids.includes(id))) {
+    return false;
+  }
+  const queryIndices = Array.isArray(indices) ? indices : (indices ? indices.split(',') : []);
+  if (queryIndices.length > 0 && !queryIndices.some((index) => matchesBufferedEngineIndex(element._index, index))) {
     return false;
   }
   const typeList = Array.isArray(types) ? types : (types ? [types] : []);
@@ -1984,26 +2007,33 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   hits: T[],
   ids: string[],
   types: string | string[] | null | undefined,
+  indices: string | string[] | null | undefined,
 ): T[] => {
   const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
   getOrderedBufferedEngineWrites().forEach((write) => {
     if (write.kind === 'bulk-update') {
       write.operations.forEach((operation) => {
         const existing = mergedHits.get(operation.internalId);
-        if (existing) {
+        if (existing && matchesBufferedEngineElement(existing, ids, types, indices) && matchesBufferedEngineIndex(existing._index, operation.index)) {
           mergedHits.set(operation.internalId, operation.apply(existing) as T);
         }
       });
       return;
     }
-    const elements = write.kind === 'update' ? [write.instance] : write.elements;
+    const elements = write.kind === 'update' ? [write.instance] : (write.kind === 'raw-index' ? write.overlayElements : write.elements);
     elements.forEach((element) => {
       const existing = mergedHits.get(element.internal_id);
+      const matchesQuery = matchesBufferedEngineElement(element, ids, types, indices);
       if (write.kind === 'delete') {
-        mergedHits.delete(element.internal_id);
+        if (matchesQuery) {
+          mergedHits.delete(element.internal_id);
+        }
         return;
       }
-      if (!existing && !matchesBufferedEngineElement(element, ids, types)) {
+      if (!existing && !matchesQuery) {
+        return;
+      }
+      if (existing && !matchesQuery) {
         return;
       }
       if (write.kind === 'update') {
@@ -2138,7 +2168,7 @@ export const elFindByIds = async <T extends BasicStoreBase>(
       pushAll(hits, convertedHits);
     }
   }
-  const mergedHits = mergeBufferedEngineElements(hits, processIds, types);
+  const mergedHits = mergeBufferedEngineElements(hits, processIds, types, computedIndices);
   if (toMap) {
     return elConvertHitsToMap<T>(mergedHits, { mapWithAllIds });
   }
@@ -4351,7 +4381,7 @@ const mergeBufferedRelatedRelations = (hits: BasicStoreRelation[], targetIds: st
   if (relationIds.length === 0) {
     return [];
   }
-  return mergeBufferedEngineElements(hits, R.uniq(relationIds), ABSTRACT_BASIC_RELATIONSHIP)
+  return mergeBufferedEngineElements(hits, R.uniq(relationIds), ABSTRACT_BASIC_RELATIONSHIP, undefined)
     .filter((relation) => isRelationConnectedToIds(relation, targetIds));
 };
 const getRelatedRelations = async (
@@ -4627,6 +4657,186 @@ export const computeDeleteElementsImpacts = async (
   return elementsImpact;
 };
 
+const REINDEX_SOURCE_FIELDS_TO_REMOVE = [
+  'fromType',
+  'toType',
+  'spec_version',
+  'representative',
+  'objectOrganization',
+  'rel_has-reference',
+  'rel_has-reference.internal_id',
+  'i_valid_from_day',
+  'i_valid_until_day',
+  'i_valid_from_month',
+  'i_valid_until_month',
+  'i_valid_from_year',
+  'i_valid_until_year',
+  'i_stop_time_year',
+  'i_start_time_year',
+  'i_start_time_month',
+  'i_stop_time_month',
+  'i_start_time_day',
+  'i_stop_time_day',
+  'i_created_at_year',
+  'i_created_at_month',
+  'i_created_at_day',
+  'rel_can-share',
+  'rel_can-share.internal_id',
+  'x_opencti_cvss_vector',
+  'x_opencti_cvss_v2_vector',
+  'x_opencti_cvss_v4_vector',
+  'authorized_members',
+];
+
+const cleanReindexSourceDocument = (
+  source: Record<string, any>,
+  destIndex: string,
+  opts: { dbId?: string; sourceUpdate?: any } = {},
+) => {
+  const { dbId, sourceUpdate = {} } = opts;
+  const document = { ...source, ...sourceUpdate, _index: destIndex };
+  REINDEX_SOURCE_FIELDS_TO_REMOVE.forEach((field) => {
+    delete document[field];
+  });
+  if (dbId) {
+    document._id = dbId;
+  }
+  return document;
+};
+
+const bufferedEngineIndicesOverlap = (left: string | undefined, right: string | undefined): boolean => {
+  if (!left || !right) {
+    return false;
+  }
+  return matchesBufferedEngineIndex(left, right) || matchesBufferedEngineIndex(right, left);
+};
+
+const applyBufferedWritesToRawDocument = (source: Record<string, any>, internalId: string, sourceIndex: string): {
+  document?: Record<string, any>;
+  needsVisibleElement: boolean;
+} => {
+  let document: Record<string, any> | undefined = source;
+  let needsVisibleElement = false;
+  getOrderedBufferedEngineWrites().forEach((write) => {
+    if (!document) {
+      return;
+    }
+    if (write.kind === 'bulk-update') {
+      write.operations
+        .filter((operation) => operation.internalId === internalId && bufferedEngineIndicesOverlap(operation.index, sourceIndex))
+        .forEach((operation) => {
+          document = operation.apply(document as Record<string, any>);
+        });
+      return;
+    }
+    if (write.kind === 'update' && write.instance.internal_id === internalId && bufferedEngineIndicesOverlap(write.instance._index, sourceIndex)) {
+      document = applyBufferedUpdate(document, write.dataToReplace);
+      return;
+    }
+    if (write.kind === 'delete' && write.elements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex))) {
+      document = undefined;
+      return;
+    }
+    if ((write.kind === 'index' && write.elements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex)))
+      || (write.kind === 'raw-index' && write.overlayElements.some((element) => element.internal_id === internalId && bufferedEngineIndicesOverlap(element._index, sourceIndex)))) {
+      needsVisibleElement = true;
+    }
+  });
+  return { document, needsVisibleElement };
+};
+
+const buildRawDocumentFromVisibleElement = async (
+  element: BasicStoreBase,
+  destIndex: string,
+  opts: { dbId?: string; sourceUpdate?: any } = {},
+) => {
+  const prepared = await prepareIndexingElement(structuredClone(element));
+  return cleanReindexSourceDocument(prepared, destIndex, opts);
+};
+
+const loadRawReindexDocuments = async (
+  context: AuthContext,
+  user: AuthUser,
+  ids: string[],
+  sourceIndex: string,
+  destIndex: string,
+  opts: { dbId?: string; sourceUpdate?: any } = {},
+) => {
+  const visibleElements = await elFindByIds<BasicStoreBase>(context, user, ids, { indices: [sourceIndex], withoutRels: false }) as BasicStoreBase[];
+  const visibleElementsById = new Map(visibleElements.map((element) => [element.internal_id, element]));
+  const documentsById = new Map<string, Record<string, any>>();
+  const groups = R.splitEvery(MAX_BULK_OPERATIONS, ids);
+  for (let index = 0; index < groups.length; index += 1) {
+    const idsBulk = groups[index];
+    const query = {
+      index: sourceIndex,
+      size: idsBulk.length,
+      track_total_hits: false,
+      body: {
+        query: {
+          ids: {
+            values: idsBulk,
+          },
+        },
+      },
+    };
+    const data = await elRawSearch(context, user, 'reindex', query);
+    const rawHits = data.hits.hits ?? [];
+    rawHits.forEach((hit: any) => {
+      const internalId = hit._source.internal_id;
+      if (!visibleElementsById.has(internalId)) {
+        return;
+      }
+      const buffered = applyBufferedWritesToRawDocument(hit._source, internalId, sourceIndex);
+      if (buffered.document && !buffered.needsVisibleElement) {
+        documentsById.set(internalId, cleanReindexSourceDocument(buffered.document, destIndex, opts));
+      }
+    });
+  }
+  for (let index = 0; index < visibleElements.length; index += 1) {
+    const element = visibleElements[index];
+    if (!documentsById.has(element.internal_id)) {
+      documentsById.set(element.internal_id, await buildRawDocumentFromVisibleElement(element, destIndex, opts));
+    }
+  }
+  return ids.flatMap((id) => {
+    const document = documentsById.get(id);
+    return document ? [document] : [];
+  });
+};
+
+const bufferReindexElements = async (
+  context: AuthContext,
+  user: AuthUser,
+  ids: string[],
+  sourceIndex: string,
+  destIndex: string,
+  opts: { dbId?: string; sourceUpdate?: any } = {},
+) => {
+  const state = getOrCreateBufferedEngineState();
+  if (!state) {
+    return false;
+  }
+  const documents = await loadRawReindexDocuments(context, user, ids, sourceIndex, destIndex, opts);
+  if (documents.length === 0) {
+    return true;
+  }
+  const overlayElements = await elConvertHits<BasicStoreBase>(documents.map((document) => ({
+    _index: document._index,
+    _id: document._id ?? document.internal_id,
+    _source: R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+  })));
+  state.writes.push({
+    kind: 'raw-index',
+    sequence: state.nextSequence,
+    context,
+    documents,
+    overlayElements,
+  });
+  state.nextSequence += 1;
+  return true;
+};
+
 export const elReindexElements = async (
   context: AuthContext,
   user: AuthUser,
@@ -4635,6 +4845,9 @@ export const elReindexElements = async (
   destIndex: string,
   opts: { dbId?: string; sourceUpdate?: any } = {},
 ) => {
+  if (await bufferReindexElements(context, user, ids, sourceIndex, destIndex, opts)) {
+    return;
+  }
   const reindexOperation = async () => {
     const { dbId, sourceUpdate = {} } = opts;
     const sourceCleanupScript = "ctx._source.remove('fromType'); ctx._source.remove('toType'); "
@@ -5053,6 +5266,32 @@ const flushBufferedIndexElements = async (writes: BufferedIndexWrite[]) => {
   }
 };
 
+const flushBufferedRawIndexElements = async (writes: BufferedRawIndexWrite[]) => {
+  const groups: Array<{ context: AuthContext; documents: Record<string, any>[] }> = [];
+  writes.forEach((write) => {
+    const existingGroup = groups.find((group) => group.context === write.context);
+    if (existingGroup) {
+      existingGroup.documents.push(...write.documents);
+    } else {
+      groups.push({ context: write.context, documents: [...write.documents] });
+    }
+  });
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    const groupsOfDocuments = R.splitEvery(MAX_BULK_OPERATIONS, group.documents);
+    for (let documentIndex = 0; documentIndex < groupsOfDocuments.length; documentIndex += 1) {
+      const body = groupsOfDocuments[documentIndex].flatMap((document) => [
+        { index: { _index: document._index, _id: document._id ?? document.internal_id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+        R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+      ]);
+      if (body.length > 0) {
+        await elBulk(group.context, { refresh: true, timeout: BULK_TIMEOUT, body });
+      }
+    }
+  }
+};
+
 const getOrCreateBufferedEngineState = (): BufferedEngineState | undefined => {
   if (!isBatchWriteBoundaryOpen()) {
     return undefined;
@@ -5386,6 +5625,8 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
     if (kindChanged) {
       if (segment[0].kind === 'index') {
         await flushBufferedIndexElements(segment as BufferedIndexWrite[]);
+      } else if (segment[0].kind === 'raw-index') {
+        await flushBufferedRawIndexElements(segment as BufferedRawIndexWrite[]);
       } else if (segment[0].kind === 'update') {
         await flushBufferedUpdateElements(segment as BufferedUpdateWrite[]);
       } else if (segment[0].kind === 'delete') {

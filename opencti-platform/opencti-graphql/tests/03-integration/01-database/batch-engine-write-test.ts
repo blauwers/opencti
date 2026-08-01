@@ -1,11 +1,15 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { elDeleteElements, elDeleteInstances, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
+import { elDeleteElements, elDeleteInstances, elLoadById, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById } from '../../../src/database/middleware';
-import { fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
+import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { addMalware } from '../../../src/domain/malware';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
+import { INDEX_DELETED_OBJECTS } from '../../../src/database/utils';
+import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
+import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
+import { FilterMode, FilterOperator } from '../../../src/generated/graphql';
 import { buildRefRelationKey } from '../../../src/schema/general';
 import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
 import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
@@ -15,6 +19,17 @@ describe('batch engine writes', () => {
   let malware: any;
   let deletedMalware: any;
   const cleanupMalwares: any[] = [];
+  const cleanupSoftDeletedMalwareIds: string[] = [];
+
+  const findDeleteOperationsForMainEntity = (mainEntityId: string) => {
+    return fullEntitiesList<any>(testContext, ADMIN_USER, [ENTITY_TYPE_DELETE_OPERATION], {
+      filters: {
+        mode: FilterMode.And,
+        filters: [{ key: ['main_entity_id'], values: [mainEntityId], operator: FilterOperator.Eq }],
+        filterGroups: [],
+      },
+    });
+  };
 
   afterAll(async () => {
     if (malware) {
@@ -31,6 +46,12 @@ describe('batch engine writes', () => {
       const existing = await internalLoadById(testContext, ADMIN_USER, cleanupMalware.internal_id);
       if (existing) {
         await deleteElementById(testContext, ADMIN_USER, cleanupMalware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
+      }
+    }
+    for (let index = 0; index < cleanupSoftDeletedMalwareIds.length; index += 1) {
+      const deleteOperations = await findDeleteOperationsForMainEntity(cleanupSoftDeletedMalwareIds[index]);
+      for (let operationIndex = 0; operationIndex < deleteOperations.length; operationIndex += 1) {
+        await confirmDelete(testContext, ADMIN_USER, deleteOperations[operationIndex].internal_id);
       }
     }
   });
@@ -355,5 +376,50 @@ describe('batch engine writes', () => {
 
     await expect(internalLoadById(testContext, ADMIN_USER, target.internal_id)).resolves.toBeUndefined();
     await expect(internalLoadById(testContext, ADMIN_USER, relation.internal_id)).resolves.toBeUndefined();
+  });
+
+  it('keeps soft-delete reindex copies inside the batch boundary until commit', async () => {
+    const softDeleteMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch soft delete ${uuidv4()}` });
+    cleanupMalwares.push(softDeleteMalware);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elDeleteElements(testContext, ADMIN_USER, [softDeleteMalware], { forceDelete: false });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const bufferedTrashCopy = await elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] });
+          expect(bufferedTrashCopy?.internal_id).toBe(softDeleteMalware.internal_id);
+          throw new Error('abort soft delete batch');
+        },
+      },
+    ])).rejects.toThrow('abort soft delete batch');
+
+    await expect(internalLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id)).resolves.toBeDefined();
+    await expect(elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] })).resolves.toBeUndefined();
+  });
+
+  it('flushes soft-delete reindex copies through the batch boundary on commit', async () => {
+    const softDeleteMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch committed soft delete ${uuidv4()}` });
+    cleanupSoftDeletedMalwareIds.push(softDeleteMalware.internal_id);
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elDeleteElements(testContext, ADMIN_USER, [softDeleteMalware], { forceDelete: false });
+          return null;
+        },
+      },
+    ]);
+
+    await expect(internalLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id)).resolves.toBeUndefined();
+    await expect(elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] })).resolves.toBeDefined();
+    await expect(findDeleteOperationsForMainEntity(softDeleteMalware.internal_id)).resolves.toHaveLength(1);
   });
 });
