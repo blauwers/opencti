@@ -242,11 +242,11 @@ export const deleteFile = async (context: AuthContext, user: AuthUser, id: strin
  * @param {string[]} ids - Array of file IDs to delete
  * @returns {Promise<boolean>} True when all deletions complete
  */
-export const deleteFiles = async (context: AuthContext, user: AuthUser, ids: string[]) => {
+export const deleteFiles = async (context: AuthContext, user: AuthUser, ids: string[], opts: { forceDelete?: boolean } = {}) => {
   logApp.debug(`[FILE STORAGE] delete files ${ids} by ${user.user_email}`);
   for (let i = 0; i < ids.length; i += 1) {
     const id = ids[i];
-    await deleteFile(context, user, id);
+    await deleteFile(context, user, id, opts);
   }
   return true;
 };
@@ -764,7 +764,12 @@ export const ALL_MERGEABLE_FOLDERS = [IMPORT_STORAGE_PATH, EXPORT_STORAGE_PATH, 
  * @param user
  * @param element
  */
-export const deleteAllObjectFiles = async (context: AuthContext, user: AuthUser, element: BasicStoreObject) => {
+export const deleteAllObjectFiles = async (
+  context: AuthContext,
+  user: AuthUser,
+  element: BasicStoreObject,
+  opts: { forceDelete?: boolean } = {},
+) => {
   logApp.debug(`[FILE STORAGE] deleting all storage files for ${element.internal_id}`);
   let ids: string[];
   if (element.entity_type === ENTITY_TYPE_SUPPORT_PACKAGE) {
@@ -806,7 +811,7 @@ export const deleteAllObjectFiles = async (context: AuthContext, user: AuthUser,
     ids = [...importFiles, ...embeddedFiles, ...exportFiles, ...fromTemplateFiles, ...pendingFiles].map((file) => file.id);
   }
   logApp.debug('[FILE STORAGE] deleting all files with ids:', { ids });
-  return deleteFiles(context, user, ids);
+  return deleteFiles(context, user, ids, opts);
 };
 
 /**

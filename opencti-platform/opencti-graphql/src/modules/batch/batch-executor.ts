@@ -12,6 +12,7 @@ export enum BatchMutationKind {
 export enum BatchSideEffectKind {
   AutoEnrichment = 'AUTO_ENRICHMENT',
   CompatibilityProjection = 'COMPATIBILITY_PROJECTION',
+  FileLifecycle = 'FILE_LIFECYCLE',
 }
 
 export interface BatchSideEffect {

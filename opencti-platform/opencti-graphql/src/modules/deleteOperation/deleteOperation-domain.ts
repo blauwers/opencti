@@ -22,6 +22,7 @@ import { lockResources } from '../../lock/master-lock';
 import { RULE_PREFIX } from '../../schema/general';
 import { createRuleContent } from '../../rules/rules-utils';
 import { controlUserRestrictDeleteAgainstElement } from '../../utils/access';
+import { BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../batch/batch-executor';
 
 type ConfirmDeleteOptions = {
   isRestoring?: boolean;
@@ -252,10 +253,21 @@ export const processDeleteOperation = async (context: AuthContext, user: AuthUse
   if (mainDeletedEntity && isStixObject(mainDeletedEntity.entity_type)) {
     if (isRestoring) {
       // cluster restored: flag the files available for search again
-      await elUpdateRemovedFiles(mainDeletedEntity, false);
+      await registerBatchSideEffect({
+        kind: BatchSideEffectKind.FileLifecycle,
+        execute: async () => {
+          await elUpdateRemovedFiles(mainDeletedEntity, false);
+        },
+      });
     } else {
       // confirm delete: delete associated files permanently
-      await deleteAllObjectFiles(context, user, mainDeletedEntity);
+      const forceDeleteFilesAfterCommit = isBatchWriteBoundaryOpen();
+      await registerBatchSideEffect({
+        kind: BatchSideEffectKind.FileLifecycle,
+        execute: async () => {
+          await deleteAllObjectFiles(context, user, mainDeletedEntity, { forceDelete: forceDeleteFilesAfterCommit });
+        },
+      });
     }
   }
   // delete elements

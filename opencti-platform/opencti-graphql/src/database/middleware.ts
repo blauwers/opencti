@@ -4184,10 +4184,21 @@ export const internalDeleteElementById = async <T extends StoreObject>(
       const isTrashEnabled = conf.get('app:trash:enabled');
       if (isTrashEnabled && !forceDelete) {
         // mark indexed files as removed to exclude them from search
-        await elUpdateRemovedFiles(element, true);
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.FileLifecycle,
+          execute: async () => {
+            await elUpdateRemovedFiles(element, true);
+          },
+        });
       } else {
         // if trash is disabled globally or for this element, delete permanently
-        await deleteAllObjectFiles(context, user, element);
+        const forceDeleteFilesAfterCommit = isBatchWriteBoundaryOpen();
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.FileLifecycle,
+          execute: async () => {
+            await deleteAllObjectFiles(context, user, element, { forceDelete: forceDeleteFilesAfterCommit });
+          },
+        });
       }
       // Delete all linked elements
       const forceRefresh = opts.forceRefresh ?? true;

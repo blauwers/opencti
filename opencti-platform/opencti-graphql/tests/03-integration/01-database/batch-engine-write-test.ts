@@ -3,10 +3,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
+import { elIndexFiles } from '../../../src/database/file-search';
+import { fileToReadStream, uploadToStorage } from '../../../src/database/file-storage';
+import { getFileContent } from '../../../src/database/raw-file-storage';
+import { findById as findDocumentById, IMPORT_STORAGE_PATH } from '../../../src/modules/internal/document/document-domain';
 import { addMalware } from '../../../src/domain/malware';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
-import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS } from '../../../src/database/utils';
+import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS, INDEX_FILES } from '../../../src/database/utils';
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
 import { updatePirInformationOnEntity } from '../../../src/modules/pir/pir-utils';
@@ -33,6 +37,24 @@ describe('batch engine writes', () => {
         filterGroups: [],
       },
     });
+  };
+
+  const indexFileForEntity = async (entity: any) => {
+    const fileName = `batch-file-${uuidv4()}.txt`;
+    const file = fileToReadStream('./tests/data/', 'file-storage-helper-test.txt', fileName, 'text/plain');
+    const filePath = `${IMPORT_STORAGE_PATH}/${entity.entity_type}/${entity.internal_id}`;
+    const { upload } = await uploadToStorage(testContext, ADMIN_USER, filePath, file, { entity });
+    const fileContent = await getFileContent(upload.id, 'base64');
+    const documentId = `batch-file-index-${uuidv4()}`;
+    await elIndexFiles(testContext, ADMIN_USER, [{
+      internal_id: documentId,
+      file_id: upload.id,
+      file_data: fileContent,
+      entity_id: entity.internal_id,
+      name: fileName,
+      uploaded_at: new Date(),
+    }]);
+    return { documentId, fileId: upload.id };
   };
 
   afterAll(async () => {
@@ -431,6 +453,86 @@ describe('batch engine writes', () => {
 
     await expect(internalLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id)).resolves.toBeUndefined();
     await expect(elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] })).resolves.toBeDefined();
+    await expect(findDeleteOperationsForMainEntity(softDeleteMalware.internal_id)).resolves.toHaveLength(1);
+  });
+
+  it('keeps soft-delete file search flags outside an aborted batch', async () => {
+    const softDeleteMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch file soft delete ${uuidv4()}` });
+    cleanupMalwares.push(softDeleteMalware);
+    const { documentId } = await indexFileForEntity(softDeleteMalware);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await deleteElementById(testContext, ADMIN_USER, softDeleteMalware.internal_id, ENTITY_TYPE_MALWARE);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const provisionalFile = await elLoadById(testContext, ADMIN_USER, documentId, { indices: INDEX_FILES }) as any;
+          expect(provisionalFile?.removed ?? false).toBe(false);
+          throw new Error('abort file soft delete batch');
+        },
+      },
+    ])).rejects.toThrow('abort file soft delete batch');
+
+    const committedFile = await elLoadById(testContext, ADMIN_USER, documentId, { indices: INDEX_FILES }) as any;
+    expect(committedFile?.removed ?? false).toBe(false);
+  });
+
+  it('keeps permanent file cleanup outside an aborted batch', async () => {
+    const forceDeleteMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch file force delete ${uuidv4()}` });
+    cleanupMalwares.push(forceDeleteMalware);
+    const { fileId } = await indexFileForEntity(forceDeleteMalware);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await deleteElementById(testContext, ADMIN_USER, forceDeleteMalware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await expect(findDocumentById(testContext, ADMIN_USER, fileId)).resolves.toBeDefined();
+          throw new Error('abort file force delete batch');
+        },
+      },
+    ])).rejects.toThrow('abort file force delete batch');
+
+    await expect(findDocumentById(testContext, ADMIN_USER, fileId)).resolves.toBeDefined();
+  });
+
+  it('keeps confirmed-delete file cleanup outside an aborted batch', async () => {
+    const softDeleteMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch file confirm delete ${uuidv4()}` });
+    cleanupSoftDeletedMalwareIds.push(softDeleteMalware.internal_id);
+    const { fileId } = await indexFileForEntity(softDeleteMalware);
+    await deleteElementById(testContext, ADMIN_USER, softDeleteMalware.internal_id, ENTITY_TYPE_MALWARE);
+    const [deleteOperation] = await findDeleteOperationsForMainEntity(softDeleteMalware.internal_id);
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await confirmDelete(testContext, ADMIN_USER, deleteOperation.internal_id);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await expect(findDocumentById(testContext, ADMIN_USER, fileId)).resolves.toBeDefined();
+          throw new Error('abort file confirm delete batch');
+        },
+      },
+    ])).rejects.toThrow('abort file confirm delete batch');
+
+    await expect(findDocumentById(testContext, ADMIN_USER, fileId)).resolves.toBeDefined();
     await expect(findDeleteOperationsForMainEntity(softDeleteMalware.internal_id)).resolves.toHaveLength(1);
   });
 
