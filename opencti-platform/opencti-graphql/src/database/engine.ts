@@ -264,7 +264,23 @@ type BufferedDeleteWrite = {
   forceRefresh: boolean;
 };
 
-type BufferedEngineWrite = BufferedIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite;
+type BufferedBulkUpdateOperation = {
+  internalId: string;
+  index: string;
+  documentId: string;
+  body: Record<string, any>;
+  apply: (existing: Record<string, any>) => Record<string, any>;
+};
+
+type BufferedBulkUpdateWrite = {
+  kind: 'bulk-update';
+  sequence: number;
+  context: AuthContext;
+  operations: BufferedBulkUpdateOperation[];
+  forceRefresh: boolean;
+};
+
+type BufferedEngineWrite = BufferedIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite | BufferedBulkUpdateWrite;
 
 type BufferedEngineState = {
   nextSequence: number;
@@ -1931,20 +1947,8 @@ const getBufferedEngineState = (): BufferedEngineState | undefined => {
   return getBatchExecutionMetadata<BufferedEngineState>(BATCH_ENGINE_WRITES_METADATA_KEY);
 };
 
-const getBufferedEngineElements = (): Array<{ kind: BufferedEngineWrite['kind']; element: Record<string, any> }> => {
-  const writes = getBufferedEngineState()?.writes ?? [];
-  const elements: Array<{ kind: BufferedEngineWrite['kind']; element: Record<string, any> }> = [];
-  writes
-    .slice()
-    .sort((left, right) => left.sequence - right.sequence)
-    .forEach((write) => {
-      if (write.kind === 'index' || write.kind === 'delete') {
-        write.elements.forEach((element) => elements.push({ kind: write.kind, element }));
-      } else {
-        elements.push({ kind: write.kind, element: write.instance });
-      }
-    });
-  return elements;
+const getOrderedBufferedEngineWrites = (): BufferedEngineWrite[] => {
+  return (getBufferedEngineState()?.writes ?? []).slice().sort((left, right) => left.sequence - right.sequence);
 };
 
 const matchesBufferedEngineElement = (
@@ -1981,20 +1985,32 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   types: string | string[] | null | undefined,
 ): T[] => {
   const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
-  getBufferedEngineElements().forEach(({ kind, element }) => {
-    const existing = mergedHits.get(element.internal_id);
-    if (kind === 'delete') {
-      mergedHits.delete(element.internal_id);
+  getOrderedBufferedEngineWrites().forEach((write) => {
+    if (write.kind === 'bulk-update') {
+      write.operations.forEach((operation) => {
+        const existing = mergedHits.get(operation.internalId);
+        if (existing) {
+          mergedHits.set(operation.internalId, operation.apply(existing) as T);
+        }
+      });
       return;
     }
-    if (!existing && !matchesBufferedEngineElement(element, ids, types)) {
-      return;
-    }
-    if (kind === 'update') {
-      mergedHits.set(element.internal_id, applyBufferedUpdate(existing, element));
-      return;
-    }
-    mergedHits.set(element.internal_id, element as T);
+    const elements = write.kind === 'update' ? [write.instance] : write.elements;
+    elements.forEach((element) => {
+      const existing = mergedHits.get(element.internal_id);
+      if (write.kind === 'delete') {
+        mergedHits.delete(element.internal_id);
+        return;
+      }
+      if (!existing && !matchesBufferedEngineElement(element, ids, types)) {
+        return;
+      }
+      if (write.kind === 'update') {
+        mergedHits.set(element.internal_id, applyBufferedUpdate(existing, element));
+        return;
+      }
+      mergedHits.set(element.internal_id, element as T);
+    });
   });
   return Array.from(mergedHits.values());
 };
@@ -4354,13 +4370,40 @@ export const elDeleteInstances = async <T extends BasicStoreBase>(
   }
   await elDeleteInstancesNow(context, instances, opts);
 };
-export const elRemoveRelationConnection = async (
+const applyRemoveRelationConnection = (
+  existing: Record<string, any>,
+  relKey: string,
+  cleanupIds: string[],
+  updatedAt: string,
+  updateUpdatedAt: boolean,
+  updateModified: boolean,
+  updateRefreshedAt: boolean,
+  removePirInformation: boolean,
+) => {
+  const updated = { ...existing };
+  const currentValues = Array.isArray(updated[relKey]) ? updated[relKey] : [];
+  updated[relKey] = currentValues.filter((value: string) => !cleanupIds.includes(value));
+  if (updateUpdatedAt) {
+    updated.updated_at = updatedAt;
+  }
+  if (updateModified) {
+    updated.modified = updatedAt;
+  }
+  if (updateRefreshedAt) {
+    updated.refreshed_at = updatedAt;
+  }
+  if (removePirInformation && Array.isArray(updated.pir_information)) {
+    updated.pir_information = updated.pir_information.filter((item: any) => !cleanupIds.includes(item.pir_id));
+  }
+  return updated;
+};
+
+const buildRemoveRelationConnectionOperations = async (
   context: AuthContext,
   user: AuthUser,
   elementsImpact: any,
-  opts: { forceRefresh?: boolean } = {},
-) => {
-  const { forceRefresh = true } = opts;
+): Promise<BufferedBulkUpdateOperation[]> => {
+  const operations: BufferedBulkUpdateOperation[] = [];
   const impacts: [string, any][] = Object.entries(elementsImpact);
   if (impacts.length > 0) {
     const idsToResolve = impacts.map(([k]) => k);
@@ -4383,7 +4426,7 @@ export const elRemoveRelationConnection = async (
       const impactsBulk = groupsOfImpacts[i];
       const bodyUpdateRaw = impactsBulk.map(([impactId, elementMeta]) => {
         return Object.entries(elementMeta).map(([typeAndIndex, cleanupIds]) => {
-          const updates: any = [];
+          const updates: BufferedBulkUpdateOperation[] = [];
           const elId = elIdsCache[impactId];
           const fromIndex = indexCache[impactId];
           const entityPirInformation = pirInformationCache[impactId];
@@ -4393,6 +4436,7 @@ export const elRemoveRelationConnection = async (
           const [relationType, relationIndex, side, sideType] = typeAndIndex.split('|');
           const refField = isStixRefRelationship(relationType) && isInferredIndex(relationIndex) ? ID_INFERRED : ID_INTERNAL;
           const rel_key = buildRefRelationKey(relationType, refField);
+          const cleanupIdsToApply = cleanupIds as string[];
           let source = `if(ctx._source[params.rel_key] != null){
               for (int i=params.cleanupIds.length-1; i>=0; i--) {
                 def cleanupIndex = ctx._source[params.rel_key].indexOf(params.cleanupIds[i]);
@@ -4424,20 +4468,48 @@ export const elRemoveRelationConnection = async (
               }
             `;
           }
-          const script = { source, params: { rel_key, cleanupIds, updated_at: now() } };
-          updates.push([
-            { update: { _index: fromIndex, _id: elId, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-            { script },
-          ]);
+          const updatedAt = now();
+          const updateUpdatedAt = fromSide && isStixRefRelationship(relationType) && isUpdatedAtObject(sideType);
+          const updateModified = fromSide && isStixRefRelationship(relationType) && isModifiedObject(sideType);
+          const updateRefreshedAt = isUpdatedAtObject(sideType);
+          const removePirInformation = relationType === RELATION_IN_PIR && !!entityPirInformation;
+          const script = { source, params: { rel_key, cleanupIds: cleanupIdsToApply, updated_at: updatedAt } };
+          updates.push({
+            internalId: impactId,
+            index: fromIndex,
+            documentId: elId,
+            body: { script },
+            apply: (existing) => applyRemoveRelationConnection(
+              existing,
+              rel_key,
+              cleanupIdsToApply,
+              updatedAt,
+              updateUpdatedAt,
+              updateModified,
+              updateRefreshedAt,
+              removePirInformation,
+            ),
+          });
           return updates;
         });
       });
-      const bodyUpdate = R.flatten(bodyUpdateRaw);
-      if (bodyUpdate.length > 0) {
-        await elBulk(context, { refresh: forceRefresh, timeout: BULK_TIMEOUT, body: bodyUpdate });
-      }
+      operations.push(...R.flatten(bodyUpdateRaw));
     }
   }
+  return operations;
+};
+
+export const elRemoveRelationConnection = async (
+  context: AuthContext,
+  user: AuthUser,
+  elementsImpact: any,
+  opts: { forceRefresh?: boolean } = {},
+) => {
+  const operations = await buildRemoveRelationConnectionOperations(context, user, elementsImpact);
+  if (bufferBulkUpdateOperations(context, operations, opts.forceRefresh ?? true)) {
+    return;
+  }
+  await executeBufferedBulkUpdateOperations(context, operations, opts.forceRefresh ?? true);
 };
 
 export const computeDeleteElementsImpacts = async (
@@ -4949,6 +5021,29 @@ const bufferDeleteInstances = <T extends BasicStoreBase>(
   return true;
 };
 
+const bufferBulkUpdateOperations = (
+  context: AuthContext,
+  operations: BufferedBulkUpdateOperation[],
+  forceRefresh: boolean,
+): boolean => {
+  if (operations.length === 0) {
+    return false;
+  }
+  const state = getOrCreateBufferedEngineState();
+  if (!state) {
+    return false;
+  }
+  state.writes.push({
+    kind: 'bulk-update',
+    sequence: state.nextSequence,
+    context,
+    operations,
+    forceRefresh,
+  });
+  state.nextSequence += 1;
+  return true;
+};
+
 const bufferIndexElements = (
   context: AuthContext,
   user: AuthUser,
@@ -4969,6 +5064,23 @@ const bufferIndexElements = (
   });
   state.nextSequence += 1;
   return true;
+};
+
+const executeBufferedBulkUpdateOperations = async (
+  context: AuthContext,
+  operations: BufferedBulkUpdateOperation[],
+  forceRefresh: boolean,
+) => {
+  const groupsOfUpdates = R.splitEvery(MAX_BULK_OPERATIONS, operations);
+  for (let index = 0; index < groupsOfUpdates.length; index += 1) {
+    const bodyUpdate = groupsOfUpdates[index].flatMap((operation) => [
+      { update: { _index: operation.index, _id: operation.documentId, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+      operation.body,
+    ]);
+    if (bodyUpdate.length > 0) {
+      await elBulk(context, { refresh: forceRefresh, timeout: BULK_TIMEOUT, body: bodyUpdate });
+    }
+  }
 };
 
 const elIndexElementsNow = async (
@@ -5177,6 +5289,23 @@ const flushBufferedDeleteElements = async (writes: BufferedDeleteWrite[]) => {
   }
 };
 
+const flushBufferedBulkUpdateOperations = async (writes: BufferedBulkUpdateWrite[]) => {
+  const groups: Array<{ context: AuthContext; forceRefresh: boolean; operations: BufferedBulkUpdateOperation[] }> = [];
+  writes.forEach((write) => {
+    const existingGroup = groups.find((group) => group.context === write.context && group.forceRefresh === write.forceRefresh);
+    if (existingGroup) {
+      existingGroup.operations.push(...write.operations);
+    } else {
+      groups.push({ context: write.context, forceRefresh: write.forceRefresh, operations: [...write.operations] });
+    }
+  });
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    await executeBufferedBulkUpdateOperations(group.context, group.operations, group.forceRefresh);
+  }
+};
+
 const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
   const orderedWrites = state.writes.slice().sort((left, right) => left.sequence - right.sequence);
   let segment: BufferedEngineWrite[] = [];
@@ -5188,8 +5317,10 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
         await flushBufferedIndexElements(segment as BufferedIndexWrite[]);
       } else if (segment[0].kind === 'update') {
         await flushBufferedUpdateElements(segment as BufferedUpdateWrite[]);
-      } else {
+      } else if (segment[0].kind === 'delete') {
         await flushBufferedDeleteElements(segment as BufferedDeleteWrite[]);
+      } else {
+        await flushBufferedBulkUpdateOperations(segment as BufferedBulkUpdateWrite[]);
       }
       segment = [];
     }
@@ -5212,21 +5343,45 @@ export const elIndexElements = async (
   return elIndexElementsNow(context, user, indexingType, elements);
 };
 
-export const elUpdateRelationConnections = async (context: AuthContext, elements: any[]) => {
-  if (elements.length > 0) {
-    const source = 'def conn = ctx._source.connections.find(c -> c.internal_id == params.id); '
-      + 'for (change in params.changes.entrySet()) { conn[change.getKey()] = change.getValue() }';
-    const bodyUpdate = elements.flatMap((doc) => [
-      { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-      { script: { source, params: { id: doc.toReplace, changes: doc.data } } },
-    ]);
-    const bulkPromise = elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body: bodyUpdate });
-    await Promise.all([bulkPromise]);
-  }
+const buildUpdateRelationConnectionOperations = (elements: any[]): BufferedBulkUpdateOperation[] => {
+  const source = 'def conn = ctx._source.connections.find(c -> c.internal_id == params.id); '
+    + 'for (change in params.changes.entrySet()) { conn[change.getKey()] = change.getValue() }';
+  return elements.map((doc) => ({
+    internalId: doc.id,
+    index: doc._index,
+    documentId: doc._id ?? doc.id,
+    body: { script: { source, params: { id: doc.toReplace, changes: doc.data } } },
+    apply: (existing) => {
+      const connections = Array.isArray(existing.connections) ? [...existing.connections] : [];
+      const connectionIndex = connections.findIndex((connection: any) => connection.internal_id === doc.toReplace);
+      if (connectionIndex >= 0) {
+        connections[connectionIndex] = { ...connections[connectionIndex], ...doc.data };
+        return { ...existing, connections };
+      }
+      const updated = { ...existing };
+      if (updated.fromId === doc.toReplace) {
+        updated.fromId = doc.data.internal_id;
+        updated.fromName = doc.data.name;
+      }
+      if (updated.toId === doc.toReplace) {
+        updated.toId = doc.data.internal_id;
+        updated.toName = doc.data.name;
+      }
+      return updated;
+    },
+  }));
 };
-export const elUpdateEntityConnections = async (context: AuthContext, elements: any[]) => {
-  if (elements.length > 0) {
-    const source = `if (ctx._source[params.key] == null) {
+
+export const elUpdateRelationConnections = async (context: AuthContext, elements: any[]) => {
+  const operations = buildUpdateRelationConnectionOperations(elements);
+  if (bufferBulkUpdateOperations(context, operations, true)) {
+    return;
+  }
+  await executeBufferedBulkUpdateOperations(context, operations, true);
+};
+
+const buildUpdateEntityConnectionOperations = (elements: any[]): BufferedBulkUpdateOperation[] => {
+  const source = `if (ctx._source[params.key] == null) {
       ctx._source[params.key] = params.to;
     } else if (params.from == null) {
       ctx._source[params.key].addAll(params.to);
@@ -5238,28 +5393,50 @@ export const elUpdateEntityConnections = async (context: AuthContext, elements: 
       ctx._source[params.key] = values;
     }
   `;
-    // doc.toReplace === null => from = null
-    const addMultipleFormat = (doc: any) => {
-      return Array.isArray(doc.data.internal_id) ? doc.data.internal_id : [doc.data.internal_id];
-    };
-    const bodyUpdate = elements.flatMap((doc) => {
-      const refField = isStixRefRelationship(doc.relationType) && isInferredIndex(doc._index) ? ID_INFERRED : ID_INTERNAL;
-      return [
-        { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-        {
-          script: {
-            source,
-            params: {
-              key: buildRefRelationKey(doc.relationType, refField),
-              from: doc.toReplace,
-              to: addMultipleFormat(doc),
-            },
+  return elements.map((doc) => {
+    const refField = isStixRefRelationship(doc.relationType) && isInferredIndex(doc._index) ? ID_INFERRED : ID_INTERNAL;
+    const key = buildRefRelationKey(doc.relationType, refField);
+    const to = Array.isArray(doc.data.internal_id) ? [...doc.data.internal_id] : [doc.data.internal_id];
+    return {
+      internalId: doc.id,
+      index: doc._index,
+      documentId: doc._id ?? doc.id,
+      body: {
+        script: {
+          source,
+          params: {
+            key,
+            from: doc.toReplace,
+            to,
           },
         },
-      ];
-    });
-    await elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body: bodyUpdate });
+      },
+      apply: (existing) => {
+        const currentValues = Array.isArray(existing[key]) ? existing[key] : undefined;
+        if (!currentValues) {
+          return { ...existing, [key]: [...to] };
+        }
+        if (doc.toReplace === null) {
+          return { ...existing, [key]: [...currentValues, ...to] };
+        }
+        const values = [...to];
+        currentValues.forEach((current: string) => {
+          if (current !== doc.toReplace && !values.includes(current)) {
+            values.push(current);
+          }
+        });
+        return { ...existing, [key]: values };
+      },
+    };
+  });
+};
+
+export const elUpdateEntityConnections = async (context: AuthContext, elements: any[]) => {
+  const operations = buildUpdateEntityConnectionOperations(elements);
+  if (bufferBulkUpdateOperations(context, operations, true)) {
+    return;
   }
+  await executeBufferedBulkUpdateOperations(context, operations, true);
 };
 
 const elUpdateConnectionsOfElement = async (documentId: string, documentBody: any) => {
