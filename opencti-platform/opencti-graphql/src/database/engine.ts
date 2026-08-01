@@ -269,6 +269,7 @@ type BufferedBulkUpdateOperation = {
   index: string;
   documentId: string;
   body: Record<string, any>;
+  retry?: number;
   apply: (existing: Record<string, any>) => Record<string, any>;
 };
 
@@ -1967,7 +1968,7 @@ const matchesBufferedEngineElement = (
   return typeList.includes(element.entity_type) || (element.parent_types ?? []).some((type: string) => typeList.includes(type));
 };
 
-const applyBufferedUpdate = <T extends BasicStoreBase>(existing: T | undefined, patch: Record<string, any>): T => {
+const applyBufferedUpdate = <T extends Record<string, any>>(existing: T | undefined, patch: Record<string, any>): T => {
   const updated = { ...(existing ?? {}) } as Record<string, any>;
   Object.entries(patch).forEach(([key, value]) => {
     if (value === undefined || value === null) {
@@ -4215,7 +4216,7 @@ export const elIndex = async (
   return documentBody;
 };
 /* v8 ignore next */
-export const elUpdate = async (
+const elUpdateNow = async (
   context: AuthContext,
   indexName: string,
   documentId: string,
@@ -4244,6 +4245,40 @@ export const elUpdate = async (
   };
   return retryElOperations(updateOperation);
 };
+const applyBufferedDocumentUpdate = <T extends Record<string, any>>(existing: T, patch: Record<string, any>): T => {
+  return { ...existing, ...patch };
+};
+const buildRawUpdateOperation = (
+  indexName: string,
+  documentId: string,
+  documentBody: Record<string, any>,
+  apply: BufferedBulkUpdateOperation['apply'],
+  retry = ES_RETRY_ON_CONFLICT,
+): BufferedBulkUpdateOperation => ({
+  internalId: documentId,
+  index: indexName,
+  documentId,
+  body: documentBody,
+  retry,
+  apply,
+});
+/* v8 ignore next */
+export const elUpdate = async (
+  context: AuthContext,
+  indexName: string,
+  documentId: string,
+  documentBody: any,
+  retry = ES_RETRY_ON_CONFLICT,
+) => {
+  if (documentBody?.doc) {
+    const patch = R.dissoc('_index', documentBody.doc);
+    const operation = buildRawUpdateOperation(indexName, documentId, documentBody, (existing) => applyBufferedDocumentUpdate(existing, patch), retry);
+    if (bufferBulkUpdateOperations(context, [operation], true)) {
+      return;
+    }
+  }
+  return elUpdateNow(context, indexName, documentId, documentBody, retry);
+};
 const buildReplaceScriptBody = (documentBody: any) => {
   const doc = R.dissoc('_index', documentBody.doc);
   const entries = Object.entries(doc);
@@ -4266,7 +4301,13 @@ export const elReplace = async (
   documentId: string,
   documentBody: any,
 ) => {
-  return elUpdate(context, indexName, documentId, buildReplaceScriptBody(documentBody));
+  const patch = R.dissoc('_index', documentBody.doc);
+  const replaceBody = buildReplaceScriptBody(documentBody);
+  const operation = buildRawUpdateOperation(indexName, documentId, replaceBody, (existing) => applyBufferedUpdate(existing, patch));
+  if (bufferBulkUpdateOperations(context, [operation], true)) {
+    return;
+  }
+  return elUpdateNow(context, indexName, documentId, replaceBody);
 };
 export const elDelete = (indexName: string, documentId: string) => {
   const deleteOperation = async () => {
@@ -5074,7 +5115,7 @@ const executeBufferedBulkUpdateOperations = async (
   const groupsOfUpdates = R.splitEvery(MAX_BULK_OPERATIONS, operations);
   for (let index = 0; index < groupsOfUpdates.length; index += 1) {
     const bodyUpdate = groupsOfUpdates[index].flatMap((operation) => [
-      { update: { _index: operation.index, _id: operation.documentId, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+      { update: { _index: operation.index, _id: operation.documentId, retry_on_conflict: operation.retry ?? ES_RETRY_ON_CONFLICT } },
       operation.body,
     ]);
     if (bodyUpdate.length > 0) {

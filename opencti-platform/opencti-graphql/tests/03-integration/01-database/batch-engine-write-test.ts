@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { elDeleteElements, elDeleteInstances, elReplace, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
+import { elDeleteElements, elDeleteInstances, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById } from '../../../src/database/middleware';
 import { internalLoadById } from '../../../src/database/middleware-loader';
 import { addMalware } from '../../../src/domain/malware';
@@ -97,6 +97,47 @@ describe('batch engine writes', () => {
     ]);
 
     await expect(internalLoadById(testContext, ADMIN_USER, deletedMalware.internal_id)).resolves.toBeUndefined();
+  });
+
+  it('buffers direct document and replace updates inside the batch boundary', async () => {
+    const rawUpdateMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch raw update ${uuidv4()}` });
+    cleanupMalwares.push(rawUpdateMalware);
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdate(testContext, rawUpdateMalware._index, rawUpdateMalware._id ?? rawUpdateMalware.internal_id, {
+            doc: { description: 'raw doc update' },
+          });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await internalLoadById(testContext, ADMIN_USER, rawUpdateMalware.internal_id) as any;
+          expect(buffered.description).toBe('raw doc update');
+          await elReplace(testContext, rawUpdateMalware._index, rawUpdateMalware._id ?? rawUpdateMalware.internal_id, {
+            doc: { confidence: 64 },
+          });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const buffered = await internalLoadById(testContext, ADMIN_USER, rawUpdateMalware.internal_id) as any;
+          expect(buffered.description).toBe('raw doc update');
+          expect(buffered.confidence).toBe(64);
+          return null;
+        },
+      },
+    ]);
+
+    const committed = await internalLoadById(testContext, ADMIN_USER, rawUpdateMalware.internal_id) as any;
+    expect(committed.description).toBe('raw doc update');
+    expect(committed.confidence).toBe(64);
   });
 
   it('buffers connection rewrites and exposes them to later mutations in the same batch', async () => {
