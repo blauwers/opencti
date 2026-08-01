@@ -182,7 +182,7 @@ import {
 import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
 import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
-import { BatchMutationKind, executeSingleBatchMutation } from '../modules/batch/batch-executor';
+import { BatchMutationKind, BatchSideEffectKind, executeSingleBatchMutation, registerBatchSideEffect } from '../modules/batch/batch-executor';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
 import {
@@ -1267,9 +1267,11 @@ const indexCreatedElement = async (
   { element, relations }: { element: Record<string, any>; relations: Record<string, any>[] },
 ) => {
   // Continue the creation of the element and the connected relations
-  const indexPromise = elIndexElements(context, user, element.entity_type, [element, ...(relations ?? [])]);
-  const taskPromise = createContainerSharingTask(context, ACTION_TYPE_SHARE, element, relations);
-  await BluePromise.all([taskPromise, indexPromise]);
+  await elIndexElements(context, user, element.entity_type, [element, ...(relations ?? [])]);
+  await registerBatchSideEffect({
+    kind: BatchSideEffectKind.CompatibilityProjection,
+    execute: () => createContainerSharingTask(context, ACTION_TYPE_SHARE, element, relations),
+  });
 };
 export const updatedInputsToData = (instance: Record<string, any>, inputs: EditInput[]) => {
   const inputPairs = R.map((input) => {
@@ -2756,45 +2758,58 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       // in case of addition in a container objects, we need to propagate the sharing to these new objects
       const objectsRefRelationships = relationsToCreate.filter((r) => r.relationship_type === RELATION_OBJECT);
       if (objectsRefRelationships.length > 0) {
-        await createContainerSharingTask(context, ACTION_TYPE_SHARE, initial, objectsRefRelationships);
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.CompatibilityProjection,
+          execute: () => createContainerSharingTask(context, ACTION_TYPE_SHARE, initial, objectsRefRelationships),
+        });
       }
     }
     if (updatedInputs.length > 0 && removedEmbeddedStoragePaths.length > 0) {
-      for (let i = 0; i < removedEmbeddedStoragePaths.length; i += 1) {
-        const storagePath = removedEmbeddedStoragePaths[i];
-        try {
-          await deleteFile(context, user, storagePath, { forceDelete: true });
-        } catch (err) {
-          logApp.warn('[OPENCTI] Unable to cleanup removed markdown embedded image file', {
-            storagePath,
-            entityId: initial.internal_id,
-            entityType: initial.entity_type,
-            cause: err,
-          });
-        }
-      }
+      await registerBatchSideEffect({
+        kind: BatchSideEffectKind.CompatibilityProjection,
+        execute: async () => {
+          for (let i = 0; i < removedEmbeddedStoragePaths.length; i += 1) {
+            const storagePath = removedEmbeddedStoragePaths[i];
+            try {
+              await deleteFile(context, user, storagePath, { forceDelete: true });
+            } catch (err) {
+              logApp.warn('[OPENCTI] Unable to cleanup removed markdown embedded image file', {
+                storagePath,
+                entityId: initial.internal_id,
+                entityType: initial.entity_type,
+                cause: err,
+              });
+            }
+          }
+        },
+      });
     }
     // Post-operation to update the individual linked to a user
     if (updatedInstance.entity_type === ENTITY_TYPE_USER && !getDraftContext(context, user)) {
-      const args = {
-        filters: {
-          mode: FilterMode.And,
-          filters: [{ key: ['contact_information'], values: [updatedInstance.user_email] }],
-          filterGroups: [],
+      await registerBatchSideEffect({
+        kind: BatchSideEffectKind.CompatibilityProjection,
+        execute: async () => {
+          const args = {
+            filters: {
+              mode: FilterMode.And,
+              filters: [{ key: ['contact_information'], values: [updatedInstance.user_email] }],
+              filterGroups: [],
+            },
+            noFiltersChecking: true,
+          };
+          const individuals = await topEntitiesList(context, user, [ENTITY_TYPE_IDENTITY_INDIVIDUAL], args);
+          if (individuals.length > 0) {
+            const individualId = individuals[0].id;
+            const patch = {
+              contact_information: updatedInstance.user_email,
+              name: updatedInstance.name,
+              x_opencti_firstname: updatedInstance.firstname,
+              x_opencti_lastname: updatedInstance.lastname,
+            };
+            await patchAttribute(context, user, individualId, ENTITY_TYPE_IDENTITY_INDIVIDUAL, patch, { bypassIndividualUpdate: true });
+          }
         },
-        noFiltersChecking: true,
-      };
-      const individuals = await topEntitiesList(context, user, [ENTITY_TYPE_IDENTITY_INDIVIDUAL], args);
-      if (individuals.length > 0) {
-        const individualId = individuals[0].id;
-        const patch = {
-          contact_information: updatedInstance.user_email,
-          name: updatedInstance.name,
-          x_opencti_firstname: updatedInstance.firstname,
-          x_opencti_lastname: updatedInstance.lastname,
-        };
-        await patchAttribute(context, user, individualId, ENTITY_TYPE_IDENTITY_INDIVIDUAL, patch, { bypassIndividualUpdate: true });
-      }
+      });
     }
     // Only push event in stream if modifications really happens
     if (updatedInputs.length > 0) {
@@ -2824,15 +2839,21 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       // If entity is currently covered
       const isRefUpdate = relationsToCreate.length > 0 || relationsToDelete.length > 0;
       if (isRefUpdate && data.updatedInstance[RELATION_COVERED]) {
-        const { element: securityCoverage } = await updateAttribute(
-          context,
-          user,
-          data.updatedInstance[RELATION_COVERED],
-          ENTITY_TYPE_SECURITY_COVERAGE,
-          [{ key: 'modified', value: [now()] }],
-          { noEnrich: true },
-        );
-        await triggerEntityUpdateAutoEnrichment(context, user, securityCoverage as BasicStoreBase);
+        const securityCoverageId = data.updatedInstance[RELATION_COVERED];
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.CompatibilityProjection,
+          execute: async () => {
+            const { element: securityCoverage } = await updateAttribute(
+              context,
+              user,
+              securityCoverageId,
+              ENTITY_TYPE_SECURITY_COVERAGE,
+              [{ key: 'modified', value: [now()] }],
+              { noEnrich: true },
+            );
+            await triggerEntityUpdateAutoEnrichment(context, user, securityCoverage as BasicStoreBase);
+          },
+        });
       }
       // endregion
       return { element: updatedInstance as T, event, isCreation: false };
@@ -2899,7 +2920,7 @@ export const updateAttribute = async <T extends StoreObject>(
 ) => {
   return executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
-    execute: async () => {
+    executeWrite: async () => {
       const initial = await storeLoadByIdWithRefs<T>(context, user, id, { ...opts, type });
       if (!initial) {
         throw FunctionalError('Cant find element to update', { id, type });
@@ -2908,13 +2929,12 @@ export const updateAttribute = async <T extends StoreObject>(
       const entitySetting = await getEntitySettingFromCache(context, initial.entity_type);
       await validateInputUpdate(context, user, initial.entity_type, initial as Record<string, any>, inputs, entitySetting as BasicStoreEntityEntitySetting);
       // Continue update
-      const data = await updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
-      if (!opts.noEnrich && data.event) {
-        // If element really updated, try to enrich if needed
-        await triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase);
-      }
-      return data;
+      return updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
     },
+    sideEffects: (data) => (!opts.noEnrich && data.event ? [{
+      kind: BatchSideEffectKind.AutoEnrichment,
+      execute: () => triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase),
+    }] : []),
   });
 };
 type PatchAttributeOpts = UpdateAttributeOpts & {
@@ -3485,15 +3505,21 @@ export const createRelationRaw = async (
       const isVuln = relationshipType === RELATION_TARGETS && dataRel.element.to.entity_type === ENTITY_TYPE_VULNERABILITY;
       const isAttackPattern = relationshipType === RELATION_USES && dataRel.element.to.entity_type === ENTITY_TYPE_ATTACK_PATTERN;
       if (isVuln || isAttackPattern) {
-        const { element: securityCoverage } = await updateAttribute(
-          context,
-          user,
-          dataRel.element.from[RELATION_COVERED],
-          ENTITY_TYPE_SECURITY_COVERAGE,
-          [{ key: 'modified', value: [now()] }],
-          { noEnrich: true },
-        );
-        await triggerEntityUpdateAutoEnrichment(context, user, securityCoverage as BasicStoreBase);
+        const securityCoverageId = dataRel.element.from[RELATION_COVERED];
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.CompatibilityProjection,
+          execute: async () => {
+            const { element: securityCoverage } = await updateAttribute(
+              context,
+              user,
+              securityCoverageId,
+              ENTITY_TYPE_SECURITY_COVERAGE,
+              [{ key: 'modified', value: [now()] }],
+              { noEnrich: true },
+            );
+            await triggerEntityUpdateAutoEnrichment(context, user, securityCoverage as BasicStoreBase);
+          },
+        });
       }
     }
     // endregion
@@ -3515,7 +3541,7 @@ export const createRelation = async (
 ) => {
   const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.CreateRelation,
-    execute: () => createRelationRaw(context, user, input, opts),
+    executeWrite: () => createRelationRaw(context, user, input, opts),
   });
   return data.element;
 };
@@ -3972,14 +3998,23 @@ export const createEntity = async (
   // volumes of objects relationships must be controlled
   const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.CreateEntity,
-    execute: () => createEntityRaw(context, user, input, type, opts),
+    executeWrite: () => createEntityRaw(context, user, input, type, opts),
+    sideEffects: (result) => {
+      if (result.isCreation) {
+        return [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: () => triggerCreateEntityAutoEnrichment(context, user, result.element),
+        }];
+      }
+      if (result.event !== null) {
+        return [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: () => triggerEntityUpdateAutoEnrichment(context, user, result.element),
+        }];
+      }
+      return [];
+    },
   });
-  // In case of creation, start an enrichment
-  if (data.isCreation) {
-    await triggerCreateEntityAutoEnrichment(context, user, data.element);
-  } else if (data.event !== null) { // upsert
-    await triggerEntityUpdateAutoEnrichment(context, user, data.element);
-  }
   return isCompleteResult ? data : data.element;
 };
 

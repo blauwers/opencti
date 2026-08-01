@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BatchMutationKind,
+  BatchSideEffectKind,
   executeBatchMutations,
   executeSingleBatchMutation,
+  registerBatchSideEffect,
 } from '../../../../src/modules/batch/batch-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
@@ -13,14 +15,14 @@ describe('batch executor', () => {
     const execution = await executeBatchMutations([
       {
         kind: BatchMutationKind.CreateEntity,
-        execute: async () => {
+        executeWrite: async () => {
           calls.push('entity');
           return 'entity-result';
         },
       },
       {
         kind: BatchMutationKind.CreateRelation,
-        execute: async () => {
+        executeWrite: async () => {
           calls.push('relation');
           return 'relation-result';
         },
@@ -32,6 +34,7 @@ describe('batch executor', () => {
       executionMode: BatchExecutionMode.Compatibility,
       waitUntil: BatchWaitUntil.Materialized,
       results: ['entity-result', 'relation-result'],
+      sideEffectKinds: [],
     });
   });
 
@@ -39,7 +42,7 @@ describe('batch executor', () => {
     const execution = await executeBatchMutations([
       {
         kind: BatchMutationKind.UpdateAttribute,
-        execute: async () => 'updated',
+        executeWrite: async () => 'updated',
       },
     ], {
       executionMode: BatchExecutionMode.Bulk,
@@ -56,20 +59,101 @@ describe('batch executor', () => {
     await expect(executeBatchMutations([
       {
         kind: BatchMutationKind.CreateEntity,
-        execute: async () => {
+        executeWrite: async () => {
           throw new Error('failed mutation');
         },
       },
       {
         kind: BatchMutationKind.CreateRelation,
-        execute: laterMutation,
+        executeWrite: laterMutation,
       },
     ])).rejects.toThrow('failed mutation');
 
     expect(laterMutation).not.toHaveBeenCalled();
     await expect(executeSingleBatchMutation({
       kind: BatchMutationKind.CreateEntity,
-      execute: async () => 'single-result',
+      executeWrite: async () => 'single-result',
     })).resolves.toBe('single-result');
+  });
+
+  it('materializes side effects only after all writes complete, including nested writes', async () => {
+    const calls: string[] = [];
+
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          calls.push('outer-write');
+          await executeSingleBatchMutation({
+            kind: BatchMutationKind.UpdateAttribute,
+            executeWrite: async () => {
+              calls.push('nested-write');
+              return 'nested-result';
+            },
+            sideEffects: () => [{
+              kind: BatchSideEffectKind.AutoEnrichment,
+              execute: async () => {
+                calls.push('nested-side-effect');
+              },
+            }],
+          });
+          return 'outer-result';
+        },
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push('outer-side-effect');
+          },
+        }],
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => {
+          calls.push('second-write');
+          return 'second-result';
+        },
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'outer-write',
+      'nested-write',
+      'second-write',
+      'nested-side-effect',
+      'outer-side-effect',
+    ]);
+    expect(execution.sideEffectKinds).toEqual([
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.AutoEnrichment,
+    ]);
+  });
+
+  it('defers side effects registered inside raw write helpers', async () => {
+    const calls: string[] = [];
+
+    await registerBatchSideEffect({
+      kind: BatchSideEffectKind.CompatibilityProjection,
+      execute: async () => {
+        calls.push('outside-effect');
+      },
+    });
+
+    const execution = await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        calls.push('write');
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.CompatibilityProjection,
+          execute: async () => {
+            calls.push('deferred-effect');
+          },
+        });
+        calls.push('write-complete');
+        return 'result';
+      },
+    });
+
+    expect(execution).toBe('result');
+    expect(calls).toEqual(['outside-effect', 'write', 'write-complete', 'deferred-effect']);
   });
 });
