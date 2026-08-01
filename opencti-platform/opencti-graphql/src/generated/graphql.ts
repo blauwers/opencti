@@ -2109,8 +2109,10 @@ export type BatchAdmission = {
   __typename?: 'BatchAdmission';
   batch_id: Scalars['ID']['output'];
   bundle_id: Scalars['ID']['output'];
+  eligible_execution_modes: Array<BatchExecutionMode>;
   execution_mode: BatchExecutionMode;
   execution_preference: BatchExecutionPreference;
+  execution_reason: BatchExecutionReason;
   idempotency_key: Scalars['String']['output'];
   object_count: Scalars['Int']['output'];
   object_types: Array<Scalars['String']['output']>;
@@ -2136,6 +2138,14 @@ export enum BatchExecutionPreference {
   Bulk = 'BULK',
   Compatibility = 'COMPATIBILITY',
   LegacySplit = 'LEGACY_SPLIT'
+}
+
+export enum BatchExecutionReason {
+  ExplicitCompatibility = 'EXPLICIT_COMPATIBILITY',
+  ExplicitLegacySplit = 'EXPLICIT_LEGACY_SPLIT',
+  GenericBulkCompatible = 'GENERIC_BULK_COMPATIBLE',
+  IdentityIndicatorAtomicCohort = 'IDENTITY_INDICATOR_ATOMIC_COHORT',
+  OperationalBundleCompatibility = 'OPERATIONAL_BUNDLE_COMPATIBILITY'
 }
 
 export type BatchSubmitOptionsInput = {
@@ -39737,6 +39747,7 @@ export type ResolversTypes = ResolversObject<{
   BatchAdmissionStatus: BatchAdmissionStatus;
   BatchExecutionMode: BatchExecutionMode;
   BatchExecutionPreference: BatchExecutionPreference;
+  BatchExecutionReason: BatchExecutionReason;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;
   BatchWaitUntil: BatchWaitUntil;
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
@@ -42541,8 +42552,10 @@ export type BasicRelationshipResolvers<ContextType = any, ParentType extends Res
 export type BatchAdmissionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchAdmission'] = ResolversParentTypes['BatchAdmission']> = ResolversObject<{
   batch_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
   bundle_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  eligible_execution_modes?: Resolver<Array<ResolversTypes['BatchExecutionMode']>, ParentType, ContextType>;
   execution_mode?: Resolver<ResolversTypes['BatchExecutionMode'], ParentType, ContextType>;
   execution_preference?: Resolver<ResolversTypes['BatchExecutionPreference'], ParentType, ContextType>;
+  execution_reason?: Resolver<ResolversTypes['BatchExecutionReason'], ParentType, ContextType>;
   idempotency_key?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   object_count?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
   object_types?: Resolver<Array<ResolversTypes['String']>, ParentType, ContextType>;

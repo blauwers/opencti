@@ -36,6 +36,8 @@ const batchResolvers = {
     object_types: (admission: any) => admission.objectTypes,
     execution_preference: (admission: any) => admission.executionPreference,
     execution_mode: (admission: any) => admission.executionMode,
+    execution_reason: (admission: any) => admission.executionReason,
+    eligible_execution_modes: (admission: any) => admission.eligibleExecutionModes,
     wait_until: (admission: any) => admission.waitUntil,
     idempotency_key: (admission: any) => admission.idempotencyKey,
   },

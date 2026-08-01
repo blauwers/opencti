@@ -17,6 +17,14 @@ enum BatchExecutionPreference {
   LEGACY_SPLIT
 }
 
+enum BatchExecutionReason {
+  EXPLICIT_COMPATIBILITY
+  EXPLICIT_LEGACY_SPLIT
+  IDENTITY_INDICATOR_ATOMIC_COHORT
+  GENERIC_BULK_COMPATIBLE
+  OPERATIONAL_BUNDLE_COMPATIBILITY
+}
+
 enum BatchWaitUntil {
   COMMITTED
   MATERIALIZED
@@ -38,6 +46,8 @@ type BatchAdmission {
   object_types: [String!]!
   execution_preference: BatchExecutionPreference!
   execution_mode: BatchExecutionMode!
+  execution_reason: BatchExecutionReason!
+  eligible_execution_modes: [BatchExecutionMode!]!
   wait_until: BatchWaitUntil!
   status: BatchAdmissionStatus!
   idempotency_key: String!

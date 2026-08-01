@@ -3,6 +3,7 @@ import {
   BatchAdmissionErrorCode,
   BatchExecutionMode,
   BatchExecutionPreference,
+  BatchExecutionReason,
   BatchWaitUntil,
 } from '../../../src/modules/batch/batch-types';
 import {
@@ -49,20 +50,26 @@ const bundle = JSON.stringify({
   id: 'bundle--11111111-1111-4111-8111-111111111111',
   objects: [
     { type: 'identity', id: 'identity--11111111-1111-4111-8111-111111111111' },
-    { type: 'indicator', id: 'indicator--11111111-1111-4111-8111-111111111111' },
-    { type: 'indicator', id: 'indicator--22222222-2222-4222-8222-222222222222' },
+    { type: 'indicator', id: 'indicator--11111111-1111-4111-8111-111111111111', created_by_ref: 'identity--11111111-1111-4111-8111-111111111111' },
+    { type: 'indicator', id: 'indicator--22222222-2222-4222-8222-222222222222', created_by_ref: 'identity--11111111-1111-4111-8111-111111111111' },
   ],
 });
 
 describe('batch admission contract', () => {
-  it('prepares intact bundles with compatibility defaults', () => {
+  it('classifies identity plus indicator bundles as the first atomic cohort by default', () => {
     const prepared = prepareBundleSubmission(bundle);
 
     expect(prepared.bundleId).toBe('bundle--11111111-1111-4111-8111-111111111111');
     expect(prepared.objectCount).toBe(3);
     expect(prepared.objectTypes).toEqual(['identity', 'indicator']);
     expect(prepared.executionPreference).toBe(BatchExecutionPreference.Auto);
-    expect(prepared.executionMode).toBe(BatchExecutionMode.Compatibility);
+    expect(prepared.executionMode).toBe(BatchExecutionMode.Atomic);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.IdentityIndicatorAtomicCohort);
+    expect(prepared.eligibleExecutionModes).toEqual([
+      BatchExecutionMode.Atomic,
+      BatchExecutionMode.Bulk,
+      BatchExecutionMode.Compatibility,
+    ]);
     expect(prepared.waitUntil).toBe(BatchWaitUntil.Materialized);
     expect(prepared.idempotencyKey).toBe(prepared.bundleId);
   });
@@ -76,6 +83,7 @@ describe('batch admission contract', () => {
 
     expect(prepared.executionPreference).toBe(BatchExecutionPreference.LegacySplit);
     expect(prepared.executionMode).toBe(BatchExecutionMode.LegacySplit);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.ExplicitLegacySplit);
     expect(prepared.waitUntil).toBe(BatchWaitUntil.Committed);
     expect(prepared.idempotencyKey).toBe('feed-run-2026-08-01');
   });
@@ -91,12 +99,54 @@ describe('batch admission contract', () => {
     expect(prepared.idempotencyKey).toBe(prepared.bundleId);
   });
 
-  it('rejects execution preferences that do not have an executor yet', () => {
-    expect(() => prepareBundleSubmission(bundle, { executionPreference: BatchExecutionPreference.Atomic }))
+  it('classifies generic non-operational bundles as bulk-compatible', () => {
+    const prepared = prepareBundleSubmission(JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--22222222-2222-4222-8222-222222222222',
+      objects: [
+        { type: 'identity', id: 'identity--11111111-1111-4111-8111-111111111111' },
+        { type: 'malware', id: 'malware--11111111-1111-4111-8111-111111111111' },
+      ],
+    }));
+
+    expect(prepared.executionMode).toBe(BatchExecutionMode.Bulk);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.GenericBulkCompatible);
+    expect(prepared.eligibleExecutionModes).toEqual([
+      BatchExecutionMode.Bulk,
+      BatchExecutionMode.Compatibility,
+    ]);
+  });
+
+  it('keeps operational bundles on compatibility execution', () => {
+    const prepared = prepareBundleSubmission(JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--33333333-3333-4333-8333-333333333333',
+      objects: [
+        {
+          type: 'indicator',
+          id: 'indicator--11111111-1111-4111-8111-111111111111',
+          extensions: {
+            'extension-definition--test': { opencti_operation: 'patch' },
+          },
+        },
+      ],
+    }));
+
+    expect(prepared.executionMode).toBe(BatchExecutionMode.Compatibility);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.OperationalBundleCompatibility);
+    expect(prepared.eligibleExecutionModes).toEqual([BatchExecutionMode.Compatibility]);
+  });
+
+  it('rejects explicit execution preferences when the bundle is not eligible', () => {
+    expect(() => prepareBundleSubmission(JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--33333333-3333-4333-8333-333333333333',
+      objects: [{ type: 'malware', id: 'malware--11111111-1111-4111-8111-111111111111' }],
+    }), { executionPreference: BatchExecutionPreference.Atomic }))
       .toThrowError(expect.objectContaining({
         extensions: expect.objectContaining({
           data: expect.objectContaining({
-            batch_error_code: BatchAdmissionErrorCode.UnsupportedExecutionPreference,
+            batch_error_code: BatchAdmissionErrorCode.ExecutionPreferenceNotEligible,
           }),
         }),
       }));
@@ -114,7 +164,13 @@ describe('batch admission contract', () => {
       no_split: true,
       split_bundles: false,
       batch_id: prepared.bundleId,
-      batch_execution_mode: BatchExecutionMode.Compatibility,
+      batch_execution_mode: BatchExecutionMode.Atomic,
+      batch_execution_reason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+      batch_eligible_execution_modes: [
+        BatchExecutionMode.Atomic,
+        BatchExecutionMode.Bulk,
+        BatchExecutionMode.Compatibility,
+      ],
       batch_wait_until: BatchWaitUntil.Materialized,
       batch_idempotency_key: prepared.bundleId,
     });
@@ -141,7 +197,8 @@ describe('submitStixBundle', () => {
       bundleId: 'bundle--11111111-1111-4111-8111-111111111111',
       workId: 'work-1',
       objectCount: 3,
-      executionMode: BatchExecutionMode.Compatibility,
+      executionMode: BatchExecutionMode.Atomic,
+      executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
       waitUntil: BatchWaitUntil.Materialized,
     });
     expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-1', 3);
@@ -149,7 +206,8 @@ describe('submitStixBundle', () => {
       'connector-1',
       expect.objectContaining({
         batch_id: admission.batchId,
-        batch_execution_mode: BatchExecutionMode.Compatibility,
+        batch_execution_mode: BatchExecutionMode.Atomic,
+        batch_execution_reason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
         batch_wait_until: BatchWaitUntil.Materialized,
         no_split: true,
         split_bundles: false,

@@ -17,6 +17,14 @@ export enum BatchExecutionPreference {
   LegacySplit = 'LEGACY_SPLIT',
 }
 
+export enum BatchExecutionReason {
+  ExplicitCompatibility = 'EXPLICIT_COMPATIBILITY',
+  ExplicitLegacySplit = 'EXPLICIT_LEGACY_SPLIT',
+  IdentityIndicatorAtomicCohort = 'IDENTITY_INDICATOR_ATOMIC_COHORT',
+  GenericBulkCompatible = 'GENERIC_BULK_COMPATIBLE',
+  OperationalBundleCompatibility = 'OPERATIONAL_BUNDLE_COMPATIBILITY',
+}
+
 export enum BatchWaitUntil {
   Committed = 'COMMITTED',
   Materialized = 'MATERIALIZED',
@@ -29,6 +37,7 @@ export enum BatchAdmissionErrorCode {
   InvalidIdempotencyKey = 'INVALID_IDEMPOTENCY_KEY',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
   UnsupportedExecutionPreference = 'UNSUPPORTED_EXECUTION_PREFERENCE',
+  ExecutionPreferenceNotEligible = 'EXECUTION_PREFERENCE_NOT_ELIGIBLE',
 }
 
 export interface BatchSubmitOptions {
@@ -42,10 +51,13 @@ export interface BatchSubmitOptions {
 export interface PreparedBundleSubmission {
   bundle: string;
   bundleId: string;
+  objects: Record<string, any>[];
   objectCount: number;
   objectTypes: string[];
   executionPreference: BatchExecutionPreference;
   executionMode: BatchExecutionMode;
+  executionReason: BatchExecutionReason;
+  eligibleExecutionModes: BatchExecutionMode[];
   waitUntil: BatchWaitUntil;
   idempotencyKey: string;
   cleanupInconsistentBundle: boolean;
@@ -60,6 +72,8 @@ export interface BatchAdmission {
   objectTypes: string[];
   executionPreference: BatchExecutionPreference;
   executionMode: BatchExecutionMode;
+  executionReason: BatchExecutionReason;
+  eligibleExecutionModes: BatchExecutionMode[];
   waitUntil: BatchWaitUntil;
   status: BatchAdmissionStatus;
   idempotencyKey: string;
@@ -78,6 +92,8 @@ export interface BatchQueueMessage {
   cleanup_inconsistent_bundle: boolean;
   batch_id: string;
   batch_execution_mode: BatchExecutionMode;
+  batch_execution_reason: BatchExecutionReason;
+  batch_eligible_execution_modes: BatchExecutionMode[];
   batch_wait_until: BatchWaitUntil;
   batch_idempotency_key: string;
 }

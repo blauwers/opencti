@@ -5,6 +5,7 @@ import {
   BatchAdmissionStatus,
   BatchExecutionMode,
   BatchExecutionPreference,
+  BatchExecutionReason,
   type BatchAdmission,
   type BatchQueueMessage,
   type BatchSubmitOptions,
@@ -13,6 +14,8 @@ import {
 } from './batch-types';
 
 const BUNDLE_PREFIX = 'bundle--';
+const IDENTITY_TYPE = 'identity';
+const INDICATOR_TYPE = 'indicator';
 
 const batchContractError = (message: string, code: BatchAdmissionErrorCode, data: Record<string, unknown> = {}) => {
   return FunctionalError(message, { batch_error_code: code, ...data });
@@ -38,34 +41,132 @@ const normalizeWaitUntil = (waitUntil: BatchSubmitOptions['waitUntil']): BatchWa
   throw batchContractError('Invalid batch wait_until value', BatchAdmissionErrorCode.InvalidWaitUntil, { wait_until: waitUntil });
 };
 
-const normalizeExecutionPreference = (options: BatchSubmitOptions): {
+const hasOpenCtiOperation = (object: Record<string, any>): boolean => {
+  if (object.opencti_operation !== undefined || object.x_opencti_operation !== undefined) {
+    return true;
+  }
+  return Object.values(object.extensions ?? {}).some((extension) => {
+    return typeof extension === 'object'
+      && extension !== null
+      && ('opencti_operation' in extension || 'x_opencti_operation' in extension);
+  });
+};
+
+const isIdentityIndicatorAtomicCohort = (objects: Record<string, any>[]): boolean => {
+  if (objects.length < 2 || objects.some((object) => hasOpenCtiOperation(object))) {
+    return false;
+  }
+  const identities = objects.filter((object) => object.type === IDENTITY_TYPE);
+  const indicators = objects.filter((object) => object.type === INDICATOR_TYPE);
+  if (identities.length !== 1 || indicators.length !== objects.length - 1) {
+    return false;
+  }
+  const identityId = identities[0].id;
+  return typeof identityId === 'string'
+    && indicators.every((indicator) => indicator.created_by_ref === identityId);
+};
+
+const isGenericBulkCompatible = (objects: Record<string, any>[]): boolean => {
+  return objects.every((object) => !hasOpenCtiOperation(object));
+};
+
+const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Record<string, any>[]): {
   executionPreference: BatchExecutionPreference;
   executionMode: BatchExecutionMode;
+  executionReason: BatchExecutionReason;
+  eligibleExecutionModes: BatchExecutionMode[];
 } => {
   if (options.splitBundles === true) {
     return {
       executionPreference: BatchExecutionPreference.LegacySplit,
       executionMode: BatchExecutionMode.LegacySplit,
+      executionReason: BatchExecutionReason.ExplicitLegacySplit,
+      eligibleExecutionModes: [BatchExecutionMode.LegacySplit],
     };
   }
   const executionPreference = options.executionPreference ?? BatchExecutionPreference.Auto;
-  if (executionPreference === BatchExecutionPreference.Auto || executionPreference === BatchExecutionPreference.Compatibility) {
-    return {
-      executionPreference,
-      executionMode: BatchExecutionMode.Compatibility,
-    };
-  }
+  const atomicEligible = isIdentityIndicatorAtomicCohort(objects);
+  const bulkEligible = isGenericBulkCompatible(objects);
+  const eligibleExecutionModes = [
+    ...(atomicEligible ? [BatchExecutionMode.Atomic] : []),
+    ...(bulkEligible ? [BatchExecutionMode.Bulk] : []),
+    BatchExecutionMode.Compatibility,
+  ];
   if (executionPreference === BatchExecutionPreference.LegacySplit) {
     return {
       executionPreference,
       executionMode: BatchExecutionMode.LegacySplit,
+      executionReason: BatchExecutionReason.ExplicitLegacySplit,
+      eligibleExecutionModes: [BatchExecutionMode.LegacySplit],
     };
   }
-  throw batchContractError(
-    'Requested batch execution preference is not available yet',
-    BatchAdmissionErrorCode.UnsupportedExecutionPreference,
-    { execution_preference: executionPreference },
-  );
+  if (executionPreference === BatchExecutionPreference.Compatibility) {
+    return {
+      executionPreference,
+      executionMode: BatchExecutionMode.Compatibility,
+      executionReason: BatchExecutionReason.ExplicitCompatibility,
+      eligibleExecutionModes,
+    };
+  }
+  if (executionPreference === BatchExecutionPreference.Atomic) {
+    if (!atomicEligible) {
+      throw batchContractError(
+        'Requested batch execution preference is not eligible for this bundle',
+        BatchAdmissionErrorCode.ExecutionPreferenceNotEligible,
+        { execution_preference: executionPreference, eligible_execution_modes: eligibleExecutionModes },
+      );
+    }
+    return {
+      executionPreference,
+      executionMode: BatchExecutionMode.Atomic,
+      executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+      eligibleExecutionModes,
+    };
+  }
+  if (executionPreference === BatchExecutionPreference.Bulk) {
+    if (!bulkEligible) {
+      throw batchContractError(
+        'Requested batch execution preference is not eligible for this bundle',
+        BatchAdmissionErrorCode.ExecutionPreferenceNotEligible,
+        { execution_preference: executionPreference, eligible_execution_modes: eligibleExecutionModes },
+      );
+    }
+    return {
+      executionPreference,
+      executionMode: BatchExecutionMode.Bulk,
+      executionReason: BatchExecutionReason.GenericBulkCompatible,
+      eligibleExecutionModes,
+    };
+  }
+  if (executionPreference !== BatchExecutionPreference.Auto) {
+    throw batchContractError(
+      'Requested batch execution preference is not available',
+      BatchAdmissionErrorCode.UnsupportedExecutionPreference,
+      { execution_preference: executionPreference },
+    );
+  }
+  if (atomicEligible) {
+    return {
+      executionPreference,
+      executionMode: BatchExecutionMode.Atomic,
+      executionReason: BatchExecutionReason.IdentityIndicatorAtomicCohort,
+      eligibleExecutionModes,
+    };
+  }
+  if (bulkEligible) {
+    return {
+      executionPreference,
+      executionMode: BatchExecutionMode.Bulk,
+      executionReason: BatchExecutionReason.GenericBulkCompatible,
+      eligibleExecutionModes,
+    };
+  }
+  return {
+    executionPreference,
+    executionMode: BatchExecutionMode.Compatibility,
+    executionReason: BatchExecutionReason.OperationalBundleCompatibility,
+    eligibleExecutionModes,
+  };
 };
 
 const normalizeIdempotencyKey = (idempotencyKey: BatchSubmitOptions['idempotencyKey'], bundleId: string): string => {
@@ -96,7 +197,7 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
 
   const bundleId = normalizeBundleId(jsonBundle.id);
   const normalizedBundle = { ...jsonBundle, id: bundleId };
-  const { executionPreference, executionMode } = normalizeExecutionPreference(options);
+  const { executionPreference, executionMode, executionReason, eligibleExecutionModes } = normalizeExecutionPreference(options, jsonBundle.objects);
   const waitUntil = normalizeWaitUntil(options.waitUntil);
   const idempotencyKey = normalizeIdempotencyKey(options.idempotencyKey, bundleId);
   const objectTypes = Array.from(new Set(jsonBundle.objects
@@ -106,10 +207,13 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
   return {
     bundle: JSON.stringify(normalizedBundle),
     bundleId,
+    objects: jsonBundle.objects,
     objectCount: jsonBundle.objects.length,
     objectTypes,
     executionPreference,
     executionMode,
+    executionReason,
+    eligibleExecutionModes,
     waitUntil,
     idempotencyKey,
     cleanupInconsistentBundle: options.cleanupInconsistentBundle === true,
@@ -133,6 +237,8 @@ export const buildBatchAdmission = (
     objectTypes: prepared.objectTypes,
     executionPreference: prepared.executionPreference,
     executionMode: prepared.executionMode,
+    executionReason: prepared.executionReason,
+    eligibleExecutionModes: prepared.eligibleExecutionModes,
     waitUntil: prepared.waitUntil,
     status: BatchAdmissionStatus.Accepted,
     idempotencyKey: prepared.idempotencyKey,
@@ -154,6 +260,8 @@ export const buildBatchQueueMessage = (admission: BatchAdmission, applicantId: s
     cleanup_inconsistent_bundle: admission.cleanupInconsistentBundle,
     batch_id: admission.batchId,
     batch_execution_mode: admission.executionMode,
+    batch_execution_reason: admission.executionReason,
+    batch_eligible_execution_modes: admission.eligibleExecutionModes,
     batch_wait_until: admission.waitUntil,
     batch_idempotency_key: admission.idempotencyKey,
   };
