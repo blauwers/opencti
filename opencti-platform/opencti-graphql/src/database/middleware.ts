@@ -2920,7 +2920,7 @@ export const updateAttribute = async <T extends StoreObject>(
   inputs: EditInput[],
   opts: { noEnrich?: boolean } & UpdateAttributeOpts = {},
 ) => {
-  const waitUntil = opts.waitUntil ?? context.batchWaitUntil;
+  const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
   return executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
     executeWrite: async () => {
@@ -3543,7 +3543,7 @@ export const createRelation = async (
   input: Record<string, any>,
   opts: CreateRelationRawOpts = {},
 ) => {
-  const waitUntil = opts.waitUntil ?? context.batchWaitUntil;
+  const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
   const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.CreateRelation,
     executeWrite: () => createRelationRaw(context, user, input, opts),
@@ -4001,7 +4001,7 @@ export const createEntity = async (
   opts: { complete?: boolean } & CreateEntityRawOpts = {},
 ) => {
   const isCompleteResult = opts.complete === true;
-  const waitUntil = opts.waitUntil ?? context.batchWaitUntil;
+  const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
   // volumes of objects relationships must be controlled
   const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.CreateEntity,
