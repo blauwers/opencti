@@ -117,7 +117,7 @@ describe('batch admission contract', () => {
     ]);
   });
 
-  it('keeps operational bundles on compatibility execution', () => {
+  it('keeps operational bundles on the normal bulk execution path', () => {
     const prepared = prepareBundleSubmission(JSON.stringify({
       type: 'bundle',
       id: 'bundle--33333333-3333-4333-8333-333333333333',
@@ -132,9 +132,31 @@ describe('batch admission contract', () => {
       ],
     }));
 
+    expect(prepared.executionMode).toBe(BatchExecutionMode.Bulk);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.GenericBulkCompatible);
+    expect(prepared.eligibleExecutionModes).toEqual([
+      BatchExecutionMode.Bulk,
+      BatchExecutionMode.Compatibility,
+    ]);
+  });
+
+  it('keeps compatibility execution available only when explicitly requested', () => {
+    const prepared = prepareBundleSubmission(JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--44444444-4444-4444-8444-444444444444',
+      objects: [
+        {
+          type: 'indicator',
+          id: 'indicator--11111111-1111-4111-8111-111111111111',
+          extensions: {
+            'extension-definition--test': { opencti_operation: 'patch' },
+          },
+        },
+      ],
+    }), { executionPreference: BatchExecutionPreference.Compatibility });
+
     expect(prepared.executionMode).toBe(BatchExecutionMode.Compatibility);
-    expect(prepared.executionReason).toBe(BatchExecutionReason.OperationalBundleCompatibility);
-    expect(prepared.eligibleExecutionModes).toEqual([BatchExecutionMode.Compatibility]);
+    expect(prepared.executionReason).toBe(BatchExecutionReason.ExplicitCompatibility);
   });
 
   it('rejects explicit execution preferences when the bundle is not eligible', () => {

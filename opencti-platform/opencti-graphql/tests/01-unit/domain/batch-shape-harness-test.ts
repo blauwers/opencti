@@ -99,8 +99,8 @@ const buildFirstEpssShape = (): BundleShape => {
       name: `CVE-2026-${index.toString().padStart(4, '0')}`,
       extensions: operationExtension,
     }))),
-    executionMode: BatchExecutionMode.Compatibility,
-    executionReason: BatchExecutionReason.OperationalBundleCompatibility,
+    executionMode: BatchExecutionMode.Bulk,
+    executionReason: BatchExecutionReason.GenericBulkCompatible,
     objectTypes: ['vulnerability'],
   };
 };

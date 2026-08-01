@@ -66,10 +66,6 @@ const isIdentityIndicatorAtomicCohort = (objects: Record<string, any>[]): boolea
     && indicators.every((indicator) => indicator.created_by_ref === identityId);
 };
 
-const isGenericBulkCompatible = (objects: Record<string, any>[]): boolean => {
-  return objects.every((object) => !hasOpenCtiOperation(object));
-};
-
 const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Record<string, any>[]): {
   executionPreference: BatchExecutionPreference;
   executionMode: BatchExecutionMode;
@@ -86,10 +82,9 @@ const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Reco
   }
   const executionPreference = options.executionPreference ?? BatchExecutionPreference.Auto;
   const atomicEligible = isIdentityIndicatorAtomicCohort(objects);
-  const bulkEligible = isGenericBulkCompatible(objects);
   const eligibleExecutionModes = [
     ...(atomicEligible ? [BatchExecutionMode.Atomic] : []),
-    ...(bulkEligible ? [BatchExecutionMode.Bulk] : []),
+    BatchExecutionMode.Bulk,
     BatchExecutionMode.Compatibility,
   ];
   if (executionPreference === BatchExecutionPreference.LegacySplit) {
@@ -124,13 +119,6 @@ const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Reco
     };
   }
   if (executionPreference === BatchExecutionPreference.Bulk) {
-    if (!bulkEligible) {
-      throw batchContractError(
-        'Requested batch execution preference is not eligible for this bundle',
-        BatchAdmissionErrorCode.ExecutionPreferenceNotEligible,
-        { execution_preference: executionPreference, eligible_execution_modes: eligibleExecutionModes },
-      );
-    }
     return {
       executionPreference,
       executionMode: BatchExecutionMode.Bulk,
@@ -153,18 +141,10 @@ const normalizeExecutionPreference = (options: BatchSubmitOptions, objects: Reco
       eligibleExecutionModes,
     };
   }
-  if (bulkEligible) {
-    return {
-      executionPreference,
-      executionMode: BatchExecutionMode.Bulk,
-      executionReason: BatchExecutionReason.GenericBulkCompatible,
-      eligibleExecutionModes,
-    };
-  }
   return {
     executionPreference,
-    executionMode: BatchExecutionMode.Compatibility,
-    executionReason: BatchExecutionReason.OperationalBundleCompatibility,
+    executionMode: BatchExecutionMode.Bulk,
+    executionReason: BatchExecutionReason.GenericBulkCompatible,
     eligibleExecutionModes,
   };
 };

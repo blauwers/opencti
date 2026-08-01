@@ -59,7 +59,7 @@ const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionState>();
 const pendingMaterializations = new Set<Promise<void>>();
 
 const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
-  executionMode: options.executionMode ?? BatchExecutionMode.Compatibility,
+  executionMode: options.executionMode ?? BatchExecutionMode.Bulk,
   waitUntil: options.waitUntil === BatchWaitUntil.Committed ? BatchWaitUntil.Committed : BatchWaitUntil.Materialized,
 });
 

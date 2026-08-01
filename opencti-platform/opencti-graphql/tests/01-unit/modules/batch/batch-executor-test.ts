@@ -14,7 +14,7 @@ import {
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
 describe('batch executor', () => {
-  it('executes mutations in order with compatibility materialization defaults', async () => {
+  it('executes mutations in order with bulk materialization defaults', async () => {
     const calls: string[] = [];
 
     const execution = await executeBatchMutations([
@@ -36,7 +36,7 @@ describe('batch executor', () => {
 
     expect(calls).toEqual(['entity', 'relation']);
     expect(execution).toEqual({
-      executionMode: BatchExecutionMode.Compatibility,
+      executionMode: BatchExecutionMode.Bulk,
       waitUntil: BatchWaitUntil.Materialized,
       results: ['entity-result', 'relation-result'],
       sideEffectKinds: [],
