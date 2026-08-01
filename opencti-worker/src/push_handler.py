@@ -181,6 +181,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                             "batch_execution_mode"
                         )
                         import_kwargs["wait_until"] = data.get("batch_wait_until")
+                        import_kwargs["backend_batch_plan"] = data.get("batch_plan")
                     imported_items, too_large_items_bundles = import_bundle(
                         raw_content,
                         update,

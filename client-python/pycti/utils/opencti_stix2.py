@@ -20,8 +20,8 @@ from opentelemetry import metrics
 from requests import RequestException, Timeout
 from typing_extensions import deprecated
 
-from pycti.entities.opencti_identity import Identity
 from pycti.api.opencti_api_batch import BatchMutationPlan, BatchMutationPlanUnsupported
+from pycti.entities.opencti_identity import Identity
 from pycti.utils.constants import (
     IdentityTypes,
     LocationTypes,
@@ -448,6 +448,7 @@ class OpenCTIStix2:
         report_expectations: bool = True,
         execution_mode: str = None,
         wait_until: str = None,
+        backend_batch_plan: Optional[Dict] = None,
     ) -> Tuple[list, list]:
         """Import a STIX2 bundle through one backend mutation-plan request."""
         data = json.loads(json_data)
@@ -461,6 +462,7 @@ class OpenCTIStix2:
                 cleanup_inconsistent_bundle,
                 report_expectations,
                 batch_plan=plan,
+                backend_batch_plan=backend_batch_plan,
             )
         self.opencti.execute_batch_mutation_plan(
             plan,
@@ -3721,6 +3723,35 @@ class OpenCTIStix2:
         }
         return item
 
+    @staticmethod
+    def _build_backend_execution_phases(
+        backend_batch_plan: Optional[Dict],
+    ) -> Dict[str, int]:
+        """Build an object-id to execution-phase map from backend admission metadata."""
+        if not isinstance(backend_batch_plan, dict):
+            return {}
+        if backend_batch_plan.get("version") != 1:
+            return {}
+        execution_phases = backend_batch_plan.get("execution_phases")
+        if not isinstance(execution_phases, list):
+            return {}
+        phases_by_id = {}
+        for execution_phase in execution_phases:
+            if not isinstance(execution_phase, dict):
+                continue
+            phase = execution_phase.get("phase")
+            object_ids = execution_phase.get("object_ids")
+            if (
+                not isinstance(phase, int)
+                or phase < 0
+                or not isinstance(object_ids, list)
+            ):
+                continue
+            for object_id in object_ids:
+                if isinstance(object_id, str):
+                    phases_by_id[object_id] = phase
+        return phases_by_id
+
     def import_bundle(
         self,
         stix_bundle: Dict,
@@ -3731,6 +3762,7 @@ class OpenCTIStix2:
         cleanup_inconsistent_bundle: bool = False,
         report_expectations: bool = True,
         batch_plan: Optional[BatchMutationPlan] = None,
+        backend_batch_plan: Optional[Dict] = None,
     ) -> Tuple[list, list]:
         """Import a complete STIX2 bundle into OpenCTI.
 
@@ -3754,6 +3786,9 @@ class OpenCTIStix2:
         :param batch_plan: Active mutation plan used to tag each item's operations with
             a dependency phase for backend execution.
         :type batch_plan: BatchMutationPlan or None, optional
+        :param backend_batch_plan: Backend-admitted dependency phase plan. When present,
+            its execution phases are authoritative for captured mutation groups.
+        :type backend_batch_plan: dict or None, optional
         :return: Tuple of (list of successfully imported elements, list of failed/too-large elements)
         :rtype: Tuple[list, list]
         :raises ValueError: If the bundle is not properly formatted or empty
@@ -3778,6 +3813,9 @@ class OpenCTIStix2:
             - len(ordered_elements)
             - len(incompatible_elements),
             0,
+        )
+        backend_execution_phases = self._build_backend_execution_phases(
+            backend_batch_plan
         )
 
         # Report every element ignored during bundle preparation.
@@ -3824,7 +3862,9 @@ class OpenCTIStix2:
                 too_large_elements_bundles.append(item)
             else:
                 execution_group = (
-                    batch_plan.execution_group(item.get("nb_deps", 0))
+                    batch_plan.execution_group(
+                        backend_execution_phases.get(item["id"], item.get("nb_deps", 0))
+                    )
                     if batch_plan is not None
                     else nullcontext()
                 )

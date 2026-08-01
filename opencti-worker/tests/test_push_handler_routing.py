@@ -119,9 +119,9 @@ def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch
     assert result == "ack"
     handler.api.stix2.import_bundle_from_json.assert_not_called()
     handler.api.stix2.import_bundle_from_json_batch.assert_called_once()
-    imported_raw_content = handler.api.stix2.import_bundle_from_json_batch.call_args.args[
-        0
-    ]
+    imported_raw_content = (
+        handler.api.stix2.import_bundle_from_json_batch.call_args.args[0]
+    )
     assert json.loads(imported_raw_content)["id"] == (
         "bundle--11111111-1111-4111-8111-111111111111"
     )
@@ -154,6 +154,29 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
         == "COMMITTED"
     )
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+
+
+def test_handler_forwards_backend_batch_plan_to_batch_importer():
+    handler = build_handler()
+    backend_batch_plan = {
+        "version": 1,
+        "execution_phases": [
+            {"phase": 0, "object_ids": ["indicator--1"]},
+            {"phase": 1, "object_ids": ["indicator--2"]},
+        ],
+    }
+
+    result = handler.handle_message(
+        build_message(split_bundles=False, batch_plan=backend_batch_plan)
+    )
+
+    assert result == "ack"
+    assert (
+        handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs[
+            "backend_batch_plan"
+        ]
+        == backend_batch_plan
+    )
 
 
 def test_handler_requeues_child_bundles_only_for_explicit_split(monkeypatch):

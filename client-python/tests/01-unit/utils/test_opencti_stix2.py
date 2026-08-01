@@ -373,6 +373,67 @@ def test_import_bundle_batch_tags_item_mutations_with_dependency_phases(
     ]
 
 
+def test_import_bundle_batch_prefers_backend_execution_phases(
+    monkeypatch,
+) -> None:
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+    plan = BatchMutationPlan()
+
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
+        plan.capture(
+            "mutation Record($value: String!) { record(value: $value) }",
+            {"value": item["id"]},
+            [],
+        )
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--11111111-1111-4111-8111-111111111111",
+            "objects": [
+                {
+                    "type": "indicator",
+                    "id": "indicator--11111111-1111-4111-8111-111111111111",
+                    "created_by_ref": "identity--22222222-2222-4222-8222-222222222222",
+                },
+                {
+                    "type": "identity",
+                    "id": "identity--22222222-2222-4222-8222-222222222222",
+                },
+            ],
+        },
+        batch_plan=plan,
+        backend_batch_plan={
+            "version": 1,
+            "execution_phases": [
+                {
+                    "phase": 0,
+                    "object_ids": ["identity--22222222-2222-4222-8222-222222222222"],
+                },
+                {
+                    "phase": 7,
+                    "object_ids": ["indicator--11111111-1111-4111-8111-111111111111"],
+                },
+            ],
+        },
+    )
+
+    assert [
+        (operation["execution_phase"], operation["variables"])
+        for operation in plan.operations
+    ] == [
+        (0, '{"value": "identity--22222222-2222-4222-8222-222222222222"}'),
+        (7, '{"value": "indicator--11111111-1111-4111-8111-111111111111"}'),
+    ]
+
+
 def test_extract_embedded_storage_path_ignores_query_string(
     opencti_stix2: OpenCTIStix2,
 ):
