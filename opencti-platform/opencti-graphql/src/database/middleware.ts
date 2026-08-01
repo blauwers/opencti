@@ -4105,6 +4105,7 @@ type InternalDeleteElementByIdOpts = LoadByIdsWithDependeciesOpts & EventOpts & 
   commitMessage?: string;
   forceDelete?: boolean;
   forceRefresh?: boolean;
+  waitUntil?: BatchWaitUntil;
 };
 export const internalDeleteElementById = async <T extends StoreObject>(
   context: AuthContext,
@@ -4249,13 +4250,17 @@ export const deleteElementById = async <T extends StoreObject>(
   user: AuthUser,
   id: string,
   type: string | undefined | null,
-  opts = {},
+  opts: InternalDeleteElementByIdOpts = {},
 ) => {
   if (R.isNil(type)) {
     /* v8 ignore next */
     throw FunctionalError('You need to specify a type when deleting an entity');
   }
-  const { element: deleted } = await internalDeleteElementById<T>(context, user, id, type, opts);
+  const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
+  const { element: deleted } = await executeSingleBatchMutation({
+    kind: BatchMutationKind.DeleteElement,
+    executeWrite: () => internalDeleteElementById<T>(context, user, id, type, opts),
+  }, { waitUntil });
   return deleted;
 };
 export const deleteInferredRuleElement = async (

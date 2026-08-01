@@ -6,6 +6,7 @@ export enum BatchMutationKind {
   CreateEntity = 'CREATE_ENTITY',
   CreateRelation = 'CREATE_RELATION',
   UpdateAttribute = 'UPDATE_ATTRIBUTE',
+  DeleteElement = 'DELETE_ELEMENT',
   GraphqlOperation = 'GRAPHQL_OPERATION',
 }
 
