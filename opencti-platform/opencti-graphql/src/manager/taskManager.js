@@ -258,7 +258,7 @@ const buildAndSendBundle = async (context, user, task, objects, opts) => {
   const content = Buffer.from(stixBundle, 'utf-8').toString('base64');
   const splitBundles = opts.splitBundles === true;
   if (!splitBundles) {
-    await updateExpectationsNumber(context, user, task.work_id, objects.length);
+    await updateExpectationsNumber(context, user, task.work_id, 1);
   }
   await pushToWorkerForConnector(task.connector_id, {
     type: 'bundle',

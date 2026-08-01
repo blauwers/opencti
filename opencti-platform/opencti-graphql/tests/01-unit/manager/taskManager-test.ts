@@ -138,7 +138,7 @@ describe('TaskManager sendResultToQueue tests', () => {
     expect(bundle.objects.map((o: { id: string }) => o.id)).toEqual(['object-1', 'object-2', 'object-3']);
 
     expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
-    expect(updateExpectationsNumber).toHaveBeenCalledWith(context, user, 'work-123', 3);
+    expect(updateExpectationsNumber).toHaveBeenCalledWith(context, user, 'work-123', 1);
   });
 
   it('should keep the legacy forceNoSplit option harmless', async () => {
@@ -167,9 +167,9 @@ describe('TaskManager sendResultToQueue tests', () => {
     expect(bundle.objects).toHaveLength(3);
     expect(bundle.objects.map((o: { id: string }) => o.id)).toEqual(['object-1', 'object-2', 'object-3']);
 
-    // updateExpectationsNumber should be called once with the total count
+    // An intact bundle is one admitted work unit, regardless of object count.
     expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
-    expect(updateExpectationsNumber).toHaveBeenCalledWith(context, user, 'work-123', 3);
+    expect(updateExpectationsNumber).toHaveBeenCalledWith(context, user, 'work-123', 1);
   });
 
   it('should only request bundle splitting when explicitly asked', async () => {
