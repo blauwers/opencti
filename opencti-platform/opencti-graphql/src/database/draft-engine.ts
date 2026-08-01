@@ -1,10 +1,7 @@
-import * as R from 'ramda';
 import { isDraftIndex, READ_INDEX_DRAFT_OBJECTS, READ_INDEX_HISTORY, READ_INDEX_INTERNAL_OBJECTS } from './utils';
 import { DatabaseError, UnsupportedError } from '../config/errors';
 import {
-  BULK_TIMEOUT,
   computeDeleteElementsImpacts,
-  elBulk,
   elDeleteInstances,
   elFindByIds,
   elRawDeleteByQuery,
@@ -12,7 +9,7 @@ import {
   elRemoveDraftIdFromElements,
   elRemoveRelationConnection,
   elReplace,
-  ES_RETRY_ON_CONFLICT,
+  elUpdateEntityConnections,
   getRelationsToRemove,
   isImpactedRole,
 } from './engine';
@@ -28,7 +25,6 @@ import { isBasicRelationship } from '../schema/stixRelationship';
 import { getDraftContext } from '../utils/draftContext';
 import { buildReverseUpdateFieldPatch } from './draft-utils';
 import { storeLoadByIdWithRefs, updateAttributeFromLoadedWithRefs } from './middleware';
-import { buildRefRelationKey } from '../schema/general';
 import { getFileContent } from './raw-file-storage';
 import { loadFile } from './file-storage';
 import { rewriteMarkdownPatchUpdatesForExport } from './middlewareEmbeddedImages';
@@ -117,21 +113,17 @@ const removeDraftDeleteLinkedRelations = async (
       return undefined;
     }
     const targetId = isFromImpact ? rel.toId : rel.fromId;
-    // Create params and scripted update
-    const field = buildRefRelationKey(rel.relationship_type);
-    let script = `if (ctx._source['${field}'] == null) ctx._source['${field}'] = [];`;
-    script += `ctx._source['${field}'].addAll(params['${field}']);`;
-    const source = script;
-    const params = { [field]: [targetId] };
-    return { ...dep, _id: dep._id, data: { script: { source, params } } };
+    return {
+      _index: dep._index,
+      _id: dep._id,
+      id: dep.internal_id,
+      toReplace: null,
+      relationType: rel.relationship_type,
+      data: { internal_id: targetId },
+    };
   }).filter((e) => e);
-  const bodyUpdate = elementsToUpdate.flatMap((doc) => [
-    { update: { _index: doc._index, _id: doc._id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
-    R.dissoc('_index', doc.data),
-  ]);
-  if (bodyUpdate.length > 0) {
-    const bulkPromise = elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body: bodyUpdate });
-    await Promise.all([bulkPromise]);
+  if (elementsToUpdate.length > 0) {
+    await elUpdateEntityConnections(context, elementsToUpdate);
   }
 
   // After reapplying denormalized refs, we delete relations draft instaces and we remove draftId from live instances

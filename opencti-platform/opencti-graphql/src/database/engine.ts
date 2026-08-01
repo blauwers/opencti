@@ -164,7 +164,7 @@ import { ENTITY_TYPE_DELETE_OPERATION } from '../modules/deleteOperation/deleteO
 import { buildEntityData } from './data-builder';
 import { buildDraftFilter, type BuildDraftFilterOpts, isDraftSupportedEntity } from './draft-utils';
 import { controlUserConfidenceAgainstElement } from '../utils/confidence-level';
-import { getDraftContext } from '../utils/draftContext';
+import { bypassDraftContext, getDraftContext } from '../utils/draftContext';
 import { enrichWithRemoteCredentials } from '../config/credentials';
 import { ENTITY_TYPE_DRAFT_WORKSPACE } from '../modules/draftWorkspace/draftWorkspace-types';
 import { ENTITY_IPV4_ADDR, ENTITY_IPV6_ADDR, isStixCyberObservable } from '../schema/stixCyberObservable';
@@ -4292,6 +4292,20 @@ const buildRawUpdateOperation = (
   retry,
   apply,
 });
+export const elUpdateWithBufferedApply = async (
+  context: AuthContext,
+  indexName: string,
+  documentId: string,
+  documentBody: Record<string, any>,
+  apply: BufferedBulkUpdateOperation['apply'],
+  retry = ES_RETRY_ON_CONFLICT,
+) => {
+  const operation = buildRawUpdateOperation(indexName, documentId, documentBody, apply, retry);
+  if (bufferBulkUpdateOperations(context, [operation], true)) {
+    return;
+  }
+  return elUpdateNow(context, indexName, documentId, documentBody, retry);
+};
 /* v8 ignore next */
 export const elUpdate = async (
   context: AuthContext,
@@ -4904,6 +4918,18 @@ export const elRemoveDraftIdFromElements = async (
   draftId: string,
   elementsIds: string[],
 ) => {
+  if (isBatchWriteBoundaryOpen() && elementsIds.length > 0) {
+    const liveContext = bypassDraftContext(context);
+    const liveUser = { ...user, draft_context: undefined };
+    const liveElements = await elFindByIds<BasicStoreBase>(liveContext, liveUser, elementsIds, {
+      indices: READ_DATA_INDICES_WITHOUT_INTERNAL_WITHOUT_INFERRED,
+    }) as BasicStoreBase[];
+    await Promise.all(liveElements.map((element) => {
+      const draftIds = (element.draft_ids ?? []).filter((currentDraftId) => currentDraftId !== draftId);
+      return elReplace(context, element._index, element._id ?? element.internal_id, { doc: { draft_ids: draftIds } });
+    }));
+    return;
+  }
   const revertDraftIdSource = `
     if (ctx._source.containsKey('draft_ids')) {
       for (int i = 0; i < ctx._source.draft_ids.length; ++i){
@@ -4975,7 +5001,11 @@ export const copyLiveElementToDraft = async (
       params: { allDraftIds },
     },
   };
-  await elUpdate(context, element._index, element.internal_id, addDraftIdScript);
+  await elUpdateWithBufferedApply(context, element._index, element.internal_id, addDraftIdScript, (existing) => {
+    const currentDraftIds = Array.isArray(existing.draft_ids) ? existing.draft_ids : [];
+    const liveDraftIds = currentDraftIds.filter((draftId) => allDraftIds.includes(draftId));
+    return { ...existing, draft_ids: [...liveDraftIds, draftContext] };
+  });
 
   return updatedElement;
 };

@@ -1,12 +1,12 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { elDeleteElements, elDeleteInstances, elLoadById, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
+import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { addMalware } from '../../../src/domain/malware';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
 import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
-import { INDEX_DELETED_OBJECTS } from '../../../src/database/utils';
+import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS } from '../../../src/database/utils';
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
 import { FilterMode, FilterOperator } from '../../../src/generated/graphql';
@@ -421,5 +421,71 @@ describe('batch engine writes', () => {
     await expect(internalLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id)).resolves.toBeUndefined();
     await expect(elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] })).resolves.toBeDefined();
     await expect(findDeleteOperationsForMainEntity(softDeleteMalware.internal_id)).resolves.toHaveLength(1);
+  });
+
+  it('keeps draft copies and live draft markers inside the batch boundary until commit', async () => {
+    const draftCopyMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch draft copy ${uuidv4()}` });
+    cleanupMalwares.push(draftCopyMalware);
+    const draftId = `draft--${uuidv4()}`;
+    const draftContext = { ...testContext, draft_context: draftId };
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await copyLiveElementToDraft(draftContext, ADMIN_USER, draftCopyMalware);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const bufferedDraftCopy = await elLoadById(draftContext, ADMIN_USER, draftCopyMalware.internal_id);
+          const bufferedLive = await internalLoadById(testContext, ADMIN_USER, draftCopyMalware.internal_id) as any;
+          expect(bufferedDraftCopy?._index).toContain(INDEX_DRAFT_OBJECTS);
+          expect(bufferedDraftCopy?.internal_id).toBe(draftCopyMalware.internal_id);
+          expect(bufferedLive?.draft_ids).toContain(draftId);
+          throw new Error('abort draft copy batch');
+        },
+      },
+    ])).rejects.toThrow('abort draft copy batch');
+
+    const committedLive = await internalLoadById(testContext, ADMIN_USER, draftCopyMalware.internal_id) as any;
+    expect(committedLive?.draft_ids ?? []).not.toContain(draftId);
+    await expect(elLoadById(testContext, ADMIN_USER, draftCopyMalware.internal_id, { indices: [INDEX_DRAFT_OBJECTS] })).resolves.toBeUndefined();
+  });
+
+  it('keeps revert-style draft marker removal inside the batch boundary until commit', async () => {
+    const revertDraftMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch revert draft ${uuidv4()}` });
+    cleanupMalwares.push(revertDraftMalware);
+    const draftId = `draft--${uuidv4()}`;
+    const draftContext = { ...testContext, draft_context: draftId };
+    await elReplace(testContext, revertDraftMalware._index, revertDraftMalware._id ?? revertDraftMalware.internal_id, {
+      doc: { draft_ids: [draftId] },
+    });
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elRemoveDraftIdFromElements(draftContext, ADMIN_USER, draftId, [revertDraftMalware.internal_id]);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const bufferedLive = await internalLoadById(testContext, ADMIN_USER, revertDraftMalware.internal_id) as any;
+          expect(bufferedLive?.draft_ids ?? []).not.toContain(draftId);
+          throw new Error('abort draft marker removal batch');
+        },
+      },
+    ])).rejects.toThrow('abort draft marker removal batch');
+
+    const committedLive = await internalLoadById(testContext, ADMIN_USER, revertDraftMalware.internal_id) as any;
+    expect(committedLive?.draft_ids).toContain(draftId);
+    await elReplace(testContext, revertDraftMalware._index, revertDraftMalware._id ?? revertDraftMalware.internal_id, {
+      doc: { draft_ids: [] },
+    });
   });
 });
