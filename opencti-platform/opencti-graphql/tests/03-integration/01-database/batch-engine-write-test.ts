@@ -9,10 +9,10 @@ import { fileToReadStream, uploadToStorage } from '../../../src/database/file-st
 import { getFileContent } from '../../../src/database/raw-file-storage';
 import { findById as findDocumentById, IMPORT_STORAGE_PATH } from '../../../src/modules/internal/document/document-domain';
 import { addMalware } from '../../../src/domain/malware';
-import { loadWorkById } from '../../../src/domain/work';
+import { createWork, loadWorkById } from '../../../src/domain/work';
 import { addStixCyberObservable, stixCyberObservableDelete } from '../../../src/domain/stixCyberObservable';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
-import { BatchMutationKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
+import { BatchMutationKind, BatchSideEffectKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
 import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS, INDEX_FILES, INDEX_HISTORY } from '../../../src/database/utils';
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
@@ -25,6 +25,7 @@ import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
 import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
 import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
+import { redisDeleteWorks, redisGetWork } from '../../../src/database/redis';
 
 describe('batch engine writes', () => {
   let malware: any;
@@ -90,6 +91,13 @@ describe('batch engine writes', () => {
     errors: [],
   });
 
+  const buildWorkConnector = () => ({
+    internal_id: `connector--${uuidv4()}`,
+    connector_type: 'EXTERNAL_IMPORT',
+    connector_name: 'Batch work connector',
+    name: 'Batch work connector',
+  });
+
   afterAll(async () => {
     if (malware) {
       await deleteElementById(testContext, ADMIN_USER, malware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
@@ -133,6 +141,7 @@ describe('batch engine writes', () => {
         await elDeleteInstances(testContext, [cleanupWork]);
       }
     }
+    await redisDeleteWorks(cleanupWorkIds);
   });
 
   it('buffers update writes and exposes them to later mutations in the same batch', async () => {
@@ -280,6 +289,51 @@ describe('batch engine writes', () => {
 
     const committed = await loadWorkById(testContext, ADMIN_USER, directWork.internal_id) as any;
     expect(committed?.name).toBe(directWork.name);
+  });
+
+  it('keeps work Redis initialization outside an aborted batch', async () => {
+    let workId: string | undefined;
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          const work = await createWork(testContext, ADMIN_USER, buildWorkConnector(), `Batch aborted work ${uuidv4()}`, 'batch-source') as any;
+          workId = work.id;
+          const bufferedRedisWork = await redisGetWork(work.id);
+          expect(bufferedRedisWork?.is_initialized).toBeUndefined();
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          throw new Error('abort work lifecycle batch');
+        },
+      },
+    ])).rejects.toThrow('abort work lifecycle batch');
+
+    expect(workId).toBeDefined();
+    const abortedRedisWork = await redisGetWork(workId as string);
+    expect(abortedRedisWork?.is_initialized).toBeUndefined();
+    await expect(loadWorkById(testContext, ADMIN_USER, workId as string)).resolves.toBeUndefined();
+  });
+
+  it('initializes work Redis state after batch commit', async () => {
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          return createWork(testContext, ADMIN_USER, buildWorkConnector(), `Batch committed work ${uuidv4()}`, 'batch-source');
+        },
+      },
+    ]);
+    const committedWork = execution.results[0] as any;
+    cleanupWorkIds.push(committedWork.id);
+
+    expect(execution.sideEffectKinds).toContain(BatchSideEffectKind.WorkLifecycle);
+    const committedRedisWork = await redisGetWork(committedWork.id);
+    expect(committedRedisWork?.is_initialized).toBe('true');
   });
 
   it('buffers connection rewrites and exposes them to later mutations in the same batch', async () => {

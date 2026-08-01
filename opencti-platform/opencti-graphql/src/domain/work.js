@@ -26,6 +26,7 @@ import { RELATION_OBJECT_MARKING } from '../schema/stixRefRelationship';
 import { addFilter } from '../utils/filtering/filtering-utils';
 import { now, sinceNowInMinutes } from '../utils/format';
 import { addIngestionObjectsProcessedCount } from '../manager/telemetryManager';
+import { BatchSideEffectKind, registerBatchSideEffect } from '../modules/batch/batch-executor';
 
 export const workToExportFile = (work) => {
   const lastModifiedSinceMin = sinceNowInMinutes(work.updated_at);
@@ -255,7 +256,10 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   const createdWork = await loadWorkById(context, user, workId);
   // If work was created, initialize work on redis
   if (createdWork) {
-    await redisInitializeWork(createdWork.id, isMultiPartWork);
+    await registerBatchSideEffect({
+      kind: BatchSideEffectKind.WorkLifecycle,
+      execute: () => redisInitializeWork(createdWork.id, isMultiPartWork),
+    });
   }
   logApp.info('Work initiated', {
     workId,

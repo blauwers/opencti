@@ -12,6 +12,7 @@ import { fullEntitiesList } from './middleware-loader';
 import { ENTITY_TYPE_BACKGROUND_TASK, ENTITY_TYPE_CONNECTOR, ENTITY_TYPE_SYNC } from '../schema/internalObject';
 import { ENTITY_TYPE_PLAYBOOK } from '../modules/playbook/playbook-types';
 import { s3ConnectionConfig } from './raw-file-storage';
+import { BatchSideEffectKind, hasActiveBatchExecution, registerBatchSideEffect } from '../modules/batch/batch-executor';
 
 export const CONNECTOR_EXCHANGE = `${RABBIT_QUEUE_PREFIX}amqp.connector.exchange`;
 export const WORKER_EXCHANGE = `${RABBIT_QUEUE_PREFIX}amqp.worker.exchange`;
@@ -695,13 +696,33 @@ export const rabbitMQIsAlive = async () => {
   return assertExchangeResult;
 };
 
-export const pushToWorkerForConnector = (connectorId, message) => {
+const pushToWorkerForConnectorNow = (connectorId, message) => {
   const routingKey = pushRouting(connectorId);
   return send(WORKER_EXCHANGE, routingKey, JSON.stringify(message));
 };
 
-export const pushToConnector = (connectorId, message) => {
+export const pushToWorkerForConnector = (connectorId, message) => {
+  if (!hasActiveBatchExecution()) {
+    return pushToWorkerForConnectorNow(connectorId, message);
+  }
+  return registerBatchSideEffect({
+    kind: BatchSideEffectKind.ConnectorDispatch,
+    execute: () => pushToWorkerForConnectorNow(connectorId, message),
+  });
+};
+
+const pushToConnectorNow = (connectorId, message) => {
   return send(CONNECTOR_EXCHANGE, listenRouting(connectorId), JSON.stringify(message));
+};
+
+export const pushToConnector = (connectorId, message) => {
+  if (!hasActiveBatchExecution()) {
+    return pushToConnectorNow(connectorId, message);
+  }
+  return registerBatchSideEffect({
+    kind: BatchSideEffectKind.ConnectorDispatch,
+    execute: () => pushToConnectorNow(connectorId, message),
+  });
 };
 
 export const getRabbitMQVersion = (context) => {

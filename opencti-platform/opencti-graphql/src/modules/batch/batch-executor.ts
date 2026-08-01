@@ -13,6 +13,8 @@ export enum BatchSideEffectKind {
   AutoEnrichment = 'AUTO_ENRICHMENT',
   CompatibilityProjection = 'COMPATIBILITY_PROJECTION',
   FileLifecycle = 'FILE_LIFECYCLE',
+  WorkLifecycle = 'WORK_LIFECYCLE',
+  ConnectorDispatch = 'CONNECTOR_DISPATCH',
 }
 
 export interface BatchSideEffect {
