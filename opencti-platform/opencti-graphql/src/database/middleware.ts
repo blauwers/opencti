@@ -660,7 +660,7 @@ export const storeLoadByIdWithRefs = async <T extends StoreObject>(
   if (!id) {
     return null;
   }
-  const batchLoader = isBatchWriteBoundaryOpen() ? context.batch?.storeLoadByIdWithRefsBatchLoader : undefined;
+  const batchLoader = isBatchWriteBoundaryOpen() ? context?.batch?.storeLoadByIdWithRefsBatchLoader : undefined;
   if (batchLoader) {
     return await batchLoader.load({ id, opts, user }) as T | null;
   }
@@ -1131,7 +1131,7 @@ export const inputResolveRefs = async (
     // This information must be added in the model
     const idsToFetch = Array.from(fetchingIdsMap.keys());
     const resolveSimpleRefs = async () => {
-      const batchLoader = isBatchWriteBoundaryOpen() ? context.batch?.inputResolveRefsBatchLoader : undefined;
+      const batchLoader = isBatchWriteBoundaryOpen() ? context?.batch?.inputResolveRefsBatchLoader : undefined;
       if (!batchLoader) {
         return internalFindByIds(context, user, idsToFetch);
       }
@@ -3750,7 +3750,7 @@ const findExistingEntitiesByIds = (
   ids: string[],
   type: string,
 ) => {
-  const batchLoader = isBatchWriteBoundaryOpen() ? context.batch?.existingEntityIdsBatchLoader : undefined;
+  const batchLoader = isBatchWriteBoundaryOpen() ? context?.batch?.existingEntityIdsBatchLoader : undefined;
   if (batchLoader) {
     return batchLoader.load({ ids, type });
   }
