@@ -28,6 +28,7 @@ import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { redisDeleteWorks, redisFetchLatestDeletions, redisGetWork } from '../../../src/database/redis';
 import { computeLoaders } from '../../../src/http/httpAuthenticatedContext';
 import { executionContext } from '../../../src/utils/access';
+import { storeDeleteEvent } from '../../../src/database/stream/stream-handler';
 
 describe('batch engine writes', () => {
   let malware: any;
@@ -35,6 +36,7 @@ describe('batch engine writes', () => {
   const cleanupMalwares: any[] = [];
   const cleanupObservables: any[] = [];
   const cleanupSoftDeletedMalwareIds: string[] = [];
+  const streamDeletedMalwares: any[] = [];
   const cleanupVocabularies: any[] = [];
   const cleanupWorkIds: string[] = [];
 
@@ -130,6 +132,9 @@ describe('batch engine writes', () => {
         await confirmDelete(testContext, ADMIN_USER, deleteOperations[operationIndex].internal_id);
       }
     }
+    for (let index = 0; index < streamDeletedMalwares.length; index += 1) {
+      await storeDeleteEvent(testContext, ADMIN_USER, streamDeletedMalwares[index]);
+    }
     for (let index = 0; index < cleanupVocabularies.length; index += 1) {
       const cleanupVocabulary = cleanupVocabularies[index];
       const existing = await internalLoadById(testContext, ADMIN_USER, cleanupVocabulary.internal_id);
@@ -208,6 +213,7 @@ describe('batch engine writes', () => {
     ]);
 
     await expect(internalLoadById(testContext, ADMIN_USER, deletedMalware.internal_id)).resolves.toBeUndefined();
+    streamDeletedMalwares.push(deletedMalware);
   });
 
   it('commits mixed create update and delete writes through one batch boundary', async () => {
@@ -250,6 +256,7 @@ describe('batch engine writes', () => {
     const committedCreated = await internalLoadById(testContext, ADMIN_USER, mixedCreatedMalware.internal_id) as any;
     expect(committedCreated?.description).toBe('mixed buffered update');
     await expect(internalLoadById(testContext, ADMIN_USER, mixedDeletedMalware.internal_id)).resolves.toBeUndefined();
+    streamDeletedMalwares.push(mixedDeletedMalware);
   });
 
   it('buffers direct document and replace updates inside the batch boundary', async () => {
@@ -548,6 +555,7 @@ describe('batch engine writes', () => {
     expect(committedSource[relationKey]).not.toContain(target.internal_id);
     expect(committedSource[RELATION_RELATED_TO]).not.toContain(target.internal_id);
     await expect(internalLoadById(testContext, ADMIN_USER, target.internal_id)).resolves.toBeUndefined();
+    streamDeletedMalwares.push(target);
   });
 
   it('keeps nested entity and relation creation in one backend batch scope', async () => {
@@ -735,6 +743,7 @@ describe('batch engine writes', () => {
 
     await expect(internalLoadById(testContext, ADMIN_USER, target.internal_id)).resolves.toBeUndefined();
     await expect(internalLoadById(testContext, ADMIN_USER, relation.internal_id)).resolves.toBeUndefined();
+    streamDeletedMalwares.push(target);
   });
 
   it('keeps soft-delete reindex copies inside the batch boundary until commit', async () => {
@@ -781,6 +790,7 @@ describe('batch engine writes', () => {
     await expect(internalLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id)).resolves.toBeUndefined();
     await expect(elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] })).resolves.toBeDefined();
     await expect(findDeleteOperationsForMainEntity(softDeleteMalware.internal_id)).resolves.toHaveLength(1);
+    streamDeletedMalwares.push(softDeleteMalware);
   });
 
   it('keeps soft-delete file search flags outside an aborted batch', async () => {

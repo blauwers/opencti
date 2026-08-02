@@ -175,6 +175,31 @@ describe('coalesceBufferedEngineBulkActions testing', () => {
     expect(compacted[1]).toEqual(actions[2]);
   });
 
+  it('keeps scope-sensitive scripts separate instead of composing invalid Painless', () => {
+    const actions = [
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { script: { source: 'def values = params.values; ctx._source.first = values', params: { values: ['first'] } } },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { script: { source: 'def values = params.values; ctx._source.second = values', params: { values: ['second'] } } },
+        ],
+      },
+    ];
+
+    const compacted = coalesceBufferedEngineBulkActions(actions);
+
+    expect(compacted).toEqual(actions);
+  });
+
   it('folds updates into a buffered index document when the batch owns its state', () => {
     const actions = [
       {

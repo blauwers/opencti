@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
 import { createExistingEntityIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
+import { BatchMutationKind, executeBatchMutations } from '../../../../src/modules/batch/batch-executor';
 
 vi.mock('../../../../src/database/middleware-loader', () => ({
   internalFindByIds: vi.fn(),
@@ -86,6 +87,30 @@ describe('batch reference loader', () => {
     expect(first[0].internal_id).toBe('identity--one');
     expect(second[0].internal_id).toBe('identity--one');
     expect(third[0].internal_id).toBe('identity--two');
+  });
+
+  it('does not reuse shared reference reads across top-level batch executions', async () => {
+    vi.mocked(internalFindByIds)
+      .mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([{
+        internal_id: 'identity--one',
+        standard_id: 'identity--shared',
+        entity_type: 'Identity',
+      }] as any);
+
+    const loader = createInputResolveRefsBatchLoader(context, user);
+    const first = await executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: () => loader.load('identity--shared'),
+    }]);
+    const second = await executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: () => loader.load('identity--shared'),
+    }]);
+
+    expect(internalFindByIds).toHaveBeenCalledTimes(2);
+    expect(first.results[0]).toEqual([]);
+    expect(second.results[0].map((element) => element.internal_id)).toEqual(['identity--one']);
   });
 
   it('coalesces same-type entity existence probes and maps results back to each input', async () => {

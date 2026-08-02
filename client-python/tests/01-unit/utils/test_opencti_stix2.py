@@ -194,6 +194,43 @@ def test_import_bundle_keeps_original_bundle_id_without_legacy_split(
     ]
 
 
+def test_import_bundle_generates_missing_bundle_id_without_legacy_split(
+    monkeypatch,
+) -> None:
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+    imported_calls = []
+
+    def fake_import_item_with_retries(
+        item, update, types, work_id, bundle_id, report_expectation=True
+    ):
+        imported_calls.append((item["id"], bundle_id))
+        return None
+
+    monkeypatch.setattr(
+        opencti_stix2, "import_item_with_retries", fake_import_item_with_retries
+    )
+
+    bundle = {
+        "type": "bundle",
+        "objects": [
+            {
+                "type": "indicator",
+                "id": "indicator--11111111-1111-4111-8111-111111111111",
+            },
+        ],
+    }
+    imported, rejected = opencti_stix2.import_bundle(bundle)
+
+    assert rejected == []
+    assert imported == [
+        {"id": "indicator--11111111-1111-4111-8111-111111111111", "type": "indicator"}
+    ]
+    assert bundle["id"].startswith("bundle--")
+    assert imported_calls == [
+        ("indicator--11111111-1111-4111-8111-111111111111", bundle["id"])
+    ]
+
+
 def test_import_bundle_reports_duplicate_objects_suppressed_during_preparation(
     monkeypatch,
 ) -> None:

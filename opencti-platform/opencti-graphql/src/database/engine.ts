@@ -5756,6 +5756,10 @@ const trimTrailingPainlessSeparators = (source: string): string => {
   return source.trim().replace(/;+\s*$/, '');
 };
 
+const hasScopeSensitivePainlessStatements = (source: string): boolean => {
+  return /\bdef\s+[A-Za-z_]/.test(source) || /\bfor\s*\(/.test(source) || /\bwhile\s*\(/.test(source);
+};
+
 const combineBufferedUpdateActions = (
   left: BufferedEngineBulkAction,
   right: BufferedEngineBulkAction,
@@ -5767,6 +5771,11 @@ const combineBufferedUpdateActions = (
   const leftScript = normalizeComposableBufferedUpdateScript(left.body[1]);
   const rightScript = normalizeComposableBufferedUpdateScript(right.body[1]);
   if (!leftScript || !rightScript) {
+    return undefined;
+  }
+  // Painless has one top-level script scope, so concatenating repeated local
+  // declarations or loop variables can turn two valid updates into one invalid script.
+  if (hasScopeSensitivePainlessStatements(leftScript.source) || hasScopeSensitivePainlessStatements(rightScript.source)) {
     return undefined;
   }
   const namespacedLeft = namespacePainlessParams(leftScript, `b${sequence}_0`);

@@ -3896,6 +3896,8 @@ class OpenCTIStix2:
             raise ValueError("JSON data type is not a STIX2 bundle")
         if "objects" not in stix_bundle or len(stix_bundle["objects"]) == 0:
             raise ValueError("JSON data objects is empty")
+        if "id" not in stix_bundle:
+            stix_bundle["id"] = "bundle--" + str(uuid.uuid4())
         bundle_id = stix_bundle["id"]
         backend_preparation = self._prepare_bundle_from_backend_plan(
             stix_bundle, backend_batch_plan

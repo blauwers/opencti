@@ -5,6 +5,7 @@ import { isNotEmptyField } from '../../database/utils';
 import { getInstanceIds } from '../../schema/identifier';
 import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext, AuthUser } from '../../types/user';
+import { getBatchExecutionScope } from './batch-executor';
 
 const MAX_BATCH_SIZE = nconf.get('elasticsearch:batch_loader_max_size') ?? 300;
 
@@ -68,10 +69,25 @@ const createTrackedLoader = <K, V>(
 ) => {
   const trackedLookups = new Map<string, { ids: Set<string>; lookup: K }>();
   const lookupKeysById = new Map<string, Set<string>>();
+  let executionScope = getBatchExecutionScope();
   const dataLoader = new DataLoader<K, V, string>(loadFn, {
     maxBatchSize: MAX_BATCH_SIZE,
     cacheKeyFn,
   });
+
+  const reset = () => {
+    dataLoader.clearAll();
+    trackedLookups.clear();
+    lookupKeysById.clear();
+  };
+
+  const resetForNewExecutionScope = () => {
+    const currentScope = getBatchExecutionScope();
+    if (currentScope !== executionScope) {
+      reset();
+      executionScope = currentScope;
+    }
+  };
 
   const trackIds = (lookup: K, ids: string[]) => {
     const cacheKey = cacheKeyFn(lookup);
@@ -107,6 +123,7 @@ const createTrackedLoader = <K, V>(
   };
 
   const invalidate = (ids: string[]) => {
+    resetForNewExecutionScope();
     const cacheKeys = new Set<string>();
     normalizeTrackedIds(ids).forEach((id) => {
       lookupKeysById.get(id)?.forEach((cacheKey) => cacheKeys.add(cacheKey));
@@ -124,6 +141,7 @@ const createTrackedLoader = <K, V>(
   return {
     invalidate,
     load: (lookup: K) => {
+      resetForNewExecutionScope();
       trackIds(lookup, getLookupIds(lookup));
       const result = dataLoader.load(lookup);
       void result.then(

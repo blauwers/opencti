@@ -102,6 +102,10 @@ export const hasActiveBatchExecution = (): boolean => {
   return batchExecutionStorage.getStore() !== undefined;
 };
 
+export const getBatchExecutionScope = (): object | undefined => {
+  return batchExecutionStorage.getStore();
+};
+
 export const isBatchWriteBoundaryOpen = (): boolean => {
   return batchExecutionStorage.getStore()?.writeBoundaryOpen === true;
 };
