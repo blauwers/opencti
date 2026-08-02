@@ -25,7 +25,7 @@ import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
 import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
 import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
-import { redisDeleteWorks, redisGetWork } from '../../../src/database/redis';
+import { redisDeleteWorks, redisFetchLatestDeletions, redisGetWork } from '../../../src/database/redis';
 import { computeLoaders } from '../../../src/http/httpAuthenticatedContext';
 import { executionContext } from '../../../src/utils/access';
 
@@ -714,6 +714,7 @@ describe('batch engine writes', () => {
 
     await expect(internalLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id)).resolves.toBeDefined();
     await expect(elLoadById(testContext, ADMIN_USER, softDeleteMalware.internal_id, { indices: [INDEX_DELETED_OBJECTS] })).resolves.toBeUndefined();
+    await expect(redisFetchLatestDeletions()).resolves.not.toContain(softDeleteMalware.internal_id);
   });
 
   it('flushes soft-delete reindex copies through the batch boundary on commit', async () => {
@@ -760,6 +761,7 @@ describe('batch engine writes', () => {
 
     const committedFile = await elLoadById(testContext, ADMIN_USER, documentId, { indices: INDEX_FILES }) as any;
     expect(committedFile?.removed ?? false).toBe(false);
+    await expect(redisFetchLatestDeletions()).resolves.not.toContain(softDeleteMalware.internal_id);
   });
 
   it('keeps permanent file cleanup outside an aborted batch', async () => {
@@ -792,6 +794,7 @@ describe('batch engine writes', () => {
     cleanupSoftDeletedMalwareIds.push(softDeleteMalware.internal_id);
     const { fileId } = await indexFileForEntity(softDeleteMalware);
     await deleteElementById(testContext, ADMIN_USER, softDeleteMalware.internal_id, ENTITY_TYPE_MALWARE);
+    await expect(redisFetchLatestDeletions()).resolves.toContain(softDeleteMalware.internal_id);
     const [deleteOperation] = await findDeleteOperationsForMainEntity(softDeleteMalware.internal_id);
 
     await expect(executeBatchMutations([
@@ -842,6 +845,7 @@ describe('batch engine writes', () => {
 
     await expect(findDocumentById(testContext, ADMIN_USER, sourceFileId)).resolves.toBeDefined();
     await expect(findDocumentById(testContext, ADMIN_USER, targetFileId)).resolves.toBeUndefined();
+    await expect(redisFetchLatestDeletions()).resolves.not.toContain(sourceArtifact.internal_id);
   });
 
   it('materializes merge file moves after batch commit', async () => {
@@ -865,6 +869,7 @@ describe('batch engine writes', () => {
     await expect(findDocumentById(testContext, ADMIN_USER, targetFileId)).resolves.toBeDefined();
     const mergedArtifact = await internalLoadById(testContext, ADMIN_USER, targetArtifact.internal_id) as any;
     expect(mergedArtifact?.x_opencti_files.map((file: any) => file.id)).toContain(targetFileId);
+    await expect(redisFetchLatestDeletions()).resolves.toContain(sourceArtifact.internal_id);
   });
 
   it('keeps draft copies and live draft markers inside the batch boundary until commit', async () => {

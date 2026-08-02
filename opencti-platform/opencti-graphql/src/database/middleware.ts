@@ -184,7 +184,16 @@ import {
 import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
 import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
-import { BatchMutationKind, BatchSideEffectKind, executeSingleBatchMutation, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import {
+  BatchMutationKind,
+  BatchSideEffectKind,
+  executeSingleBatchMutation,
+  getBatchExecutionMetadata,
+  isBatchWriteBoundaryOpen,
+  registerBatchCommitter,
+  registerBatchSideEffect,
+  setBatchExecutionMetadata,
+} from '../modules/batch/batch-executor';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
@@ -293,6 +302,35 @@ import type { CreateEventOpts, EventOpts, UpdateEvent, UpdateEventOpts } from '.
 // region global variables
 const MAX_BATCH_SIZE = nconf.get('elasticsearch:batch_loader_max_size') ?? 300;
 const MAX_EXPLANATIONS_PER_RULE = nconf.get('rule_engine:max_explanations_per_rule') ?? 100;
+const BATCH_DELETION_GUARD_METADATA_KEY = 'middleware.deletion-guards';
+
+type BatchDeletionGuardState = Map<string, Set<string>>;
+
+const addRecentDeletions = async (context: AuthContext, user: AuthUser, internalIds: string[]) => {
+  const draftId = getDraftContext(context, user);
+  if (!isBatchWriteBoundaryOpen()) {
+    await redisAddDeletions(internalIds, draftId);
+    return;
+  }
+  let state = getBatchExecutionMetadata<BatchDeletionGuardState>(BATCH_DELETION_GUARD_METADATA_KEY);
+  if (!state) {
+    const initializedState: BatchDeletionGuardState = new Map();
+    state = initializedState;
+    setBatchExecutionMetadata(BATCH_DELETION_GUARD_METADATA_KEY, initializedState);
+    registerBatchCommitter({
+      key: BATCH_DELETION_GUARD_METADATA_KEY,
+      execute: async () => {
+        for (const [stateDraftId, ids] of initializedState.entries()) {
+          await redisAddDeletions(Array.from(ids), stateDraftId || undefined);
+        }
+      },
+    });
+  }
+  const stateDraftId = draftId ?? '';
+  const ids = state.get(stateDraftId) ?? new Set<string>();
+  internalIds.forEach((internalId) => ids.add(internalId));
+  state.set(stateDraftId, ids);
+};
 // endregion
 
 // region request access
@@ -1999,7 +2037,7 @@ const mergeEntitiesInWriteBoundary = async (
     }
     await storeMergeEvent(context, user, initialInstance, mergedInstance, sources, opts);
     // Temporary stored the deleted elements to prevent concurrent problem at creation
-    await redisAddDeletions(sources.map((s) => s.internal_id), getDraftContext(context, user));
+    await addRecentDeletions(context, user, sources.map((s) => s.internal_id));
     // - END TRANSACTION
     const finalStixCoreObject = await storeLoadById(context, user, target.id, ABSTRACT_STIX_OBJECT);
     await registerBatchSideEffect({
@@ -4296,7 +4334,7 @@ export const internalDeleteElementById = async <T extends StoreObject>(
       event = await storeDeleteEvent(context, user, element, opts);
     }
     // Temporary stored the deleted elements to prevent concurrent problem at creation
-    await redisAddDeletions(participantIds, getDraftContext(context, user));
+    await addRecentDeletions(context, user, participantIds);
   } catch (err: any) {
     if (err.name === TYPE_LOCK_ERROR) {
       throw LockTimeoutError({ participantIds });
