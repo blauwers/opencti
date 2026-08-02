@@ -18,8 +18,14 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
 
     scalar Upload
 
+    type RecordPayload {
+      id: String!
+      expensive: String!
+    }
+
     type Mutation {
       record(value: String!): String!
+      createRecord(value: String!): RecordPayload!
       echo(value: String!): String!
       upload(file: Upload!): String!
       fail: String!
@@ -49,6 +55,13 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
         });
         return value;
       },
+      createRecord: (_: unknown, { value }: { value: string }) => {
+        calls.push(`create:${value}`);
+        return {
+          id: value,
+          expensive: `expensive:${value}`,
+        };
+      },
       echo: (_: unknown, { value }: { value: string }) => {
         calls.push(`echo:${value}`);
         return value;
@@ -67,6 +80,12 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
         throw new Error('resolver failed');
       },
       batchMutationsExecute: () => 'nested',
+    },
+    RecordPayload: {
+      expensive: ({ id, expensive }: { id: string; expensive: string }) => {
+        calls.push(`expensive:${id}`);
+        return expensive;
+      },
     },
   },
 });
@@ -217,6 +236,52 @@ describe('batch GraphQL operation executor', () => {
       { record: 'source' },
       { echo: 'source' },
       { upload: 'payload' },
+    ]);
+  });
+
+  it('prunes unused object mutation fields for metadata-only batch execution', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation CreateRecord($value: String!) { createRecord(value: $value) { id expensive } }',
+        variables: JSON.stringify({ value: 'source' }),
+      },
+    ], {
+      pruneUnusedResultFields: true,
+    });
+
+    expect(calls).toEqual(['create:source']);
+    expect(execution.results).toEqual([
+      { createRecord: { __typename: 'RecordPayload' } },
+    ]);
+  });
+
+  it('retains only result-token fields when pruning object mutation responses', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation CreateRecord($value: String!) { createRecord(value: $value) { id expensive } }',
+        variables: JSON.stringify({ value: 'source' }),
+      },
+      {
+        query: 'mutation Echo($value: String!) { echo(value: $value) }',
+        variables: JSON.stringify({ value: buildBatchGraphqlResultToken(0, ['createRecord', 'id']) }),
+      },
+    ], {
+      pruneUnusedResultFields: true,
+    });
+
+    expect(calls).toEqual([
+      'create:source',
+      'echo:source',
+    ]);
+    expect(execution.results).toEqual([
+      { createRecord: { id: 'source' } },
+      { echo: 'source' },
     ]);
   });
 

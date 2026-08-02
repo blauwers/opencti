@@ -91,6 +91,7 @@ const batchResolvers = {
     })), {
       executionMode: options?.execution_mode ?? undefined,
       waitUntil: options?.wait_until ?? undefined,
+      pruneUnusedResultFields: true,
       bundlePlan: options?.batch_plan
         ? {
           version: options.batch_plan.version,

@@ -1,5 +1,16 @@
 import { Readable } from 'node:stream';
-import { execute, Kind, parse, type DocumentNode, type ExecutionResult, type GraphQLSchema, validate } from 'graphql';
+import {
+  execute,
+  Kind,
+  parse,
+  type DocumentNode,
+  type ExecutionResult,
+  type FieldNode,
+  type GraphQLSchema,
+  type OperationDefinitionNode,
+  type SelectionSetNode,
+  validate,
+} from 'graphql';
 import Upload from 'graphql-upload/Upload.mjs';
 import conf from '../../config/conf';
 import { FunctionalError } from '../../config/errors';
@@ -9,6 +20,12 @@ import type { BatchGraphqlExecutionPlanInput, BatchGraphqlFileInput, BatchGraphq
 
 type BatchGraphqlOperationResult = Record<string, unknown> | null | undefined;
 type BatchGraphqlResultBindings = Map<string, unknown>;
+type BatchGraphqlRequiredResultPaths = Map<number, Set<string>>;
+type BatchGraphqlRequiredResultPathNode = {
+  children: Map<string, BatchGraphqlRequiredResultPathNode>;
+  paths: Set<string>;
+  terminalPaths: Set<string>;
+};
 type PreparedBatchGraphqlOperation = {
   dependencyOperationIndexes: Set<number>;
   document: DocumentNode;
@@ -29,6 +46,7 @@ type PreparedBatchGraphqlOperationGroup = {
 };
 type BatchGraphqlExecutionOptions = BatchExecutionOptions & {
   bundlePlan?: BatchGraphqlExecutionPlanInput;
+  pruneUnusedResultFields?: boolean;
 };
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
@@ -139,6 +157,7 @@ const collectOperationResultTokenDependencies = (
   value: unknown,
   operationIndex: number,
   dependencies: Set<number> = new Set(),
+  requiredResultPaths: BatchGraphqlRequiredResultPaths = new Map(),
 ): Set<number> => {
   if (typeof value === 'string' && value.startsWith(BATCH_RESULT_TOKEN_PREFIX)) {
     const match = value.match(BATCH_RESULT_TOKEN_PATTERN);
@@ -153,16 +172,191 @@ const collectOperationResultTokenDependencies = (
       });
     }
     dependencies.add(dependencyIndex);
+    const dependencyPaths = requiredResultPaths.get(dependencyIndex) ?? new Set<string>();
+    dependencyPaths.add(match[2]);
+    requiredResultPaths.set(dependencyIndex, dependencyPaths);
     return dependencies;
   }
   if (Array.isArray(value)) {
-    value.forEach((item) => collectOperationResultTokenDependencies(item, operationIndex, dependencies));
+    value.forEach((item) => collectOperationResultTokenDependencies(item, operationIndex, dependencies, requiredResultPaths));
     return dependencies;
   }
   if (value !== null && typeof value === 'object') {
-    Object.values(value).forEach((item) => collectOperationResultTokenDependencies(item, operationIndex, dependencies));
+    Object.values(value).forEach((item) => collectOperationResultTokenDependencies(item, operationIndex, dependencies, requiredResultPaths));
   }
   return dependencies;
+};
+
+const invalidResultTokenPath = (operationIndex: number, path: string): never => {
+  throw FunctionalError('Invalid batch GraphQL result token path', { operation_index: operationIndex, path });
+};
+
+const createRequiredResultPathNode = (): BatchGraphqlRequiredResultPathNode => ({
+  children: new Map(),
+  paths: new Set(),
+  terminalPaths: new Set(),
+});
+
+const parseRequiredResultPath = (path: string, operationIndex: number): string[] => {
+  const segments = path.split('.');
+  if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
+    return invalidResultTokenPath(operationIndex, path);
+  }
+  const fieldSegments = segments.filter((segment) => !/^\d+$/.test(segment));
+  if (fieldSegments.length === 0) {
+    return invalidResultTokenPath(operationIndex, path);
+  }
+  return fieldSegments;
+};
+
+const buildRequiredResultPathTree = (
+  paths: Set<string>,
+  operationIndex: number,
+): BatchGraphqlRequiredResultPathNode => {
+  const root = createRequiredResultPathNode();
+  paths.forEach((path) => {
+    let current = root;
+    current.paths.add(path);
+    parseRequiredResultPath(path, operationIndex).forEach((segment) => {
+      const child = current.children.get(segment) ?? createRequiredResultPathNode();
+      child.paths.add(path);
+      current.children.set(segment, child);
+      current = child;
+    });
+    current.terminalPaths.add(path);
+  });
+  return root;
+};
+
+const getFieldResponseKey = (field: FieldNode): string => field.alias?.value ?? field.name.value;
+
+const selectionSetContainsFragments = (selectionSet: SelectionSetNode): boolean => {
+  return selectionSet.selections.some((selection) => {
+    if (selection.kind !== Kind.FIELD) {
+      return true;
+    }
+    return selection.selectionSet ? selectionSetContainsFragments(selection.selectionSet) : false;
+  });
+};
+
+const buildTypenameSelectionSet = (): SelectionSetNode => ({
+  kind: Kind.SELECTION_SET,
+  selections: [{
+    kind: Kind.FIELD,
+    name: {
+      kind: Kind.NAME,
+      value: '__typename',
+    },
+  }],
+});
+
+const pruneRequiredSelectionSet = (
+  selectionSet: SelectionSetNode,
+  requiredPaths: BatchGraphqlRequiredResultPathNode,
+  operationIndex: number,
+): SelectionSetNode => {
+  const selectedResponseKeys = new Set<string>();
+  const selections: FieldNode[] = [];
+  selectionSet.selections.forEach((selection) => {
+    if (selection.kind !== Kind.FIELD) {
+      return;
+    }
+    const responseKey = getFieldResponseKey(selection);
+    selectedResponseKeys.add(responseKey);
+    const fieldRequiredPaths = requiredPaths.children.get(responseKey);
+    if (!fieldRequiredPaths) {
+      return;
+    }
+    if (selection.selectionSet) {
+      const invalidTerminalPath = fieldRequiredPaths.terminalPaths.values().next().value;
+      if (invalidTerminalPath) {
+        invalidResultTokenPath(operationIndex, invalidTerminalPath);
+      }
+      selections.push({
+        ...selection,
+        selectionSet: pruneRequiredSelectionSet(selection.selectionSet, fieldRequiredPaths, operationIndex),
+      });
+      return;
+    }
+    const invalidChildPath = fieldRequiredPaths.children.values().next().value?.paths.values().next().value;
+    if (invalidChildPath) {
+      invalidResultTokenPath(operationIndex, invalidChildPath);
+    }
+    selections.push(selection);
+  });
+  requiredPaths.children.forEach((childPaths, responseKey) => {
+    if (!selectedResponseKeys.has(responseKey)) {
+      invalidResultTokenPath(operationIndex, childPaths.paths.values().next().value as string);
+    }
+  });
+  return {
+    ...selectionSet,
+    selections,
+  };
+};
+
+const pruneUnusedResultFields = (
+  document: DocumentNode,
+  requiredPaths: Set<string> | undefined,
+  operationIndex: number,
+): DocumentNode => {
+  const operationDefinition = document.definitions.find((definition): definition is OperationDefinitionNode => (
+    definition.kind === Kind.OPERATION_DEFINITION
+  ));
+  if (!operationDefinition || document.definitions.some((definition) => definition.kind === Kind.FRAGMENT_DEFINITION)
+    || selectionSetContainsFragments(operationDefinition.selectionSet)) {
+    return document;
+  }
+  const topLevelField = operationDefinition.selectionSet.selections[0] as FieldNode;
+  let nextTopLevelField = topLevelField;
+  if (!requiredPaths || requiredPaths.size === 0) {
+    if (topLevelField.selectionSet) {
+      nextTopLevelField = {
+        ...topLevelField,
+        selectionSet: buildTypenameSelectionSet(),
+      };
+    }
+  } else {
+    const requiredPathTree = buildRequiredResultPathTree(requiredPaths, operationIndex);
+    const topLevelResponseKey = getFieldResponseKey(topLevelField);
+    const topLevelRequiredPaths = requiredPathTree.children.get(topLevelResponseKey);
+    if (!topLevelRequiredPaths) {
+      return invalidResultTokenPath(operationIndex, requiredPaths.values().next().value as string);
+    }
+    if (topLevelField.selectionSet) {
+      const invalidTerminalPath = topLevelRequiredPaths.terminalPaths.values().next().value;
+      if (invalidTerminalPath) {
+        invalidResultTokenPath(operationIndex, invalidTerminalPath);
+      }
+      nextTopLevelField = {
+        ...topLevelField,
+        selectionSet: pruneRequiredSelectionSet(topLevelField.selectionSet, topLevelRequiredPaths, operationIndex),
+      };
+    } else {
+      const invalidChildPath = topLevelRequiredPaths.children.values().next().value?.paths.values().next().value;
+      if (invalidChildPath) {
+        invalidResultTokenPath(operationIndex, invalidChildPath);
+      }
+    }
+    requiredPathTree.children.forEach((childPaths, responseKey) => {
+      if (responseKey !== topLevelResponseKey) {
+        invalidResultTokenPath(operationIndex, childPaths.paths.values().next().value as string);
+      }
+    });
+  }
+  const nextOperationDefinition: OperationDefinitionNode = {
+    ...operationDefinition,
+    selectionSet: {
+      ...operationDefinition.selectionSet,
+      selections: [nextTopLevelField],
+    },
+  };
+  return {
+    ...document,
+    definitions: document.definitions.map((definition) => (
+      definition === operationDefinition ? nextOperationDefinition : definition
+    )),
+  };
 };
 
 const parseExecutionCoordinate = (
@@ -280,14 +474,14 @@ const executeOperation = async (
 const prepareBatchGraphqlOperations = (
   schema: GraphQLSchema,
   operations: BatchGraphqlOperationInput[],
+  shouldPruneUnusedResultFields = false,
 ): PreparedBatchGraphqlOperation[] => {
-  return operations.map((operation, operationIndex) => {
+  const preparedOperations = operations.map((operation, operationIndex) => {
     const prepared = validateOperationDocument(schema, operation, operationIndex);
     validateOperationFiles(prepared.variables, operation.files, operationIndex);
-    const dependencyOperationIndexes = collectOperationResultTokenDependencies(prepared.variables, operationIndex);
     return {
       ...prepared,
-      dependencyOperationIndexes,
+      dependencyOperationIndexes: new Set<number>(),
       executionGroup: parseExecutionCoordinate(operation.executionGroup, 'execution_group', operationIndex),
       executionPhase: parseExecutionCoordinate(operation.executionPhase, 'execution_phase', operationIndex),
       files: operation.files,
@@ -296,6 +490,22 @@ const prepareBatchGraphqlOperations = (
       operationName: operation.operationName,
     };
   });
+  const requiredResultPaths: BatchGraphqlRequiredResultPaths = new Map();
+  preparedOperations.forEach((operation) => {
+    operation.dependencyOperationIndexes = collectOperationResultTokenDependencies(
+      operation.variables,
+      operation.operationIndex,
+      new Set(),
+      requiredResultPaths,
+    );
+  });
+  if (!shouldPruneUnusedResultFields) {
+    return preparedOperations;
+  }
+  return preparedOperations.map((operation) => ({
+    ...operation,
+    document: pruneUnusedResultFields(operation.document, requiredResultPaths.get(operation.operationIndex), operation.operationIndex),
+  }));
 };
 
 const buildBundleExecutionPhaseMap = (bundlePlan: BatchGraphqlExecutionPlanInput | undefined): Map<string, number> | undefined => {
@@ -518,7 +728,7 @@ export const executeBatchGraphqlOperations = async (
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
-  const preparedOperations = prepareBatchGraphqlOperations(schema, operations);
+  const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
   const resultBindings: BatchGraphqlResultBindings = new Map();
   const execution = await executeBatchMutations<BatchGraphqlOperationResult[]>([{
     kind: BatchMutationKind.GraphqlOperation,
