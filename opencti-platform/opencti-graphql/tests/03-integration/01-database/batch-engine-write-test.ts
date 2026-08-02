@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
-import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elIndex, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
+import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elFindByIds, elIndex, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById, mergeEntities, storeLoadByIdWithRefs } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { elIndexFiles } from '../../../src/database/file-search';
@@ -194,6 +194,7 @@ describe('batch engine writes', () => {
         kind: BatchMutationKind.UpdateAttribute,
         executeWrite: async () => {
           const buffered = await internalLoadById(testContext, ADMIN_USER, malware?.internal_id) as any;
+          expect(buffered?.name).toBe(malware.name);
           expect(buffered?.description).toBe('first buffered update');
           await elUpdateElement(testContext, ADMIN_USER, {
             _index: malware?._index,
@@ -315,6 +316,38 @@ describe('batch engine writes', () => {
 
     const committedIndicator = await internalLoadById(batchContext, ADMIN_USER, indicator.internal_id) as any;
     expect(committedIndicator?.internal_id).toBe(indicator.internal_id);
+  });
+
+  it('loads mixed committed and buffered ids without dropping unresolved reads', async () => {
+    const committedLabel = await addLabel(testContext, ADMIN_USER, { value: `Batch committed label ${uuidv4()}` });
+    cleanupLabels.push(committedLabel);
+    const batchContext = executionContext('batch-mixed-buffered-id-resolution', ADMIN_USER);
+    batchContext.batch = computeLoaders(batchContext, ADMIN_USER);
+    let bufferedLabel: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          bufferedLabel = await addLabel(batchContext, ADMIN_USER, { value: `Batch buffered mixed label ${uuidv4()}` });
+          cleanupLabels.push(bufferedLabel);
+          return bufferedLabel;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const labels = await elFindByIds<any>(batchContext, ADMIN_USER, [committedLabel.internal_id, bufferedLabel.standard_id], {
+            type: ENTITY_TYPE_LABEL,
+            toMap: true,
+            mapWithAllIds: true,
+          }) as Record<string, any>;
+          expect(labels[committedLabel.internal_id]?.internal_id).toBe(committedLabel.internal_id);
+          expect(labels[bufferedLabel.standard_id]?.internal_id).toBe(bufferedLabel.internal_id);
+          return null;
+        },
+      },
+    ]);
   });
 
   it('resolves buffered helper references across GraphQL execution groups', async () => {

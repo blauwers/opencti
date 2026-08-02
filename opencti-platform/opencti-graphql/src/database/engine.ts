@@ -2135,6 +2135,86 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   return Array.from(mergedHits.values());
 };
 
+type ResolvedBufferedEngineElements<T extends BasicStoreBase> = {
+  elements: T[];
+  completeElements: T[];
+};
+
+const resolveBufferedEngineElementsByIds = <T extends BasicStoreBase>(
+  processIds: string[],
+  types: string | string[] | null | undefined,
+  computedIndices: string | string[] | null | undefined,
+): ResolvedBufferedEngineElements<T> => {
+  const bufferedHits = new Map<string, { element: T; complete: boolean }>();
+  getOrderedBufferedEngineWrites().forEach((write) => {
+    if (write.kind === 'bulk-update') {
+      write.operations.forEach((operation) => {
+        const existing = bufferedHits.get(operation.internalId);
+        if (existing
+          && matchesBufferedEngineElement(existing.element, processIds, types, computedIndices)
+          && matchesBufferedEngineIndex(existing.element._index, operation.index)) {
+          bufferedHits.set(operation.internalId, {
+            element: applyBufferedVisibleOperation(existing.element, operation.apply),
+            complete: existing.complete,
+          });
+        }
+      });
+      return;
+    }
+    const elements = getBufferedWriteElements(write);
+    elements.forEach((element) => {
+      const existing = bufferedHits.get(element.internal_id);
+      const matchesQuery = matchesBufferedEngineElement(element, processIds, types, computedIndices);
+      if (write.kind === 'delete') {
+        if (matchesQuery) {
+          bufferedHits.delete(element.internal_id);
+        }
+        return;
+      }
+      if (!existing && !matchesQuery) {
+        return;
+      }
+      if (existing && !matchesQuery) {
+        return;
+      }
+      if (write.kind === 'update') {
+        bufferedHits.set(element.internal_id, {
+          element: applyBufferedVisibleUpdate(existing?.element, element) as T,
+          complete: existing?.complete ?? false,
+        });
+        return;
+      }
+      bufferedHits.set(element.internal_id, { element: element as T, complete: true });
+    });
+  });
+  const resolvedHits = Array.from(bufferedHits.values());
+  return {
+    elements: resolvedHits.map((hit) => hit.element),
+    completeElements: resolvedHits.filter((hit) => hit.complete).map((hit) => hit.element),
+  };
+};
+
+const getBufferedSatisfaction = <T extends BasicStoreBase>(
+  processIds: string[],
+  types: string | string[] | null | undefined,
+  computedIndices: string | string[] | null | undefined,
+): { completeElements: T[]; satisfiedIds: Set<string> } => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return { completeElements: [], satisfiedIds: new Set() };
+  }
+  const requestedIds = new Set(processIds);
+  const satisfiedIds = new Set<string>();
+  const { completeElements } = resolveBufferedEngineElementsByIds<T>(processIds, types, computedIndices);
+  completeElements.forEach((hit) => {
+    getInstanceIds(hit).forEach((id) => {
+      if (requestedIds.has(id)) {
+        satisfiedIds.add(id);
+      }
+    });
+  });
+  return { completeElements, satisfiedIds };
+};
+
 // elFindByIds is not defined to use ordering or sorting (ordering is forced by creation date)
 // It's a way to load a bunch of ids and use in list or map
 export const elFindByIds = async <T extends BasicStoreBase>(
@@ -2161,10 +2241,18 @@ export const elFindByIds = async <T extends BasicStoreBase>(
   }
   const queryIndices = computeQueryIndices(indices, types);
   const computedIndices = getIndicesToQuery(context, user, queryIndices);
+  const { completeElements, satisfiedIds } = getBufferedSatisfaction<T>(processIds, types, computedIndices);
+  const idsToQuery = processIds.filter((id) => !satisfiedIds.has(id));
+  if (idsToQuery.length === 0) {
+    if (toMap) {
+      return elConvertHitsToMap<T>(completeElements, { mapWithAllIds });
+    }
+    return completeElements;
+  }
   const hits: T[] = [];
   // Leave room in split size compared to max pagination to minimize data loss risk in case of duplicated ids in database
   const splitSize = Math.max(ES_MAX_PAGINATION / 2, ES_DEFAULT_PAGINATION);
-  const groupIds = R.splitEvery(splitSize, processIds);
+  const groupIds = R.splitEvery(splitSize, idsToQuery);
   for (let index = 0; index < groupIds.length; index += 1) {
     const mustTerms = [];
     const workingIds = groupIds[index];
@@ -2311,41 +2399,7 @@ export const elFindBufferedElementsByIds = async <T extends BasicStoreBase>(
   const types = (Array.isArray(opts.type) || isEmptyField(opts.type)) ? opts.type : [opts.type] as string[];
   const queryIndices = computeQueryIndices(opts.indices, types);
   const computedIndices = getIndicesToQuery(context, user, queryIndices);
-  const bufferedHits = new Map<string, T>();
-  getOrderedBufferedEngineWrites().forEach((write) => {
-    if (write.kind === 'bulk-update') {
-      write.operations.forEach((operation) => {
-        const existing = bufferedHits.get(operation.internalId);
-        if (existing && matchesBufferedEngineElement(existing, processIds, types, computedIndices) && matchesBufferedEngineIndex(existing._index, operation.index)) {
-          bufferedHits.set(operation.internalId, applyBufferedVisibleOperation(existing, operation.apply));
-        }
-      });
-      return;
-    }
-    const elements = getBufferedWriteElements(write);
-    elements.forEach((element) => {
-      const existing = bufferedHits.get(element.internal_id);
-      const matchesQuery = matchesBufferedEngineElement(element, processIds, types, computedIndices);
-      if (write.kind === 'delete') {
-        if (matchesQuery) {
-          bufferedHits.delete(element.internal_id);
-        }
-        return;
-      }
-      if (!existing && !matchesQuery) {
-        return;
-      }
-      if (existing && !matchesQuery) {
-        return;
-      }
-      if (write.kind === 'update') {
-        bufferedHits.set(element.internal_id, applyBufferedVisibleUpdate(existing, element) as T);
-        return;
-      }
-      bufferedHits.set(element.internal_id, element as T);
-    });
-  });
-  return Array.from(bufferedHits.values());
+  return resolveBufferedEngineElementsByIds<T>(processIds, types, computedIndices).elements;
 };
 export const elLoadById = async <T extends BasicStoreBase>(
   context: AuthContext,
