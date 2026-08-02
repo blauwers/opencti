@@ -465,6 +465,11 @@ const executeOperation = async (
     throw FunctionalError('Batch GraphQL operation failed', {
       operation_index: operation.operationIndex,
       errors: result.errors.map((error) => error.message),
+      operation_errors: result.errors.map((error) => ({
+        extensions: error.extensions,
+        message: error.message,
+        path: error.path,
+      })),
     });
   }
   registerResultBindings(result.data, operation.operationIndex, resultBindings);

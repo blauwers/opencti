@@ -157,7 +157,16 @@ describe('batch GraphQL operation executor', () => {
     await expect(executeBatchGraphqlOperations(schema, {} as any, [
       { query: 'mutation Fail { fail }' },
       { query: 'mutation Record { record(value: "later") }' },
-    ])).rejects.toThrow('Batch GraphQL operation failed');
+    ])).rejects.toMatchObject({
+      extensions: {
+        data: {
+          operation_errors: [{
+            message: 'resolver failed',
+            path: ['fail'],
+          }],
+        },
+      },
+    });
 
     expect(calls).toEqual([]);
   });
