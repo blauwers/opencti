@@ -10,6 +10,7 @@ const MAX_BATCH_SIZE = nconf.get('elasticsearch:batch_loader_max_size') ?? 300;
 
 export type InputResolveRefsBatchLoader = {
   load: (id: string) => Promise<BasicStoreObject[]>;
+  invalidate: (ids: string[]) => void;
 };
 
 type ExistingEntityIdsLookup = {
@@ -19,6 +20,7 @@ type ExistingEntityIdsLookup = {
 
 export type ExistingEntityIdsBatchLoader = {
   load: (lookup: ExistingEntityIdsLookup) => Promise<BasicStoreObject[]>;
+  invalidate: (ids: string[]) => void;
 };
 
 export type StoreLoadByIdWithRefsLookup<TOpts extends object = Record<string, unknown>> = {
@@ -29,6 +31,7 @@ export type StoreLoadByIdWithRefsLookup<TOpts extends object = Record<string, un
 
 export type StoreLoadByIdWithRefsBatchLoader<TOpts extends object = Record<string, unknown>> = {
   load: (lookup: StoreLoadByIdWithRefsLookup<TOpts>) => Promise<BasicStoreObject | null>;
+  invalidate: (ids: string[]) => void;
 };
 
 type StoreLoadByIdsWithRefs<TOpts extends object> = (
@@ -43,6 +46,97 @@ const buildOptionsKey = <TOpts extends object>(opts: TOpts | undefined): string 
     return '{}';
   }
   return JSON.stringify(Object.fromEntries(Object.entries(opts).sort(([left], [right]) => left.localeCompare(right))));
+};
+
+const normalizeTrackedIds = (ids: string[]): string[] => {
+  return Array.from(new Set(ids.filter((id) => isNotEmptyField(id))));
+};
+
+const collectElementIds = (elements: BasicStoreObject[] | BasicStoreObject | null): string[] => {
+  if (!elements) {
+    return [];
+  }
+  const values = Array.isArray(elements) ? elements : [elements];
+  return normalizeTrackedIds(values.flatMap((element) => getInstanceIds(element)));
+};
+
+const createTrackedLoader = <K, V>(
+  loadFn: (keys: ReadonlyArray<K>) => Promise<ArrayLike<V> | ReadonlyArray<V>>,
+  cacheKeyFn: (key: K) => string,
+  getLookupIds: (key: K) => string[],
+  getResultIds: (value: V) => string[],
+) => {
+  const trackedLookups = new Map<string, { ids: Set<string>; lookup: K }>();
+  const lookupKeysById = new Map<string, Set<string>>();
+  const dataLoader = new DataLoader<K, V, string>(loadFn, {
+    maxBatchSize: MAX_BATCH_SIZE,
+    cacheKeyFn,
+  });
+
+  const trackIds = (lookup: K, ids: string[]) => {
+    const cacheKey = cacheKeyFn(lookup);
+    const tracked = trackedLookups.get(cacheKey) ?? { ids: new Set<string>(), lookup };
+    normalizeTrackedIds(ids).forEach((id) => {
+      if (tracked.ids.has(id)) {
+        return;
+      }
+      tracked.ids.add(id);
+      const lookupKeys = lookupKeysById.get(id) ?? new Set<string>();
+      lookupKeys.add(cacheKey);
+      lookupKeysById.set(id, lookupKeys);
+    });
+    trackedLookups.set(cacheKey, tracked);
+  };
+
+  const forgetLookup = (cacheKey: string) => {
+    const tracked = trackedLookups.get(cacheKey);
+    if (!tracked) {
+      return;
+    }
+    tracked.ids.forEach((id) => {
+      const lookupKeys = lookupKeysById.get(id);
+      if (!lookupKeys) {
+        return;
+      }
+      lookupKeys.delete(cacheKey);
+      if (lookupKeys.size === 0) {
+        lookupKeysById.delete(id);
+      }
+    });
+    trackedLookups.delete(cacheKey);
+  };
+
+  const invalidate = (ids: string[]) => {
+    const cacheKeys = new Set<string>();
+    normalizeTrackedIds(ids).forEach((id) => {
+      lookupKeysById.get(id)?.forEach((cacheKey) => cacheKeys.add(cacheKey));
+    });
+    cacheKeys.forEach((cacheKey) => {
+      const tracked = trackedLookups.get(cacheKey);
+      if (!tracked) {
+        return;
+      }
+      dataLoader.clear(tracked.lookup);
+      forgetLookup(cacheKey);
+    });
+  };
+
+  return {
+    invalidate,
+    load: (lookup: K) => {
+      trackIds(lookup, getLookupIds(lookup));
+      const result = dataLoader.load(lookup);
+      void result.then(
+        (value) => trackIds(lookup, getResultIds(value)),
+        () => {
+          const cacheKey = cacheKeyFn(lookup);
+          dataLoader.clear(lookup);
+          forgetLookup(cacheKey);
+        },
+      );
+      return result;
+    },
+  };
 };
 
 export const createInputResolveRefsBatchLoader = (
@@ -77,13 +171,12 @@ export const createInputResolveRefsBatchLoader = (
     return ids.map((id) => elementsById.get(id) ?? []);
   };
 
-  const dataLoader = new DataLoader<string, BasicStoreObject[]>(loadFn, {
-    maxBatchSize: MAX_BATCH_SIZE,
-    cache: false,
-  });
-  return {
-    load: (id: string) => dataLoader.load(id),
-  };
+  return createTrackedLoader(
+    loadFn,
+    (id) => id,
+    (id) => [id],
+    (elements) => collectElementIds(elements),
+  );
 };
 
 export const createExistingEntityIdsBatchLoader = (
@@ -118,19 +211,30 @@ export const createExistingEntityIdsBatchLoader = (
     });
   };
 
-  const dataLoader = new DataLoader<ExistingEntityIdsLookup, BasicStoreObject[]>(loadFn, {
-    maxBatchSize: MAX_BATCH_SIZE,
-    cache: false,
-  });
-  return {
-    load: (lookup: ExistingEntityIdsLookup) => dataLoader.load(lookup),
-  };
+  return createTrackedLoader(
+    loadFn,
+    (lookup) => `${lookup.type}:${normalizeTrackedIds(lookup.ids).sort().join('|')}`,
+    (lookup) => lookup.ids,
+    (elements) => collectElementIds(elements),
+  );
 };
 
 export const createStoreLoadByIdWithRefsBatchLoader = <TOpts extends object>(
   context: AuthContext,
   loadByIdsWithRefs: StoreLoadByIdsWithRefs<TOpts>,
 ): StoreLoadByIdWithRefsBatchLoader<TOpts> => {
+  const userCacheKeys = new Map<AuthUser, number>();
+  let nextUserCacheKey = 0;
+  const getUserCacheKey = (user: AuthUser) => {
+    const existingKey = userCacheKeys.get(user);
+    if (existingKey !== undefined) {
+      return existingKey;
+    }
+    const cacheKey = nextUserCacheKey;
+    nextUserCacheKey += 1;
+    userCacheKeys.set(user, cacheKey);
+    return cacheKey;
+  };
   const loadFn = async (lookups: ReadonlyArray<StoreLoadByIdWithRefsLookup<TOpts>>): Promise<(BasicStoreObject | null)[]> => {
     const groupsByUser = new Map<AuthUser, Map<string, {
       ids: Set<string>;
@@ -163,11 +267,10 @@ export const createStoreLoadByIdWithRefsBatchLoader = <TOpts extends object>(
     });
   };
 
-  const dataLoader = new DataLoader<StoreLoadByIdWithRefsLookup<TOpts>, BasicStoreObject | null>(loadFn, {
-    maxBatchSize: MAX_BATCH_SIZE,
-    cache: false,
-  });
-  return {
-    load: (lookup: StoreLoadByIdWithRefsLookup<TOpts>) => dataLoader.load(lookup),
-  };
+  return createTrackedLoader(
+    loadFn,
+    (lookup) => `${getUserCacheKey(lookup.user)}:${buildOptionsKey(lookup.opts)}:${lookup.id}`,
+    (lookup) => [lookup.id],
+    (element) => collectElementIds(element),
+  );
 };

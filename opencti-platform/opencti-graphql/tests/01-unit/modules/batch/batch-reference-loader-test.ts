@@ -63,7 +63,7 @@ describe('batch reference loader', () => {
     expect(matches.map((element) => element.internal_id)).toEqual(['identity--one', 'identity--two']);
   });
 
-  it('does not cache reads across ticks', async () => {
+  it('reuses shared reference reads across ticks until an affected id is invalidated', async () => {
     vi.mocked(internalFindByIds)
       .mockResolvedValueOnce([{
         internal_id: 'identity--one',
@@ -79,10 +79,13 @@ describe('batch reference loader', () => {
     const loader = createInputResolveRefsBatchLoader(context, user);
     const first = await loader.load('identity--shared');
     const second = await loader.load('identity--shared');
+    loader.invalidate(['identity--one']);
+    const third = await loader.load('identity--shared');
 
     expect(internalFindByIds).toHaveBeenCalledTimes(2);
     expect(first[0].internal_id).toBe('identity--one');
-    expect(second[0].internal_id).toBe('identity--two');
+    expect(second[0].internal_id).toBe('identity--one');
+    expect(third[0].internal_id).toBe('identity--two');
   });
 
   it('coalesces same-type entity existence probes and maps results back to each input', async () => {
@@ -138,7 +141,7 @@ describe('batch reference loader', () => {
     expect(internalFindByIds).toHaveBeenCalledWith(context, user, ['identity--standard-one'], { type: 'Identity' });
   });
 
-  it('does not cache entity existence probes across ticks', async () => {
+  it('reuses entity existence probes across ticks until an affected id is invalidated', async () => {
     vi.mocked(internalFindByIds)
       .mockResolvedValueOnce([] as any)
       .mockResolvedValueOnce([{
@@ -150,10 +153,13 @@ describe('batch reference loader', () => {
     const loader = createExistingEntityIdsBatchLoader(context, user);
     const first = await loader.load({ ids: ['indicator--standard-one'], type: 'Indicator' });
     const second = await loader.load({ ids: ['indicator--standard-one'], type: 'Indicator' });
+    loader.invalidate(['indicator--standard-one']);
+    const third = await loader.load({ ids: ['indicator--standard-one'], type: 'Indicator' });
 
     expect(internalFindByIds).toHaveBeenCalledTimes(2);
     expect(first).toEqual([]);
-    expect(second.map((element) => element.internal_id)).toEqual(['indicator--one']);
+    expect(second).toEqual([]);
+    expect(third.map((element) => element.internal_id)).toEqual(['indicator--one']);
   });
 
   it('coalesces same-user hydrated reads with matching options', async () => {
@@ -217,7 +223,7 @@ describe('batch reference loader', () => {
     expect(loadByIdsWithRefs).toHaveBeenCalledWith(context, otherUser, ['identity--shared-two'], { type: 'Identity' });
   });
 
-  it('does not cache hydrated reads across ticks', async () => {
+  it('reuses hydrated reads across ticks until an affected id is invalidated', async () => {
     const loadByIdsWithRefs = vi.fn()
       .mockResolvedValueOnce([{
         internal_id: 'identity--one',
@@ -233,9 +239,12 @@ describe('batch reference loader', () => {
     const loader = createStoreLoadByIdWithRefsBatchLoader(context, loadByIdsWithRefs);
     const first = await loader.load({ id: 'identity--shared', user });
     const second = await loader.load({ id: 'identity--shared', user });
+    loader.invalidate(['identity--one']);
+    const third = await loader.load({ id: 'identity--shared', user });
 
     expect(loadByIdsWithRefs).toHaveBeenCalledTimes(2);
     expect(first?.internal_id).toBe('identity--one');
-    expect(second?.internal_id).toBe('identity--two');
+    expect(second?.internal_id).toBe('identity--one');
+    expect(third?.internal_id).toBe('identity--two');
   });
 });

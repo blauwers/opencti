@@ -1990,6 +1990,31 @@ const getBufferedEngineState = (): BufferedEngineState | undefined => {
   return getBatchExecutionMetadata<BufferedEngineState>(BATCH_ENGINE_WRITES_METADATA_KEY);
 };
 
+const getBufferedWriteInvalidationIds = (elements: BasicStoreBase[]): string[] => {
+  const ids = new Set<string>();
+  const addId = (id: string | null | undefined) => {
+    if (isNotEmptyField(id)) {
+      ids.add(id as string);
+    }
+  };
+  elements.forEach((element) => {
+    getInstanceIds(element).forEach((id) => addId(id));
+    if (element.base_type === BASE_TYPE_RELATION) {
+      const relation = element as BasicStoreRelation;
+      addId(relation.fromId);
+      addId(relation.toId);
+      relation.connections?.forEach((connection) => addId(connection.internal_id));
+    }
+  });
+  return Array.from(ids);
+};
+
+const invalidateBufferedReadCaches = (context: AuthContext, ids: string[]) => {
+  if (ids.length > 0) {
+    context?.batch?.invalidateBufferedReadCaches?.(ids);
+  }
+};
+
 const getOrderedBufferedEngineWrites = (): BufferedEngineWrite[] => {
   return (getBufferedEngineState()?.writes ?? []).slice().sort((left, right) => left.sequence - right.sequence);
 };
@@ -5003,6 +5028,7 @@ const bufferReindexElements = async (
     overlayElements,
   });
   state.nextSequence += 1;
+  invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(overlayElements));
   return true;
 };
 
@@ -5042,6 +5068,7 @@ const bufferDirectIndexDocument = async (
     refresh,
   });
   state.nextSequence += 1;
+  invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(overlayElements));
   return true;
 };
 
@@ -5552,6 +5579,7 @@ const bufferDeleteInstances = <T extends BasicStoreBase>(
     forceRefresh: opts.forceRefresh ?? true,
   });
   state.nextSequence += 1;
+  invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(elements));
   return true;
 };
 
@@ -5575,6 +5603,7 @@ const bufferBulkUpdateOperations = (
     forceRefresh,
   });
   state.nextSequence += 1;
+  invalidateBufferedReadCaches(context, operations.map((operation) => operation.internalId));
   return true;
 };
 
@@ -5597,6 +5626,7 @@ const bufferIndexElements = (
     elements,
   });
   state.nextSequence += 1;
+  invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(elements as BasicStoreBase[]));
   return true;
 };
 
@@ -6396,6 +6426,7 @@ const bufferUpdateElement = (
     dataToReplace,
   });
   state.nextSequence += 1;
+  invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds([instance]));
   return true;
 };
 

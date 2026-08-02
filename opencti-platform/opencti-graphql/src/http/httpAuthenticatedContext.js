@@ -17,6 +17,9 @@ import { getEnterpriseEditionInfo, IS_LTS_PLATFORM } from '../modules/settings/l
 import { batchContextDataForLog } from '../database/data-changes';
 
 export const computeLoaders = (executeContext, user) => {
+  const existingEntityIdsBatchLoader = createExistingEntityIdsBatchLoader(executeContext, SYSTEM_USER);
+  const inputResolveRefsBatchLoader = createInputResolveRefsBatchLoader(executeContext, user);
+  const storeLoadByIdWithRefsBatchLoader = createStoreLoadByIdWithRefsBatchLoader(executeContext, storeLoadByIdsWithRefs);
   // Generic loaders
   return {
     relsBatchLoader: batchLoader(batchInternalRels, executeContext, user),
@@ -24,9 +27,14 @@ export const computeLoaders = (executeContext, user) => {
     creatorBatchLoader: batchLoader(batchCreator, executeContext, user),
     idsBatchLoader: batchLoader(elBatchIds, executeContext, user),
     idsBatchLoaderWithCount: batchLoader(elBatchIdsWithRelCount, executeContext, user),
-    existingEntityIdsBatchLoader: createExistingEntityIdsBatchLoader(executeContext, SYSTEM_USER),
-    inputResolveRefsBatchLoader: createInputResolveRefsBatchLoader(executeContext, user),
-    storeLoadByIdWithRefsBatchLoader: createStoreLoadByIdWithRefsBatchLoader(executeContext, storeLoadByIdsWithRefs),
+    existingEntityIdsBatchLoader,
+    inputResolveRefsBatchLoader,
+    storeLoadByIdWithRefsBatchLoader,
+    invalidateBufferedReadCaches: (ids) => {
+      existingEntityIdsBatchLoader.invalidate(ids);
+      inputResolveRefsBatchLoader.invalidate(ids);
+      storeLoadByIdWithRefsBatchLoader.invalidate(ids);
+    },
     markingsBatchLoader: batchLoader(batchMarkingDefinitions, executeContext, user),
     // Specific loaders
     domainsBatchLoader: batchLoader(batchStixDomainObjects, executeContext, user), // Could be change to use idsBatchLoader?

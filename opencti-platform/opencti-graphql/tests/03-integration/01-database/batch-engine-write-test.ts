@@ -624,6 +624,48 @@ describe('batch engine writes', () => {
     ]);
   });
 
+  it('invalidates cached hydrated reads when a buffered write changes the entity', async () => {
+    const batchContext = executionContext('batch-hydrated-cache-invalidation', ADMIN_USER);
+    batchContext.batch = computeLoaders(batchContext, ADMIN_USER);
+    let created: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          created = await addMalware(batchContext, ADMIN_USER, { name: `Batch hydrated cache ${uuidv4()}` });
+          cleanupMalwares.push(created);
+          return created;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const first = await storeLoadByIdWithRefs(batchContext, ADMIN_USER, created.standard_id, { type: ENTITY_TYPE_MALWARE }) as any;
+          const second = await storeLoadByIdWithRefs(batchContext, ADMIN_USER, created.standard_id, { type: ENTITY_TYPE_MALWARE }) as any;
+          expect(first?.description).toBeUndefined();
+          expect(second?.description).toBeUndefined();
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdateElement(batchContext, ADMIN_USER, { ...created, description: 'buffered cache invalidation' });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          const updated = await storeLoadByIdWithRefs(batchContext, ADMIN_USER, created.standard_id, { type: ENTITY_TYPE_MALWARE }) as any;
+          expect(updated?.description).toBe('buffered cache invalidation');
+          return null;
+        },
+      },
+    ]);
+  });
+
   it('deduplicates repeated relation creation inside one backend batch scope', async () => {
     const source = await addMalware(testContext, ADMIN_USER, { name: `Batch duplicate source ${uuidv4()}` });
     const target = await addMalware(testContext, ADMIN_USER, { name: `Batch duplicate target ${uuidv4()}` });
