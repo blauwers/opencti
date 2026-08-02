@@ -175,6 +175,45 @@ describe('coalesceBufferedEngineBulkActions testing', () => {
     expect(compacted[1]).toEqual(actions[2]);
   });
 
+  it('folds updates into a buffered index document when the batch owns its state', () => {
+    const actions = [
+      {
+        context,
+        refresh: true,
+        body: [
+          { index: { _index: 'test_index', _id: 'entity--1' } },
+          { internal_id: 'entity--1', name: 'created' },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        applyToDocument: (existing) => ({ ...existing, description: 'updated' }),
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { description: 'updated' } },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        applyToDocument: (existing) => ({ ...existing, confidence: 88 }),
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { confidence: 88 } },
+        ],
+      },
+    ];
+
+    const compacted = coalesceBufferedEngineBulkActions(actions);
+
+    expect(compacted).toHaveLength(1);
+    expect(compacted[0].body).toEqual([
+      { index: { _index: 'test_index', _id: 'entity--1' } },
+      { internal_id: 'entity--1', name: 'created', description: 'updated', confidence: 88 },
+    ]);
+  });
+
   it('keeps update actions separate across document barriers or unsupported bodies', () => {
     const actions = [
       {

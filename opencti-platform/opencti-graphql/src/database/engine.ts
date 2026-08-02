@@ -315,6 +315,7 @@ type BufferedEngineBulkAction = {
   refresh: boolean;
   body: any[];
   metric?: BufferedEngineBulkMetric;
+  applyToDocument?: (existing: Record<string, any>) => Record<string, any>;
 };
 
 type BufferedEngineBulkActionDescriptor = {
@@ -5743,6 +5744,9 @@ const combineBufferedUpdateActions = (
   return {
     ...right,
     metric: right.metric ?? left.metric,
+    applyToDocument: left.applyToDocument && right.applyToDocument
+      ? (existing) => right.applyToDocument?.(left.applyToDocument?.(existing) ?? existing) ?? existing
+      : undefined,
     body: [
       right.body[0],
       {
@@ -5756,8 +5760,29 @@ const combineBufferedUpdateActions = (
   };
 };
 
+const combineBufferedIndexAndUpdateActions = (
+  indexAction: BufferedEngineBulkAction,
+  updateAction: BufferedEngineBulkAction,
+): BufferedEngineBulkAction | undefined => {
+  if (indexAction.context !== updateAction.context || indexAction.refresh !== updateAction.refresh || !updateAction.applyToDocument) {
+    return undefined;
+  }
+  const source = indexAction.body[1];
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return undefined;
+  }
+  return {
+    ...indexAction,
+    body: [
+      indexAction.body[0],
+      updateAction.applyToDocument(structuredClone(source)),
+    ],
+  };
+};
+
 export const coalesceBufferedEngineBulkActions = (actions: BufferedEngineBulkAction[]): BufferedEngineBulkAction[] => {
   const coalescedActions: Array<BufferedEngineBulkAction | undefined> = [];
+  const pendingIndicesByDocument = new Map<string, number>();
   const pendingUpdatesByDocument = new Map<string, number>();
   actions.forEach((action, sequence) => {
     const descriptor = parseBufferedEngineBulkAction(action);
@@ -5766,10 +5791,27 @@ export const coalesceBufferedEngineBulkActions = (actions: BufferedEngineBulkAct
       return;
     }
     const key = buildBufferedEngineBulkActionKey(descriptor);
-    if (descriptor.kind !== 'update') {
+    if (descriptor.kind === 'index') {
+      pendingIndicesByDocument.set(key, coalescedActions.length);
       pendingUpdatesByDocument.delete(key);
       coalescedActions.push(action);
       return;
+    }
+    if (descriptor.kind === 'delete') {
+      pendingIndicesByDocument.delete(key);
+      pendingUpdatesByDocument.delete(key);
+      coalescedActions.push(action);
+      return;
+    }
+    const previousIndexActionIndex = pendingIndicesByDocument.get(key);
+    if (previousIndexActionIndex !== undefined) {
+      const previousIndexAction = coalescedActions[previousIndexActionIndex];
+      const combinedIndexAction = previousIndexAction ? combineBufferedIndexAndUpdateActions(previousIndexAction, action) : undefined;
+      if (combinedIndexAction) {
+        coalescedActions[previousIndexActionIndex] = combinedIndexAction;
+        return;
+      }
+      pendingIndicesByDocument.delete(key);
     }
     const previousIndex = pendingUpdatesByDocument.get(key);
     if (previousIndex === undefined) {
@@ -5817,6 +5859,56 @@ const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkActio
       segment.push(action);
     }
   }
+};
+
+const applyIndexedRelationImpacts = (
+  existing: Record<string, any>,
+  targetsElements: { relation: string; field: string; elements: { id: string; side: string; type: string; pir_score?: number }[] }[],
+  updatedAt: string,
+): Record<string, any> => {
+  const updated = { ...existing };
+  targetsElements.forEach((targetElement) => {
+    const field = buildRefRelationKey(targetElement.relation, targetElement.field);
+    const targetIds = targetElement.elements.map((element) => element.id);
+    const currentValues = Array.isArray(updated[field]) ? [...updated[field]] : [];
+    if (isStixRefUnidirectionalRelationship(targetElement.relation)) {
+      targetIds.forEach((targetId) => {
+        if (!currentValues.includes(targetId)) {
+          currentValues.push(targetId);
+        }
+      });
+    } else {
+      currentValues.push(...targetIds);
+    }
+    updated[field] = currentValues;
+    const fromSide = targetElement.elements.find((element) => element.side === 'from');
+    const toSide = targetElement.elements.find((element) => element.side === 'to');
+    if (fromSide && isStixRefRelationship(targetElement.relation)) {
+      if (isUpdatedAtObject(fromSide.type)) {
+        updated.updated_at = updatedAt;
+      }
+      if (isModifiedObject(fromSide.type)) {
+        updated.modified = updatedAt;
+      }
+    }
+    if ((fromSide && isUpdatedAtObject(fromSide.type)) || (toSide && isUpdatedAtObject(toSide.type))) {
+      updated.refreshed_at = updatedAt;
+    }
+    if (targetElement.relation === RELATION_IN_PIR) {
+      const pirIds = targetElement.elements.map((element) => element.id);
+      const newPirInformation = targetElement.elements.map((element) => ({
+        pir_id: element.id,
+        pir_score: element.pir_score,
+        last_pir_score_date: updatedAt,
+      }));
+      const currentPirInformation = Array.isArray(updated.pir_information) ? updated.pir_information : [];
+      updated.pir_information = [
+        ...currentPirInformation.filter((item: any) => !pirIds.includes(item.pir_id)),
+        ...newPirInformation,
+      ];
+    }
+  });
+  return updated;
 };
 
 const buildIndexBulkActions = async (
@@ -5937,13 +6029,19 @@ const buildIndexBulkActions = async (
         }));
       params.pir_ids = pirElement.elements.map((e: any) => e.id);
     }
-    return { ...entity, id: entityId, data: { script: { source, params } } };
+    return {
+      ...entity,
+      id: entityId,
+      data: { script: { source, params } },
+      applyToDocument: (existing: Record<string, any>) => applyIndexedRelationImpacts(existing, targetsElements, params.updated_at),
+    };
   });
   // 02. Commit rows and relation denormalization in one ordered bulk request when possible.
   actions.push(...elementsToUpdate.map((doc: any) => ({
     context,
     refresh: true,
     metric: { kind: 'side' as const, indexingType },
+    applyToDocument: doc.applyToDocument,
     body: [
       { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
       R.dissoc('_index', doc.data),
@@ -5974,20 +6072,24 @@ const elIndexElementsNow = async (
 };
 
 const buildBufferedUpdateActions = (writes: BufferedUpdateWrite[]): BufferedEngineBulkAction[] => {
-  return writes.map((write) => ({
-    context: write.context,
-    refresh: true,
-    body: [
-      {
-        update: {
-          _index: write.instance._index,
-          _id: write.instance._id ?? write.instance.internal_id,
-          retry_on_conflict: ES_RETRY_ON_CONFLICT,
+  return writes.map((write) => {
+    const patch = R.dissoc('_index', write.dataToReplace);
+    return {
+      context: write.context,
+      refresh: true,
+      applyToDocument: (existing) => applyBufferedUpdate(existing, patch),
+      body: [
+        {
+          update: {
+            _index: write.instance._index,
+            _id: write.instance._id ?? write.instance.internal_id,
+            retry_on_conflict: ES_RETRY_ON_CONFLICT,
+          },
         },
-      },
-      buildReplaceScriptBody({ doc: write.dataToReplace }),
-    ],
-  }));
+        buildReplaceScriptBody({ doc: patch }),
+      ],
+    };
+  });
 };
 
 const buildBufferedDeleteActions = (writes: BufferedDeleteWrite[]): BufferedEngineBulkAction[] => {
@@ -6004,6 +6106,7 @@ const buildBufferedBulkUpdateActions = (writes: BufferedBulkUpdateWrite[]): Buff
   return writes.flatMap((write) => write.operations.map((operation) => ({
     context: write.context,
     refresh: write.forceRefresh,
+    applyToDocument: operation.apply,
     body: [
       { update: { _index: operation.index, _id: operation.documentId, retry_on_conflict: operation.retry ?? ES_RETRY_ON_CONFLICT } },
       operation.body,

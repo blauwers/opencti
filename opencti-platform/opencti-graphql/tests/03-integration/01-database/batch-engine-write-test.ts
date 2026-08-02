@@ -586,8 +586,13 @@ describe('batch engine writes', () => {
     ]);
 
     const committedRelation = await internalLoadById(testContext, ADMIN_USER, relation.internal_id) as any;
+    const committedSource = await internalLoadById(testContext, ADMIN_USER, source.internal_id) as any;
+    const committedTarget = await internalLoadById(testContext, ADMIN_USER, target.internal_id) as any;
+    const relationKey = buildRefRelationKey(RELATION_RELATED_TO);
     expect(committedRelation.fromId).toBe(source.internal_id);
     expect(committedRelation.toId).toBe(target.internal_id);
+    expect(committedSource[relationKey]).toContain(target.internal_id);
+    expect(committedTarget[relationKey]).toContain(source.internal_id);
   });
 
   it('loads hydrated entities created earlier in the same batch through the request batch loader', async () => {
