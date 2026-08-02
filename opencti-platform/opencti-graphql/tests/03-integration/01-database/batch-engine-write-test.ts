@@ -9,6 +9,7 @@ import { fileToReadStream, uploadToStorage } from '../../../src/database/file-st
 import { getFileContent } from '../../../src/database/raw-file-storage';
 import { findById as findDocumentById, IMPORT_STORAGE_PATH } from '../../../src/modules/internal/document/document-domain';
 import { addMalware } from '../../../src/domain/malware';
+import { addLabel } from '../../../src/domain/label';
 import { addDraftContext, createWork, loadWorkById, pingWork, updateReceivedTime } from '../../../src/domain/work';
 import { addStixCyberObservable, stixCyberObservableDelete } from '../../../src/domain/stixCyberObservable';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
@@ -19,22 +20,29 @@ import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperati
 import { updatePirInformationOnEntity } from '../../../src/modules/pir/pir-utils';
 import { addVocabulary, deleteVocabulary, editVocabulary } from '../../../src/modules/vocabulary/vocabulary-domain';
 import { ENTITY_TYPE_VOCABULARY } from '../../../src/modules/vocabulary/vocabulary-types';
+import { addIndicator } from '../../../src/modules/indicator/indicator-domain';
+import { ENTITY_TYPE_INDICATOR } from '../../../src/modules/indicator/indicator-types';
 import { FilterMode, FilterOperator, VocabularyCategory } from '../../../src/generated/graphql';
 import { buildRefRelationKey } from '../../../src/schema/general';
 import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
 import { ENTITY_TYPE_MALWARE } from '../../../src/schema/stixDomainObject';
 import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
+import { ENTITY_TYPE_LABEL } from '../../../src/schema/stixMetaObject';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { redisDeleteWorks, redisFetchLatestDeletions, redisGetWork } from '../../../src/database/redis';
 import { computeLoaders } from '../../../src/http/httpAuthenticatedContext';
 import { executionContext } from '../../../src/utils/access';
 import { storeDeleteEvent } from '../../../src/database/stream/stream-handler';
+import createSchema from '../../../src/graphql/schema';
+import { buildBatchGraphqlResultToken, executeBatchGraphqlOperations } from '../../../src/modules/batch/batch-operation-executor';
 
 describe('batch engine writes', () => {
   let malware: any;
   let deletedMalware: any;
   const cleanupMalwares: any[] = [];
   const cleanupObservables: any[] = [];
+  const cleanupIndicators: any[] = [];
+  const cleanupLabels: any[] = [];
   const cleanupSoftDeletedMalwareIds: string[] = [];
   const streamDeletedMalwares: any[] = [];
   const cleanupVocabularies: any[] = [];
@@ -124,6 +132,20 @@ describe('batch engine writes', () => {
       const existing = await internalLoadById(testContext, ADMIN_USER, cleanupObservable.internal_id);
       if (existing) {
         await stixCyberObservableDelete(testContext, ADMIN_USER, cleanupObservable.internal_id);
+      }
+    }
+    for (let index = 0; index < cleanupIndicators.length; index += 1) {
+      const cleanupIndicator = cleanupIndicators[index];
+      const existing = await internalLoadById(testContext, ADMIN_USER, cleanupIndicator.internal_id);
+      if (existing) {
+        await deleteElementById(testContext, ADMIN_USER, cleanupIndicator.internal_id, ENTITY_TYPE_INDICATOR, { forceDelete: true });
+      }
+    }
+    for (let index = 0; index < cleanupLabels.length; index += 1) {
+      const cleanupLabel = cleanupLabels[index];
+      const existing = await internalLoadById(testContext, ADMIN_USER, cleanupLabel.internal_id);
+      if (existing) {
+        await deleteElementById(testContext, ADMIN_USER, cleanupLabel.internal_id, ENTITY_TYPE_LABEL, { forceDelete: true });
       }
     }
     for (let index = 0; index < cleanupSoftDeletedMalwareIds.length; index += 1) {
@@ -257,6 +279,190 @@ describe('batch engine writes', () => {
     expect(committedCreated?.description).toBe('mixed buffered update');
     await expect(internalLoadById(testContext, ADMIN_USER, mixedDeletedMalware.internal_id)).resolves.toBeUndefined();
     streamDeletedMalwares.push(mixedDeletedMalware);
+  });
+
+  it('resolves references to buffered creates before the batch is flushed', async () => {
+    const batchContext = executionContext('batch-buffered-reference-resolution', ADMIN_USER);
+    batchContext.batch = computeLoaders(batchContext, ADMIN_USER);
+    let label: any;
+    let indicator: any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          label = await addLabel(batchContext, ADMIN_USER, { value: `Batch buffered label ${uuidv4()}` });
+          cleanupLabels.push(label);
+          return label;
+        },
+      },
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          const bufferedLabel = await internalLoadById(batchContext, ADMIN_USER, label.internal_id) as any;
+          expect(bufferedLabel?._id).toBe(label.internal_id);
+          indicator = await addIndicator(batchContext, ADMIN_USER, {
+            name: `Batch buffered indicator ${uuidv4()}`,
+            pattern: `[domain-name:value = 'batch-${uuidv4()}.test']`,
+            pattern_type: 'stix',
+            objectLabel: [label.id],
+          });
+          cleanupIndicators.push(indicator);
+          return indicator;
+        },
+      },
+    ]);
+
+    const committedIndicator = await internalLoadById(batchContext, ADMIN_USER, indicator.internal_id) as any;
+    expect(committedIndicator?.internal_id).toBe(indicator.internal_id);
+  });
+
+  it('resolves buffered helper references across GraphQL execution groups', async () => {
+    const batchContext = executionContext('batch-graphql-buffered-reference-resolution', ADMIN_USER);
+    batchContext.batch = computeLoaders(batchContext, ADMIN_USER);
+    const schema = createSchema();
+    const labelToken = buildBatchGraphqlResultToken(0, ['labelAdd', 'id']);
+    const firstObjectId = `indicator--${uuidv4()}`;
+    const objectIds = [firstObjectId, ...Array.from({ length: 8 }, () => `indicator--${uuidv4()}`)];
+    const operations = [
+      {
+        query: 'mutation LabelAdd($input: LabelAddInput!) { labelAdd(input: $input) { id } }',
+        variables: JSON.stringify({ input: { value: `Batch GraphQL buffered label ${uuidv4()}` } }),
+        objectId: firstObjectId,
+      },
+      ...objectIds.map((objectId, index) => ({
+        query: 'mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }',
+        variables: JSON.stringify({
+          input: {
+            name: `Batch GraphQL buffered indicator ${uuidv4()}`,
+            pattern: `[domain-name:value = 'batch-graphql-${index}-${uuidv4()}.test']`,
+            pattern_type: 'stix',
+            objectLabel: [labelToken],
+          },
+        }),
+        objectId,
+      })),
+    ];
+
+    const execution = await executeBatchGraphqlOperations(schema, batchContext, operations, {
+      bundlePlan: {
+        version: 1,
+        executionPhases: [{ phase: 0, objectIds }],
+      },
+    });
+
+    cleanupLabels.push({ internal_id: (execution.results[0] as any).labelAdd.id });
+    execution.results.slice(1).forEach((result) => {
+      cleanupIndicators.push({ internal_id: (result as any).indicatorAdd.id });
+    });
+    expect(execution.results).toHaveLength(operations.length);
+  });
+
+  it('resolves buffered created-by references across fallback execution phases', async () => {
+    const workerUser = { ...ADMIN_USER, origin: { ...ADMIN_USER.origin, call_retry_number: 1 } };
+    const batchContext = executionContext('batch-graphql-buffered-created-by-resolution', workerUser);
+    batchContext.batch = computeLoaders(batchContext, workerUser);
+    const schema = createSchema();
+    const creatorStixId = `identity--${uuidv4()}`;
+    const indicatorCount = 16;
+    const operations = [
+      {
+        query: 'mutation OrganizationAdd($input: OrganizationAddInput!) { organizationAdd(input: $input) { id standard_id } }',
+        variables: JSON.stringify({
+          input: {
+            name: `Batch GraphQL buffered creator ${uuidv4()}`,
+            stix_id: creatorStixId,
+            update: true,
+          },
+        }),
+        objectId: creatorStixId,
+        executionGroup: 0,
+        executionPhase: 1,
+      },
+      ...Array.from({ length: indicatorCount }, (_, index) => {
+        const objectId = `indicator--${uuidv4()}`;
+        return {
+          query: 'mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }',
+          variables: JSON.stringify({
+            input: {
+              createdBy: creatorStixId,
+              name: `Batch GraphQL buffered creator indicator ${uuidv4()}`,
+              pattern: `[domain-name:value = 'batch-created-by-${index}-${uuidv4()}.test']`,
+              pattern_type: 'stix',
+              update: true,
+            },
+          }),
+          objectId,
+          executionGroup: index + 1,
+          executionPhase: 2,
+        };
+      }),
+    ];
+
+    await expect(executeBatchMutations([{
+      kind: BatchMutationKind.GraphqlOperation,
+      executeWrite: async () => {
+        const execution = await executeBatchGraphqlOperations(schema, batchContext, operations);
+        expect(execution.results).toHaveLength(operations.length);
+        const bufferedCreator = await internalLoadById(batchContext, ADMIN_USER, creatorStixId) as any;
+        expect(bufferedCreator?.x_opencti_stix_ids).toContain(creatorStixId);
+        throw new Error('abort buffered created-by fallback batch');
+      },
+    }])).rejects.toThrow('abort buffered created-by fallback batch');
+  });
+
+  it('resolves shared buffered creators across concurrent fallback batches', async () => {
+    const schema = createSchema();
+    const creatorStixId = `identity--${uuidv4()}`;
+    const runBatch = async (batchIndex: number) => {
+      const workerUser = { ...ADMIN_USER, origin: { ...ADMIN_USER.origin, call_retry_number: 1 } };
+      const batchContext = executionContext(`batch-graphql-concurrent-created-by-resolution-${batchIndex}`, workerUser);
+      batchContext.batch = computeLoaders(batchContext, workerUser);
+      const operations = [
+        {
+          query: 'mutation OrganizationAdd($input: OrganizationAddInput!) { organizationAdd(input: $input) { id standard_id } }',
+          variables: JSON.stringify({
+            input: {
+              name: `Batch GraphQL concurrent creator ${uuidv4()}`,
+              stix_id: creatorStixId,
+              update: true,
+            },
+          }),
+          objectId: creatorStixId,
+          executionGroup: 0,
+          executionPhase: 1,
+        },
+        ...Array.from({ length: 2 }, (_, index) => {
+          const objectId = `indicator--${uuidv4()}`;
+          return {
+            query: 'mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }',
+            variables: JSON.stringify({
+              input: {
+                createdBy: creatorStixId,
+                name: `Batch GraphQL concurrent creator indicator ${batchIndex}-${uuidv4()}`,
+                pattern: `[domain-name:value = 'batch-concurrent-created-by-${batchIndex}-${index}-${uuidv4()}.test']`,
+                pattern_type: 'stix',
+                update: true,
+              },
+            }),
+            objectId,
+            executionGroup: index + 1,
+            executionPhase: 2,
+          };
+        }),
+      ];
+
+      await expect(executeBatchMutations([{
+        kind: BatchMutationKind.GraphqlOperation,
+        executeWrite: async () => {
+          const execution = await executeBatchGraphqlOperations(schema, batchContext, operations);
+          expect(execution.results).toHaveLength(operations.length);
+          throw new Error(`abort concurrent buffered created-by fallback batch ${batchIndex}`);
+        },
+      }])).rejects.toThrow(`abort concurrent buffered created-by fallback batch ${batchIndex}`);
+    };
+
+    await Promise.all(Array.from({ length: 3 }, (_, index) => runBatch(index)));
   });
 
   it('buffers direct document and replace updates inside the batch boundary', async () => {

@@ -1,5 +1,4 @@
 import { Readable } from 'node:stream';
-import { Promise as BluePromise } from 'bluebird';
 import { execute, Kind, parse, type DocumentNode, type ExecutionResult, type GraphQLSchema, validate } from 'graphql';
 import Upload from 'graphql-upload/Upload.mjs';
 import conf from '../../config/conf';
@@ -463,6 +462,25 @@ const executeOperationGroup = async (
   }
 };
 
+const executeOperationGroupsWithConcurrency = async (
+  schema: GraphQLSchema,
+  context: AuthContext,
+  groups: PreparedBatchGraphqlOperationGroup[],
+  resultBindings: BatchGraphqlResultBindings,
+  results: BatchGraphqlOperationResult[],
+): Promise<void> => {
+  let nextGroupIndex = 0;
+  const workerCount = Math.min(BATCH_GRAPHQL_MAX_CONCURRENCY, groups.length);
+  // Batch writes are stored in AsyncLocalStorage, so keep this boundary on native promises.
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextGroupIndex < groups.length) {
+      const groupIndex = nextGroupIndex;
+      nextGroupIndex += 1;
+      await executeOperationGroup(schema, context, groups[groupIndex], resultBindings, results);
+    }
+  }));
+};
+
 const executeOperationGroups = async (
   schema: GraphQLSchema,
   context: AuthContext,
@@ -480,10 +498,12 @@ const executeOperationGroups = async (
   const results = new Array<BatchGraphqlOperationResult>(operations.length);
   const phases = Array.from(groupsByPhase.keys()).sort((left, right) => left - right);
   for (const phase of phases) {
-    await BluePromise.map(
+    await executeOperationGroupsWithConcurrency(
+      schema,
+      context,
       groupsByPhase.get(phase) ?? [],
-      (group) => executeOperationGroup(schema, context, group, resultBindings, results),
-      { concurrency: BATCH_GRAPHQL_MAX_CONCURRENCY },
+      resultBindings,
+      results,
     );
   }
   return results;

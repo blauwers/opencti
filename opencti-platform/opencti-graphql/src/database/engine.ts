@@ -2086,7 +2086,10 @@ const getBufferedWriteElements = (
   if (write.kind === 'raw-index' || write.kind === 'direct-index') {
     return write.overlayElements;
   }
-  return write.elements as BasicStoreBase[];
+  return write.elements.map((element) => ({
+    ...element,
+    _id: element._id ?? element.internal_id,
+  })) as BasicStoreBase[];
 };
 
 const mergeBufferedEngineElements = <T extends BasicStoreBase>(
