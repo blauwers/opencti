@@ -317,6 +317,18 @@ type BufferedEngineBulkAction = {
   metric?: BufferedEngineBulkMetric;
 };
 
+type BufferedEngineBulkActionDescriptor = {
+  documentId: string;
+  index: string;
+  kind: 'delete' | 'index' | 'update';
+};
+
+type ComposableBufferedUpdateScript = {
+  lang?: string;
+  params: Record<string, any>;
+  source: string;
+};
+
 export const ROLE_FROM = 'from';
 export const ROLE_TO = 'to';
 export const UNIMPACTED_ENTITIES_ROLE = [
@@ -5627,6 +5639,158 @@ const recordBufferedEngineBulkMetrics = (actions: BufferedEngineBulkAction[]) =>
   });
 };
 
+const parseBufferedEngineBulkAction = (action: BufferedEngineBulkAction): BufferedEngineBulkActionDescriptor | undefined => {
+  const operation = action.body[0];
+  if (!operation || typeof operation !== 'object') {
+    return undefined;
+  }
+  const kind = ['delete', 'index', 'update'].find((candidate) => operation[candidate] !== undefined) as BufferedEngineBulkActionDescriptor['kind'] | undefined;
+  if (!kind) {
+    return undefined;
+  }
+  const metadata = operation[kind];
+  if (!metadata || typeof metadata._index !== 'string' || typeof metadata._id !== 'string') {
+    return undefined;
+  }
+  return {
+    documentId: metadata._id,
+    index: metadata._index,
+    kind,
+  };
+};
+
+const buildBufferedEngineBulkActionKey = (descriptor: BufferedEngineBulkActionDescriptor): string => {
+  return `${descriptor.index}:${descriptor.documentId}`;
+};
+
+const metricsMatchForCoalesce = (
+  left: BufferedEngineBulkMetric | undefined,
+  right: BufferedEngineBulkMetric | undefined,
+): boolean => {
+  if (!left || !right) {
+    return true;
+  }
+  return left.kind === right.kind && left.indexingType === right.indexingType;
+};
+
+const escapeRegExp = (value: string): string => {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+const namespacePainlessParams = (
+  script: ComposableBufferedUpdateScript,
+  namespace: string,
+): ComposableBufferedUpdateScript => {
+  let source = script.source;
+  const params: Record<string, any> = {};
+  Object.entries(script.params).forEach(([key, value], index) => {
+    const namespacedKey = `${namespace}_${index}`;
+    const escapedKey = escapeRegExp(key);
+    source = source
+      .replace(new RegExp(`params\\[['"]${escapedKey}['"]\\]`, 'g'), `params['${namespacedKey}']`)
+      .replace(new RegExp(`params\\.${escapedKey}\\b`, 'g'), `params.${namespacedKey}`);
+    params[namespacedKey] = value;
+  });
+  return { ...script, params, source };
+};
+
+const normalizeComposableBufferedUpdateScript = (
+  body: Record<string, any> | undefined,
+): ComposableBufferedUpdateScript | undefined => {
+  if (!body || typeof body !== 'object') {
+    return undefined;
+  }
+  const bodyKeys = Object.keys(body);
+  if (body.doc && bodyKeys.every((key) => key === 'doc')) {
+    const replaceBody = buildReplaceScriptBody(body);
+    return {
+      params: replaceBody.script.params ?? {},
+      source: replaceBody.script.source,
+    };
+  }
+  if (!body.script || !bodyKeys.every((key) => key === 'script')) {
+    return undefined;
+  }
+  const { lang, params = {}, source } = body.script;
+  if (typeof source !== 'string' || params === null || Array.isArray(params) || typeof params !== 'object') {
+    return undefined;
+  }
+  if (lang !== undefined && lang !== 'painless') {
+    return undefined;
+  }
+  return { lang, params, source };
+};
+
+const trimTrailingPainlessSeparators = (source: string): string => {
+  return source.trim().replace(/;+\s*$/, '');
+};
+
+const combineBufferedUpdateActions = (
+  left: BufferedEngineBulkAction,
+  right: BufferedEngineBulkAction,
+  sequence: number,
+): BufferedEngineBulkAction | undefined => {
+  if (left.context !== right.context || left.refresh !== right.refresh || !metricsMatchForCoalesce(left.metric, right.metric)) {
+    return undefined;
+  }
+  const leftScript = normalizeComposableBufferedUpdateScript(left.body[1]);
+  const rightScript = normalizeComposableBufferedUpdateScript(right.body[1]);
+  if (!leftScript || !rightScript) {
+    return undefined;
+  }
+  const namespacedLeft = namespacePainlessParams(leftScript, `b${sequence}_0`);
+  const namespacedRight = namespacePainlessParams(rightScript, `b${sequence}_1`);
+  return {
+    ...right,
+    metric: right.metric ?? left.metric,
+    body: [
+      right.body[0],
+      {
+        script: {
+          ...(namespacedLeft.lang || namespacedRight.lang ? { lang: namespacedLeft.lang ?? namespacedRight.lang } : {}),
+          params: { ...namespacedLeft.params, ...namespacedRight.params },
+          source: `${trimTrailingPainlessSeparators(namespacedLeft.source)}; ${trimTrailingPainlessSeparators(namespacedRight.source)}`,
+        },
+      },
+    ],
+  };
+};
+
+export const coalesceBufferedEngineBulkActions = (actions: BufferedEngineBulkAction[]): BufferedEngineBulkAction[] => {
+  const coalescedActions: Array<BufferedEngineBulkAction | undefined> = [];
+  const pendingUpdatesByDocument = new Map<string, number>();
+  actions.forEach((action, sequence) => {
+    const descriptor = parseBufferedEngineBulkAction(action);
+    if (!descriptor) {
+      coalescedActions.push(action);
+      return;
+    }
+    const key = buildBufferedEngineBulkActionKey(descriptor);
+    if (descriptor.kind !== 'update') {
+      pendingUpdatesByDocument.delete(key);
+      coalescedActions.push(action);
+      return;
+    }
+    const previousIndex = pendingUpdatesByDocument.get(key);
+    if (previousIndex === undefined) {
+      pendingUpdatesByDocument.set(key, coalescedActions.length);
+      coalescedActions.push(action);
+      return;
+    }
+    const previousAction = coalescedActions[previousIndex];
+    const combinedAction = previousAction ? combineBufferedUpdateActions(previousAction, action, sequence) : undefined;
+    if (!combinedAction) {
+      pendingUpdatesByDocument.set(key, coalescedActions.length);
+      coalescedActions.push(action);
+      return;
+    }
+    coalescedActions[previousIndex] = undefined;
+    pendingUpdatesByDocument.set(key, coalescedActions.length);
+    coalescedActions.push(combinedAction);
+  });
+  return coalescedActions.filter((action): action is BufferedEngineBulkAction => action !== undefined);
+};
+
 const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]) => {
   let segment: BufferedEngineBulkAction[] = [];
   const flushSegment = async () => {
@@ -5880,7 +6044,7 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
       segment.push(write);
     }
   }
-  await executeBufferedEngineBulkActions(actions);
+  await executeBufferedEngineBulkActions(coalesceBufferedEngineBulkActions(actions));
 };
 
 export const elIndexElements = async (

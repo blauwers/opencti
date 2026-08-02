@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, extractBulkOperationErrors, isTransitoryError, prepareElementForIndexing } from '../../../src/database/engine';
+import { buildLocalMustFilter, coalesceBufferedEngineBulkActions, extractBulkOperationErrors, isTransitoryError, prepareElementForIndexing } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 
 describe('prepareElementForIndexing testing', () => {
@@ -128,6 +128,90 @@ describe('extractBulkOperationErrors testing', () => {
       { create: { error: createError } },
       { index: { status: 201 } },
     ])).toEqual([indexError, updateError, deleteError, createError]);
+  });
+});
+
+describe('coalesceBufferedEngineBulkActions testing', () => {
+  const context = {};
+
+  it('combines repeated same-document updates into one ordered script', () => {
+    const actions = [
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { script: { source: 'ctx._source.name = params.name', params: { name: 'first' } } },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { description: 'second' } },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--2' } },
+          { doc: { name: 'other' } },
+        ],
+      },
+    ];
+
+    const compacted = coalesceBufferedEngineBulkActions(actions);
+
+    expect(compacted).toHaveLength(2);
+    expect(compacted[0].body[0]).toEqual({ update: { _index: 'test_index', _id: 'entity--1' } });
+    expect(compacted[0].body[1].script.source).toContain('ctx._source.name = params.b1_0_0');
+    expect(compacted[0].body[1].script.source).toContain("ctx._source['description'] = params['b1_1_0']");
+    expect(compacted[0].body[1].script.params).toEqual({
+      b1_0_0: 'first',
+      b1_1_0: 'second',
+    });
+    expect(compacted[1]).toEqual(actions[2]);
+  });
+
+  it('keeps update actions separate across document barriers or unsupported bodies', () => {
+    const actions = [
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { name: 'first' } },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        body: [
+          { index: { _index: 'test_index', _id: 'entity--1' } },
+          { internal_id: 'entity--1', name: 'replacement' },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { description: 'after-index' } },
+        ],
+      },
+      {
+        context,
+        refresh: true,
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { script: { source: 'ctx._source.score = params.score', params: { score: 42 } }, upsert: {} },
+        ],
+      },
+    ];
+
+    expect(coalesceBufferedEngineBulkActions(actions)).toEqual(actions);
   });
 });
 
