@@ -387,6 +387,40 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     expect(materialized[0].body[1]['rel_related-to.internal_id']).toEqual(['indicator--0', 'indicator--1', 'indicator--2']);
   });
 
+  it('drops repeated relation impact updates when only projection timestamps would change', () => {
+    const actions = Array.from({ length: 2 }, (_, index) => ({
+      context: {},
+      refresh: true,
+      applyToDocument: () => {
+        throw new Error('relation impacts should be aggregated');
+      },
+      finalStateMutation: {
+        kind: 'indexed-relation-impact',
+        targetsElements: [{
+          relation: 'object-marking',
+          field: 'internal_id',
+          elements: [{ id: 'marking-definition--1', side: 'from', type: 'Indicator' }],
+        }],
+        updatedAt: `2026-08-03T00:00:0${index}.000Z`,
+      },
+      body: [
+        { update: { _index: 'test_index', _id: 'indicator--1' } },
+        { script: { source: `impact-${index}` } },
+      ],
+    }));
+
+    expect(materializeBufferedEngineBulkActions(actions, {
+      documents: new Map([['test_index:indicator--1', {
+        internal_id: 'indicator--1',
+        modified: '2026-08-02T00:00:00.000Z',
+        refreshed_at: '2026-08-02T00:00:00.000Z',
+        'rel_object-marking.internal_id': ['marking-definition--1'],
+        updated_at: '2026-08-02T00:00:00.000Z',
+      }]]),
+      loadedKeys: new Set(['test_index:indicator--1']),
+    })).toEqual([]);
+  });
+
   it('drops a create followed by a delete when the document did not exist before the batch', () => {
     const actions = [
       {
