@@ -218,6 +218,7 @@ export const ES_MINIMUM_FIXED_PAGINATION: number = 20; // When really low pagina
 export const ES_DEFAULT_PAGINATION: number = conf.get('elasticsearch:default_pagination_result') || 500;
 export const ES_MAX_PAGINATION: number = conf.get('elasticsearch:max_pagination_result') || 5000;
 export const MAX_BULK_OPERATIONS: number = conf.get('elasticsearch:max_bulk_operations') || 5000;
+export const MAX_BULK_BYTES: number = conf.get('elasticsearch:max_bulk_bytes') || 20 * 1024 * 1024;
 export const MAX_RUNTIME_RESOLUTION_SIZE: number = conf.get('elasticsearch:max_runtime_resolutions') || 5000;
 export const MAX_RELATED_CONTAINER_RESOLUTION: number = conf.get('elasticsearch:max_container_resolutions') || 1000;
 export const MAX_RELATED_CONTAINER_OBJECT_RESOLUTION: number = conf.get('elasticsearch:max_container_object_resolutions') || 100000;
@@ -5771,6 +5772,36 @@ const recordBufferedEngineBulkMetrics = (actions: BufferedEngineBulkAction[]) =>
   });
 };
 
+const getBufferedEngineBulkActionByteLength = (action: BufferedEngineBulkAction): number => {
+  return action.body.reduce((total, line) => total + Buffer.byteLength(JSON.stringify(line)) + 1, 0);
+};
+
+export const splitBufferedEngineBulkActions = (
+  actions: BufferedEngineBulkAction[],
+  maxOperations = MAX_BULK_OPERATIONS,
+  maxBytes = MAX_BULK_BYTES,
+): BufferedEngineBulkAction[][] => {
+  const groups: BufferedEngineBulkAction[][] = [];
+  let group: BufferedEngineBulkAction[] = [];
+  let groupBytes = 0;
+  actions.forEach((action) => {
+    const actionBytes = getBufferedEngineBulkActionByteLength(action);
+    const exceedsOperationLimit = group.length >= maxOperations;
+    const exceedsByteLimit = group.length > 0 && groupBytes + actionBytes > maxBytes;
+    if (group.length > 0 && (exceedsOperationLimit || exceedsByteLimit)) {
+      groups.push(group);
+      group = [];
+      groupBytes = 0;
+    }
+    group.push(action);
+    groupBytes += actionBytes;
+  });
+  if (group.length > 0) {
+    groups.push(group);
+  }
+  return groups;
+};
+
 const parseBufferedEngineBulkAction = (action: BufferedEngineBulkAction): BufferedEngineBulkActionDescriptor | undefined => {
   const operation = action.body[0];
   if (!operation || typeof operation !== 'object') {
@@ -5976,7 +6007,7 @@ export const coalesceBufferedEngineBulkActions = (actions: BufferedEngineBulkAct
 const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]) => {
   let segment: BufferedEngineBulkAction[] = [];
   const flushSegment = async () => {
-    const groupsOfActions = R.splitEvery(MAX_BULK_OPERATIONS, segment);
+    const groupsOfActions = splitBufferedEngineBulkActions(segment);
     for (let index = 0; index < groupsOfActions.length; index += 1) {
       const actionsBulk = groupsOfActions[index];
       const body = actionsBulk.flatMap((action) => action.body);

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, coalesceBufferedEngineBulkActions, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing } from '../../../src/database/engine';
+import { buildLocalMustFilter, coalesceBufferedEngineBulkActions, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 
 describe('prepareElementForIndexing testing', () => {
@@ -276,6 +276,51 @@ describe('coalesceBufferedEngineBulkActions testing', () => {
     ];
 
     expect(coalesceBufferedEngineBulkActions(actions)).toEqual(actions);
+  });
+});
+
+describe('splitBufferedEngineBulkActions testing', () => {
+  const context = {};
+  const buildAction = (id, value) => ({
+    context,
+    refresh: false,
+    body: [
+      { index: { _index: 'test_index', _id: id } },
+      { internal_id: id, value },
+    ],
+  });
+  const actionByteLength = (action) => action.body.reduce((total, line) => total + Buffer.byteLength(JSON.stringify(line)) + 1, 0);
+
+  it('splits complete actions at the configured operation limit', () => {
+    const actions = [
+      buildAction('entity--1', 'first'),
+      buildAction('entity--2', 'second'),
+      buildAction('entity--3', 'third'),
+    ];
+
+    expect(splitBufferedEngineBulkActions(actions, 2, Number.MAX_SAFE_INTEGER)).toEqual([
+      [actions[0], actions[1]],
+      [actions[2]],
+    ]);
+  });
+
+  it('flushes before the next action would exceed the NDJSON byte budget', () => {
+    const actions = [
+      buildAction('entity--1', 'first'),
+      buildAction('entity--2', 'second'),
+    ];
+    const maxBytes = actionByteLength(actions[0]) + actionByteLength(actions[1]) - 1;
+
+    expect(splitBufferedEngineBulkActions(actions, 5000, maxBytes)).toEqual([
+      [actions[0]],
+      [actions[1]],
+    ]);
+  });
+
+  it('keeps a single oversized action intact', () => {
+    const action = buildAction('entity--1', 'oversized');
+
+    expect(splitBufferedEngineBulkActions([action], 5000, actionByteLength(action) - 1)).toEqual([[action]]);
   });
 });
 

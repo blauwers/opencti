@@ -394,6 +394,7 @@
     "max_pagination_result": 5000,
     "default_pagination_result": 500,
     "max_bulk_operations": 5000,
+    "max_bulk_bytes": 20971520,
     "max_runtime_resolutions": 5000,
     "max_concurrency": 4
   },
