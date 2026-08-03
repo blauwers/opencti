@@ -310,18 +310,49 @@ type BufferedEngineBulkMetric = {
   indexingType: string | undefined;
 };
 
+type BufferedIndexedRelationImpactTarget = {
+  relation: string;
+  field: string;
+  elements: { id: string; side: string; type: string; pir_score?: number }[];
+};
+
+type BufferedIndexedRelationImpactMutation = {
+  kind: 'indexed-relation-impact';
+  targetsElements: BufferedIndexedRelationImpactTarget[];
+  updatedAt: string;
+};
+
+type BufferedEngineFinalStateMutation = BufferedIndexedRelationImpactMutation;
+
 type BufferedEngineBulkAction = {
   context: AuthContext;
   refresh: boolean;
   body: any[];
   metric?: BufferedEngineBulkMetric;
   applyToDocument?: (existing: Record<string, any>) => Record<string, any>;
+  finalStateMutation?: BufferedEngineFinalStateMutation;
 };
 
 type BufferedEngineBulkActionDescriptor = {
   documentId: string;
   index: string;
   kind: 'delete' | 'index' | 'update';
+};
+
+type BufferedEngineBulkActionEntry = {
+  action: BufferedEngineBulkAction;
+  descriptor: BufferedEngineBulkActionDescriptor;
+  sequence: number;
+};
+
+type BufferedEngineBulkActionGroup = {
+  entries: BufferedEngineBulkActionEntry[];
+  key: string;
+};
+
+type BufferedEngineOriginalDocuments = {
+  documents: Map<string, Record<string, any>>;
+  loadedKeys: Set<string>;
 };
 
 type ComposableBufferedUpdateScript = {
@@ -789,6 +820,19 @@ export const elRawBulk = async (context: AuthContext, args: any) => {
     );
   };
   return retryElOperations(bulkOperation);
+};
+const elRawRefresh = async (context: AuthContext, indices: string[]) => {
+  if (indices.length === 0) {
+    return;
+  }
+  const refreshOperation = async () => {
+    return await elExecuteWithAbortSignal(
+      context?.requestAbortSignal,
+      (opts) => (engine as ElkClient).indices.refresh({ index: indices }, opts),
+      () => (engine as OpenClient).indices.refresh({ index: indices }),
+    );
+  };
+  await retryElOperations(refreshOperation);
 };
 export const elRawUpdateByQuery = async (query: any) => {
   const rawUpdateOperation = async () => {
@@ -5957,54 +6001,354 @@ const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkActio
   }
 };
 
-const applyIndexedRelationImpacts = (
+const executeBufferedEngineCommitActions = async (actions: BufferedEngineBulkAction[]) => {
+  if (actions.length === 0) {
+    return;
+  }
+  const batchActions = actions.map((action) => ({ ...action, refresh: false }));
+  await executeBufferedEngineBulkActions(batchActions);
+  const affectedIndices = R.uniq(batchActions.flatMap((action) => {
+    const descriptor = parseBufferedEngineBulkAction(action);
+    return descriptor ? [descriptor.index] : [];
+  }));
+  await elRawRefresh(batchActions[0].context, affectedIndices);
+};
+
+const applyIndexedRelationImpactMutations = (
   existing: Record<string, any>,
-  targetsElements: { relation: string; field: string; elements: { id: string; side: string; type: string; pir_score?: number }[] }[],
-  updatedAt: string,
+  mutations: BufferedIndexedRelationImpactMutation[],
 ): Record<string, any> => {
   const updated = { ...existing };
-  targetsElements.forEach((targetElement) => {
-    const field = buildRefRelationKey(targetElement.relation, targetElement.field);
-    const targetIds = targetElement.elements.map((element) => element.id);
-    const currentValues = Array.isArray(updated[field]) ? [...updated[field]] : [];
-    if (isStixRefUnidirectionalRelationship(targetElement.relation)) {
-      targetIds.forEach((targetId) => {
-        if (!currentValues.includes(targetId)) {
-          currentValues.push(targetId);
+  const fieldValues = new Map<string, { values: string[]; seen?: Set<string> }>();
+  let pirInformation = Array.isArray(updated.pir_information) ? [...updated.pir_information] : [];
+  let pirInformationUpdated = false;
+  let updatedAt: string | undefined;
+  let modified: string | undefined;
+  let refreshedAt: string | undefined;
+  mutations.forEach((mutation) => {
+    mutation.targetsElements.forEach((targetElement) => {
+      const field = buildRefRelationKey(targetElement.relation, targetElement.field);
+      let fieldState = fieldValues.get(field);
+      if (!fieldState) {
+        const values = Array.isArray(updated[field]) ? [...updated[field]] : [];
+        fieldState = {
+          values,
+          ...(isStixRefUnidirectionalRelationship(targetElement.relation) ? { seen: new Set(values) } : {}),
+        };
+        fieldValues.set(field, fieldState);
+      }
+      const targetIds = targetElement.elements.map((element) => element.id);
+      if (fieldState.seen) {
+        targetIds.forEach((targetId) => {
+          if (!fieldState?.seen?.has(targetId)) {
+            fieldState?.values.push(targetId);
+            fieldState?.seen?.add(targetId);
+          }
+        });
+      } else {
+        fieldState.values.push(...targetIds);
+      }
+      const fromSide = targetElement.elements.find((element) => element.side === 'from');
+      const toSide = targetElement.elements.find((element) => element.side === 'to');
+      if (fromSide && isStixRefRelationship(targetElement.relation)) {
+        if (isUpdatedAtObject(fromSide.type)) {
+          updatedAt = mutation.updatedAt;
         }
-      });
-    } else {
-      currentValues.push(...targetIds);
-    }
-    updated[field] = currentValues;
-    const fromSide = targetElement.elements.find((element) => element.side === 'from');
-    const toSide = targetElement.elements.find((element) => element.side === 'to');
-    if (fromSide && isStixRefRelationship(targetElement.relation)) {
-      if (isUpdatedAtObject(fromSide.type)) {
-        updated.updated_at = updatedAt;
+        if (isModifiedObject(fromSide.type)) {
+          modified = mutation.updatedAt;
+        }
       }
-      if (isModifiedObject(fromSide.type)) {
-        updated.modified = updatedAt;
+      if ((fromSide && isUpdatedAtObject(fromSide.type)) || (toSide && isUpdatedAtObject(toSide.type))) {
+        refreshedAt = mutation.updatedAt;
       }
-    }
-    if ((fromSide && isUpdatedAtObject(fromSide.type)) || (toSide && isUpdatedAtObject(toSide.type))) {
-      updated.refreshed_at = updatedAt;
-    }
-    if (targetElement.relation === RELATION_IN_PIR) {
-      const pirIds = targetElement.elements.map((element) => element.id);
-      const newPirInformation = targetElement.elements.map((element) => ({
-        pir_id: element.id,
-        pir_score: element.pir_score,
-        last_pir_score_date: updatedAt,
-      }));
-      const currentPirInformation = Array.isArray(updated.pir_information) ? updated.pir_information : [];
-      updated.pir_information = [
-        ...currentPirInformation.filter((item: any) => !pirIds.includes(item.pir_id)),
-        ...newPirInformation,
-      ];
-    }
+      if (targetElement.relation === RELATION_IN_PIR) {
+        const pirIds = targetElement.elements.map((element) => element.id);
+        pirInformation = [
+          ...pirInformation.filter((item: any) => !pirIds.includes(item.pir_id)),
+          ...targetElement.elements.map((element) => ({
+            pir_id: element.id,
+            pir_score: element.pir_score,
+            last_pir_score_date: mutation.updatedAt,
+          })),
+        ];
+        pirInformationUpdated = true;
+      }
+    });
   });
+  fieldValues.forEach(({ values }, field) => {
+    updated[field] = values;
+  });
+  if (updatedAt) {
+    updated.updated_at = updatedAt;
+  }
+  if (modified) {
+    updated.modified = modified;
+  }
+  if (refreshedAt) {
+    updated.refreshed_at = refreshedAt;
+  }
+  if (pirInformationUpdated) {
+    updated.pir_information = pirInformation;
+  }
   return updated;
+};
+
+const applyIndexedRelationImpacts = (
+  existing: Record<string, any>,
+  targetsElements: BufferedIndexedRelationImpactTarget[],
+  updatedAt: string,
+): Record<string, any> => {
+  return applyIndexedRelationImpactMutations(existing, [{
+    kind: 'indexed-relation-impact',
+    targetsElements,
+    updatedAt,
+  }]);
+};
+
+const cloneBufferedEngineDocument = (document: Record<string, any>): Record<string, any> => {
+  return structuredClone(document);
+};
+
+const getBufferedEngineIndexSource = (action: BufferedEngineBulkAction): Record<string, any> | undefined => {
+  const source = action.body[1];
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return undefined;
+  }
+  return source;
+};
+
+const buildBufferedEngineBulkActionGroups = (actions: BufferedEngineBulkAction[]): {
+  groups: BufferedEngineBulkActionGroup[];
+  standaloneEntries: { action: BufferedEngineBulkAction; sequence: number }[];
+} => {
+  const groupsByKey = new Map<string, BufferedEngineBulkActionGroup>();
+  const standaloneEntries: { action: BufferedEngineBulkAction; sequence: number }[] = [];
+  actions.forEach((action, sequence) => {
+    const descriptor = parseBufferedEngineBulkAction(action);
+    if (!descriptor) {
+      standaloneEntries.push({ action, sequence });
+      return;
+    }
+    const key = buildBufferedEngineBulkActionKey(descriptor);
+    const group = groupsByKey.get(key) ?? { entries: [], key };
+    group.entries.push({ action, descriptor, sequence });
+    groupsByKey.set(key, group);
+  });
+  return { groups: Array.from(groupsByKey.values()), standaloneEntries };
+};
+
+const canMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkActionGroup): boolean => {
+  let documentState: 'missing' | 'present' | 'unknown' = 'unknown';
+  for (let index = 0; index < group.entries.length; index += 1) {
+    const entry = group.entries[index];
+    if (entry.descriptor.kind === 'index') {
+      if (!getBufferedEngineIndexSource(entry.action)) {
+        return false;
+      }
+      documentState = 'present';
+      continue;
+    }
+    if (entry.descriptor.kind === 'delete') {
+      documentState = 'missing';
+      continue;
+    }
+    if (!entry.action.applyToDocument || documentState === 'missing') {
+      return false;
+    }
+    documentState = 'present';
+  }
+  return true;
+};
+
+const shouldMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkActionGroup): boolean => {
+  return group.entries.length > 1;
+};
+
+const requiresBufferedEngineOriginalDocument = (group: BufferedEngineBulkActionGroup): boolean => {
+  return group.entries[0].descriptor.kind !== 'index'
+    || group.entries.some((entry) => entry.descriptor.kind === 'delete');
+};
+
+const getBufferedEngineGroupMetric = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkMetric | undefined => {
+  return group.entries.find((entry) => entry.action.metric?.kind === 'direct')?.action.metric
+    ?? group.entries.find((entry) => entry.action.metric !== undefined)?.action.metric;
+};
+
+const getBufferedEngineGroupRefresh = (group: BufferedEngineBulkActionGroup): boolean => {
+  return group.entries.some((entry) => entry.action.refresh);
+};
+
+const getBufferedEngineGroupFinalEntry = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkActionEntry => {
+  return group.entries[group.entries.length - 1];
+};
+
+const buildBufferedEngineFinalIndexAction = (
+  group: BufferedEngineBulkActionGroup,
+  document: Record<string, any>,
+): BufferedEngineBulkAction => {
+  const finalEntry = getBufferedEngineGroupFinalEntry(group);
+  const metadata = finalEntry.action.body[0][finalEntry.descriptor.kind];
+  return {
+    context: finalEntry.action.context,
+    refresh: getBufferedEngineGroupRefresh(group),
+    metric: getBufferedEngineGroupMetric(group),
+    body: [
+      {
+        index: {
+          ...metadata,
+          _index: finalEntry.descriptor.index,
+          _id: finalEntry.descriptor.documentId,
+        },
+      },
+      R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
+    ],
+  };
+};
+
+const buildBufferedEngineFinalDeleteAction = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkAction => {
+  const finalEntry = getBufferedEngineGroupFinalEntry(group);
+  const metadata = finalEntry.action.body[0][finalEntry.descriptor.kind];
+  return {
+    context: finalEntry.action.context,
+    refresh: getBufferedEngineGroupRefresh(group),
+    metric: getBufferedEngineGroupMetric(group),
+    body: [
+      {
+        delete: {
+          ...metadata,
+          _index: finalEntry.descriptor.index,
+          _id: finalEntry.descriptor.documentId,
+        },
+      },
+    ],
+  };
+};
+
+const materializeBufferedEngineBulkActionGroup = (
+  group: BufferedEngineBulkActionGroup,
+  originalDocuments: BufferedEngineOriginalDocuments,
+): BufferedEngineBulkAction[] | undefined => {
+  if (!shouldMaterializeBufferedEngineBulkActionGroup(group) || !canMaterializeBufferedEngineBulkActionGroup(group)) {
+    return undefined;
+  }
+  const originalDocumentLoaded = originalDocuments.loadedKeys.has(group.key);
+  const originalDocument = originalDocuments.documents.get(group.key);
+  let document = originalDocument ? cloneBufferedEngineDocument(originalDocument) : undefined;
+  let documentExists = originalDocument !== undefined;
+  let documentStateKnown = originalDocumentLoaded;
+  let pendingRelationImpacts: BufferedIndexedRelationImpactMutation[] = [];
+  const flushPendingRelationImpacts = () => {
+    if (pendingRelationImpacts.length > 0 && document) {
+      document = applyIndexedRelationImpactMutations(document, pendingRelationImpacts);
+      pendingRelationImpacts = [];
+    }
+  };
+  for (let index = 0; index < group.entries.length; index += 1) {
+    const entry = group.entries[index];
+    if (entry.descriptor.kind === 'index') {
+      flushPendingRelationImpacts();
+      const source = getBufferedEngineIndexSource(entry.action);
+      if (!source) {
+        return undefined;
+      }
+      document = cloneBufferedEngineDocument(source);
+      documentExists = true;
+      documentStateKnown = true;
+      continue;
+    }
+    if (entry.descriptor.kind === 'delete') {
+      flushPendingRelationImpacts();
+      document = undefined;
+      documentExists = false;
+      documentStateKnown = true;
+      continue;
+    }
+    if (!documentStateKnown || !documentExists || !document || !entry.action.applyToDocument) {
+      return undefined;
+    }
+    if (entry.action.finalStateMutation?.kind === 'indexed-relation-impact') {
+      pendingRelationImpacts.push(entry.action.finalStateMutation);
+      continue;
+    }
+    flushPendingRelationImpacts();
+    document = entry.action.applyToDocument(document);
+  }
+  flushPendingRelationImpacts();
+  if (documentExists && document) {
+    return [buildBufferedEngineFinalIndexAction(group, document)];
+  }
+  if (!documentStateKnown) {
+    return undefined;
+  }
+  if (originalDocument) {
+    return [buildBufferedEngineFinalDeleteAction(group)];
+  }
+  return [];
+};
+
+export const materializeBufferedEngineBulkActions = (
+  actions: BufferedEngineBulkAction[],
+  originalDocuments: BufferedEngineOriginalDocuments = { documents: new Map(), loadedKeys: new Set() },
+): BufferedEngineBulkAction[] => {
+  const { groups, standaloneEntries } = buildBufferedEngineBulkActionGroups(actions);
+  const sequencedActions: { action: BufferedEngineBulkAction; sequence: number }[] = [...standaloneEntries];
+  groups.forEach((group) => {
+    const materialized = materializeBufferedEngineBulkActionGroup(group, originalDocuments);
+    if (!materialized) {
+      sequencedActions.push(...group.entries.map((entry) => ({ action: entry.action, sequence: entry.sequence })));
+      return;
+    }
+    const sequence = getBufferedEngineGroupFinalEntry(group).sequence;
+    sequencedActions.push(...materialized.map((action) => ({ action, sequence })));
+  });
+  return sequencedActions
+    .sort((left, right) => left.sequence - right.sequence)
+    .map(({ action }) => action);
+};
+
+const loadBufferedEngineOriginalDocuments = async (groups: BufferedEngineBulkActionGroup[]): Promise<BufferedEngineOriginalDocuments> => {
+  const documents = new Map<string, Record<string, any>>();
+  const loadedKeys = new Set<string>();
+  const idsByIndex = new Map<string, { context: AuthContext; ids: Set<string> }>();
+  groups
+    .filter((group) => shouldMaterializeBufferedEngineBulkActionGroup(group)
+      && canMaterializeBufferedEngineBulkActionGroup(group)
+      && requiresBufferedEngineOriginalDocument(group))
+    .forEach((group) => {
+      const descriptor = group.entries[0].descriptor;
+      const idsForIndex = idsByIndex.get(descriptor.index) ?? { context: group.entries[0].action.context, ids: new Set<string>() };
+      idsForIndex.ids.add(descriptor.documentId);
+      idsByIndex.set(descriptor.index, idsForIndex);
+    });
+  for (const [index, { context, ids }] of idsByIndex.entries()) {
+    const idGroups = R.splitEvery(MAX_BULK_OPERATIONS, Array.from(ids));
+    for (let groupIndex = 0; groupIndex < idGroups.length; groupIndex += 1) {
+      const idsBulk = idGroups[groupIndex];
+      idsBulk.forEach((id) => loadedKeys.add(`${index}:${id}`));
+      const data = await elRawSearch(context, SYSTEM_USER, 'batch final state', {
+        index,
+        size: idsBulk.length,
+        track_total_hits: false,
+        body: {
+          query: {
+            ids: {
+              values: idsBulk,
+            },
+          },
+        },
+      });
+      (data.hits.hits ?? []).forEach((hit: any) => {
+        documents.set(`${index}:${hit._id}`, hit._source);
+      });
+    }
+  }
+  return { documents, loadedKeys };
+};
+
+const finalizeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]): Promise<BufferedEngineBulkAction[]> => {
+  const { groups } = buildBufferedEngineBulkActionGroups(actions);
+  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups);
+  return materializeBufferedEngineBulkActions(actions, originalDocuments);
 };
 
 const buildIndexBulkActions = async (
@@ -6129,6 +6473,11 @@ const buildIndexBulkActions = async (
       ...entity,
       id: entityId,
       data: { script: { source, params } },
+      finalStateMutation: {
+        kind: 'indexed-relation-impact' as const,
+        targetsElements,
+        updatedAt: params.updated_at,
+      },
       applyToDocument: (existing: Record<string, any>) => applyIndexedRelationImpacts(existing, targetsElements, params.updated_at),
     };
   });
@@ -6138,6 +6487,7 @@ const buildIndexBulkActions = async (
     refresh: true,
     metric: { kind: 'side' as const, indexingType },
     applyToDocument: doc.applyToDocument,
+    finalStateMutation: doc.finalStateMutation,
     body: [
       { update: { _index: doc._index, _id: doc._id ?? doc.id, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
       R.dissoc('_index', doc.data),
@@ -6243,7 +6593,8 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
       segment.push(write);
     }
   }
-  await executeBufferedEngineBulkActions(coalesceBufferedEngineBulkActions(actions));
+  const finalizedActions = await finalizeBufferedEngineBulkActions(actions);
+  await executeBufferedEngineCommitActions(coalesceBufferedEngineBulkActions(finalizedActions));
 };
 
 export const elIndexElements = async (

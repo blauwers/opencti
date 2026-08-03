@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, coalesceBufferedEngineBulkActions, extractBulkOperationErrors, isTransitoryError, prepareElementForIndexing } from '../../../src/database/engine';
+import { buildLocalMustFilter, coalesceBufferedEngineBulkActions, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 
 describe('prepareElementForIndexing testing', () => {
@@ -276,6 +276,140 @@ describe('coalesceBufferedEngineBulkActions testing', () => {
     ];
 
     expect(coalesceBufferedEngineBulkActions(actions)).toEqual(actions);
+  });
+});
+
+describe('materializeBufferedEngineBulkActions testing', () => {
+  it('keeps a single update action intact so Elasticsearch can still detect no-ops', () => {
+    const action = {
+      context: {},
+      refresh: true,
+      applyToDocument: (existing) => ({ ...existing, description: 'same' }),
+      body: [
+        { update: { _index: 'test_index', _id: 'entity--1' } },
+        { doc: { description: 'same' } },
+      ],
+    };
+
+    expect(materializeBufferedEngineBulkActions([action], {
+      documents: new Map([['test_index:entity--1', { internal_id: 'entity--1', description: 'same' }]]),
+      loadedKeys: new Set(['test_index:entity--1']),
+    })).toEqual([action]);
+  });
+
+  it('folds update-only document mutations from different contexts into one final index action', () => {
+    const actions = [
+      {
+        context: { requestId: 'first' },
+        refresh: true,
+        applyToDocument: (existing) => ({ ...existing, description: 'first' }),
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { description: 'first' } },
+        ],
+      },
+      {
+        context: { requestId: 'second' },
+        refresh: true,
+        applyToDocument: (existing) => ({ ...existing, confidence: 88 }),
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1' } },
+          { doc: { confidence: 88 } },
+        ],
+      },
+    ];
+
+    const materialized = materializeBufferedEngineBulkActions(actions, {
+      documents: new Map([['test_index:entity--1', { internal_id: 'entity--1', name: 'existing' }]]),
+      loadedKeys: new Set(['test_index:entity--1']),
+    });
+
+    expect(materialized).toHaveLength(1);
+    expect(materialized[0].body).toEqual([
+      { index: { _index: 'test_index', _id: 'entity--1' } },
+      { internal_id: 'entity--1', name: 'existing', description: 'first', confidence: 88 },
+    ]);
+  });
+
+  it('aggregates indexed relationship impacts before applying the final document state', () => {
+    const actions = [
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: () => {
+          throw new Error('relation impacts should be aggregated');
+        },
+        finalStateMutation: {
+          kind: 'indexed-relation-impact',
+          targetsElements: [{
+            relation: 'related-to',
+            field: 'internal_id',
+            elements: [{ id: 'indicator--1', side: 'from', type: 'Indicator' }],
+          }],
+          updatedAt: '2026-08-03T00:00:00.000Z',
+        },
+        body: [
+          { update: { _index: 'test_index', _id: 'report--1' } },
+          { script: { source: 'first' } },
+        ],
+      },
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: () => {
+          throw new Error('relation impacts should be aggregated');
+        },
+        finalStateMutation: {
+          kind: 'indexed-relation-impact',
+          targetsElements: [{
+            relation: 'related-to',
+            field: 'internal_id',
+            elements: [{ id: 'indicator--2', side: 'from', type: 'Indicator' }],
+          }],
+          updatedAt: '2026-08-03T00:00:01.000Z',
+        },
+        body: [
+          { update: { _index: 'test_index', _id: 'report--1' } },
+          { script: { source: 'second' } },
+        ],
+      },
+    ];
+
+    const materialized = materializeBufferedEngineBulkActions(actions, {
+      documents: new Map([['test_index:report--1', {
+        internal_id: 'report--1',
+        'rel_related-to.internal_id': ['indicator--0'],
+      }]]),
+      loadedKeys: new Set(['test_index:report--1']),
+    });
+
+    expect(materialized).toHaveLength(1);
+    expect(materialized[0].body[1]['rel_related-to.internal_id']).toEqual(['indicator--0', 'indicator--1', 'indicator--2']);
+  });
+
+  it('drops a create followed by a delete when the document did not exist before the batch', () => {
+    const actions = [
+      {
+        context: {},
+        refresh: true,
+        body: [
+          { index: { _index: 'test_index', _id: 'entity--1' } },
+          { internal_id: 'entity--1', name: 'created' },
+        ],
+      },
+      {
+        context: {},
+        refresh: true,
+        body: [
+          { delete: { _index: 'test_index', _id: 'entity--1' } },
+        ],
+      },
+    ];
+
+    expect(materializeBufferedEngineBulkActions(actions, {
+      documents: new Map(),
+      loadedKeys: new Set(['test_index:entity--1']),
+    })).toEqual([]);
   });
 });
 

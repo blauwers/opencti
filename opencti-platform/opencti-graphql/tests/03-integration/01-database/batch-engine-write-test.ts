@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
-import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elFindByIds, elIndex, elLoadById, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
+import { copyLiveElementToDraft, elDeleteElements, elDeleteInstances, elFindByIds, elIndex, elLoadById, elRawSearch, elRemoveDraftIdFromElements, elReplace, elUpdate, elUpdateElement, elUpdateEntityConnections, elUpdateRelationConnections } from '../../../src/database/engine';
 import { deleteElementById, mergeEntities, storeLoadByIdWithRefs } from '../../../src/database/middleware';
 import { fullEntitiesList, fullRelationsList, internalLoadById } from '../../../src/database/middleware-loader';
 import { elIndexFiles } from '../../../src/database/file-search';
@@ -109,6 +109,22 @@ describe('batch engine writes', () => {
     connector_name: 'Batch work connector',
     name: 'Batch work connector',
   });
+
+  const loadDocumentVersion = async (entity: any) => {
+    const data = await elRawSearch(testContext, ADMIN_USER, entity.entity_type, {
+      index: entity._index,
+      size: 1,
+      version: true,
+      body: {
+        query: {
+          ids: {
+            values: [entity._id ?? entity.internal_id],
+          },
+        },
+      },
+    });
+    return data.hits.hits[0]?._version;
+  };
 
   afterAll(async () => {
     if (malware) {
@@ -840,6 +856,32 @@ describe('batch engine writes', () => {
     expect(committedRelation.toId).toBe(target.internal_id);
     expect(committedSource[relationKey]).toContain(target.internal_id);
     expect(committedTarget[relationKey]).toContain(source.internal_id);
+  });
+
+  it('writes a shared relation endpoint once across separate buffered contexts', async () => {
+    const source = await addMalware(testContext, ADMIN_USER, { name: `Batch shared endpoint ${uuidv4()}` });
+    const targets = await Promise.all(Array.from({ length: 4 }, () => addMalware(testContext, ADMIN_USER, { name: `Batch shared target ${uuidv4()}` })));
+    cleanupMalwares.push(source, ...targets);
+    const versionBefore = await loadDocumentVersion(source);
+
+    await executeBatchMutations(targets.map((target, index) => ({
+      kind: BatchMutationKind.CreateRelation,
+      executeWrite: async () => {
+        const relationContext = executionContext(`batch-shared-endpoint-${index}`, ADMIN_USER);
+        await addStixCoreRelationship(relationContext, ADMIN_USER, {
+          relationship_type: RELATION_RELATED_TO,
+          fromId: source.id,
+          toId: target.id,
+        });
+        return null;
+      },
+    })));
+
+    const versionAfter = await loadDocumentVersion(source);
+    const committedSource = await internalLoadById(testContext, ADMIN_USER, source.internal_id) as any;
+    const relationKey = buildRefRelationKey(RELATION_RELATED_TO);
+    expect(versionAfter).toBe(versionBefore + 1);
+    expect(committedSource[relationKey]).toEqual(expect.arrayContaining(targets.map((target) => target.internal_id)));
   });
 
   it('loads hydrated entities created earlier in the same batch through the request batch loader', async () => {
