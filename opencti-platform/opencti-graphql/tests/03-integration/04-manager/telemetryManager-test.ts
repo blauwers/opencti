@@ -18,8 +18,9 @@ import {
   TELEMETRY_GAUGE_EXPORT_GENERATED,
   TELEMETRY_GAUGE_NLQ,
   TELEMETRY_GAUGE_NOTIFICATION_SENT,
+  TELEMETRY_GAUGE_SAVED_FILTER_PERMISSION_CHANGES,
 } from '../../../src/manager/telemetryManager';
-import { redisClearTelemetry, redisGetTelemetry, redisSetTelemetryAdd } from '../../../src/database/redis';
+import { redisClearTelemetry, redisClearTelemetryGauge, redisGetTelemetry, redisSetTelemetryAdd } from '../../../src/database/redis';
 import { waitInSec } from '../../../src/database/utils';
 import {
   changeTone,
@@ -64,6 +65,7 @@ describe('Telemetry manager test coverage', () => {
 
     beforeAll(async () => {
       // create shared saved filters
+      await redisClearTelemetryGauge(TELEMETRY_GAUGE_SAVED_FILTER_PERMISSION_CHANGES);
 
       const savedFilter = JSON.stringify({
         mode: 'and',

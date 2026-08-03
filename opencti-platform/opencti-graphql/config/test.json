@@ -103,6 +103,9 @@
   "retention_manager": {
     "enabled": true
   },
+  "telemetry_manager": {
+    "interval": 86400000
+  },
   "indicator_decay_manager": {
     "enabled": true,
     "interval": 6000000
