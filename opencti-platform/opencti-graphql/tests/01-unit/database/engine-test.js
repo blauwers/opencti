@@ -179,6 +179,19 @@ describe('classifyBufferedEngineBulkResponseItems testing', () => {
     expect(() => classifyBufferedEngineBulkResponseItems(actions, [{ index: { status: 201 } }]))
       .toThrow(/Bulk indexing response does not match submitted actions/);
   });
+
+  it('classifies optimistic concurrency conflicts separately from transient retries', () => {
+    const classified = classifyBufferedEngineBulkResponseItems(actions, [
+      { index: { status: 409, error: { type: 'version_conflict_engine_exception' } } },
+      { update: { status: 201 } },
+      { delete: { status: 200 } },
+    ]);
+
+    expect(classified.permanentFailures).toEqual([]);
+    expect(classified.retryableFailures).toEqual([]);
+    expect(classified.versionConflicts).toHaveLength(1);
+    expect(classified.versionConflicts[0].action).toBe(actions[0]);
+  });
 });
 
 describe('executeBufferedEngineBulkActionGroup testing', () => {
@@ -255,6 +268,44 @@ describe('executeBufferedEngineBulkActionGroup testing', () => {
       },
     });
     expect(executeBulk).toHaveBeenCalledTimes(1);
+  });
+
+  it('replans only optimistic concurrency conflicts before retrying', async () => {
+    const replannedAction = {
+      ...actions[0],
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--1', if_seq_no: 11, if_primary_term: 4 } },
+        { internal_id: 'entity--1', name: 'replanned' },
+      ],
+    };
+    const executeBulk = vi.fn()
+      .mockResolvedValueOnce({
+        errors: true,
+        items: [
+          { index: { status: 409, error: { type: 'version_conflict_engine_exception' } } },
+          { index: { status: 201 } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        errors: false,
+        items: [{ index: { status: 200 } }],
+      });
+    const replanVersionConflicts = vi.fn().mockResolvedValue([replannedAction]);
+    const waitForRetry = vi.fn().mockResolvedValue(undefined);
+
+    await executeBufferedEngineBulkActionGroup(actions, {
+      executeBulk,
+      random: () => 0,
+      replanVersionConflicts,
+      waitForRetry,
+    });
+
+    expect(replanVersionConflicts).toHaveBeenCalledTimes(1);
+    expect(replanVersionConflicts.mock.calls[0][0]).toHaveLength(1);
+    expect(replanVersionConflicts.mock.calls[0][0][0].action).toBe(actions[0]);
+    expect(executeBulk).toHaveBeenCalledTimes(2);
+    expect(executeBulk.mock.calls[1][1].body).toEqual(replannedAction.body);
+    expect(waitForRetry).toHaveBeenCalledWith(250);
   });
 });
 
@@ -515,6 +566,7 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     expect(materializeBufferedEngineBulkActions([action], {
       documents: new Map([['test_index:entity--1', { internal_id: 'entity--1', description: 'same' }]]),
       loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map(),
     })).toEqual([action]);
   });
 
@@ -543,11 +595,12 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     const materialized = materializeBufferedEngineBulkActions(actions, {
       documents: new Map([['test_index:entity--1', { internal_id: 'entity--1', name: 'existing' }]]),
       loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map([['test_index:entity--1', { seqNo: 12, primaryTerm: 3 }]]),
     });
 
     expect(materialized).toHaveLength(1);
     expect(materialized[0].body).toEqual([
-      { index: { _index: 'test_index', _id: 'entity--1' } },
+      { index: { _index: 'test_index', _id: 'entity--1', if_seq_no: 12, if_primary_term: 3 } },
       { internal_id: 'entity--1', name: 'existing', description: 'first', confidence: 88 },
     ]);
   });
@@ -602,6 +655,7 @@ describe('materializeBufferedEngineBulkActions testing', () => {
         'rel_related-to.internal_id': ['indicator--0'],
       }]]),
       loadedKeys: new Set(['test_index:report--1']),
+      versions: new Map(),
     });
 
     expect(materialized).toHaveLength(1);
@@ -639,6 +693,7 @@ describe('materializeBufferedEngineBulkActions testing', () => {
         updated_at: '2026-08-02T00:00:00.000Z',
       }]]),
       loadedKeys: new Set(['test_index:indicator--1']),
+      versions: new Map(),
     })).toEqual([]);
   });
 
@@ -664,6 +719,7 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     expect(materializeBufferedEngineBulkActions(actions, {
       documents: new Map(),
       loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map(),
     })).toEqual([]);
   });
 });

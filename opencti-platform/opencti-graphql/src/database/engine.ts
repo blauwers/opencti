@@ -233,6 +233,7 @@ const ES_CARDINALITY_THRESHOLD = 40000;
 
 const TOO_MANY_CLAUSES = 'too_many_nested_clauses';
 const DOCUMENT_MISSING_EXCEPTION = 'document_missing_exception';
+const VERSION_CONFLICT_EXCEPTION = 'version_conflict_engine_exception';
 export const ES_RETRY_ON_CONFLICT = 30;
 export const BULK_TIMEOUT = '1h';
 const ES_MAX_MAPPINGS = 3000;
@@ -332,6 +333,7 @@ type BufferedEngineBulkAction = {
   metric?: BufferedEngineBulkMetric;
   applyToDocument?: (existing: Record<string, any>) => Record<string, any>;
   finalStateMutation?: BufferedEngineFinalStateMutation;
+  versionConflictGroup?: BufferedEngineBulkActionGroup;
 };
 
 type BufferedEngineBulkActionDescriptor = {
@@ -361,11 +363,18 @@ type BufferedEngineBulkItemFailure = {
 type BufferedEngineBulkResponseClassification = {
   permanentFailures: BufferedEngineBulkItemFailure[];
   retryableFailures: BufferedEngineBulkItemFailure[];
+  versionConflicts: BufferedEngineBulkItemFailure[];
+};
+
+type BufferedEngineOriginalDocumentVersion = {
+  primaryTerm: number;
+  seqNo: number;
 };
 
 type BufferedEngineOriginalDocuments = {
   documents: Map<string, Record<string, any>>;
   loadedKeys: Set<string>;
+  versions: Map<string, BufferedEngineOriginalDocumentVersion>;
 };
 
 type ComposableBufferedUpdateScript = {
@@ -5864,6 +5873,7 @@ export const classifyBufferedEngineBulkResponseItems = (
   const classification: BufferedEngineBulkResponseClassification = {
     permanentFailures: [],
     retryableFailures: [],
+    versionConflicts: [],
   };
   actions.forEach((action, index) => {
     const operation = getBufferedEngineBulkResponseOperation(items[index]);
@@ -5876,7 +5886,9 @@ export const classifyBufferedEngineBulkResponseItems = (
       error: getBufferedEngineBulkFailureError(operation),
       status: operation.status,
     };
-    if (isTransitoryError(failure.error)) {
+    if (operation.error.type === VERSION_CONFLICT_EXCEPTION) {
+      classification.versionConflicts.push(failure);
+    } else if (isTransitoryError(failure.error)) {
       classification.retryableFailures.push(failure);
     } else {
       classification.permanentFailures.push(failure);
@@ -5907,6 +5919,7 @@ const getBufferedEngineBulkRetryDelayMs = (attempt: number, random: () => number
 type ExecuteBufferedEngineBulkActionGroupOptions = {
   executeBulk?: (context: AuthContext, args: any) => Promise<any>;
   random?: () => number;
+  replanVersionConflicts?: (failures: BufferedEngineBulkItemFailure[]) => Promise<BufferedEngineBulkAction[]>;
   waitForRetry?: (delayMs: number) => Promise<any>;
 };
 
@@ -5952,6 +5965,7 @@ export const executeBufferedEngineBulkActionGroup = async (
 ) => {
   const executeBulk = options.executeBulk ?? elRawBulk;
   const random = options.random ?? Math.random;
+  const replanVersionConflicts = options.replanVersionConflicts ?? replanBufferedEngineVersionConflicts;
   const waitForRetry = options.waitForRetry ?? wait;
   let pendingActions = actions;
   for (let attempt = 0; pendingActions.length > 0; attempt += 1) {
@@ -5968,26 +5982,32 @@ export const executeBufferedEngineBulkActionGroup = async (
     if (!data.errors) {
       return;
     }
-    const { permanentFailures, retryableFailures } = classifyBufferedEngineBulkResponseItems(pendingActions, data.items);
+    const { permanentFailures, retryableFailures, versionConflicts } = classifyBufferedEngineBulkResponseItems(pendingActions, data.items);
     if (permanentFailures.length > 0) {
       throw DatabaseError('Bulk indexing fail', {
         errors: buildBufferedEngineBulkFailureDetails(permanentFailures, attempt + 1),
       });
     }
-    if (retryableFailures.length === 0) {
+    const replannedConflictActions = versionConflicts.length > 0
+      ? await replanVersionConflicts(versionConflicts)
+      : [];
+    if (retryableFailures.length === 0 && replannedConflictActions.length === 0) {
       return;
     }
     if (attempt >= BULK_MAX_RETRIES) {
       throw DatabaseError('Bulk indexing fail after retries', {
-        errors: buildBufferedEngineBulkFailureDetails(retryableFailures, attempt + 1),
+        errors: buildBufferedEngineBulkFailureDetails([...retryableFailures, ...versionConflicts], attempt + 1),
       });
     }
     const delayMs = getBufferedEngineBulkRetryDelayMs(attempt, random);
-    logApp.warn(`[SEARCH] Bulk item transitory error, retrying ${retryableFailures.length} item(s) in ${delayMs}ms (attempt ${attempt + 1}/${BULK_MAX_RETRIES})`, {
-      errors: buildBufferedEngineBulkFailureDetails(retryableFailures, attempt + 1),
+    logApp.warn(`[SEARCH] Bulk item retry, retrying ${retryableFailures.length + replannedConflictActions.length} item(s) in ${delayMs}ms (attempt ${attempt + 1}/${BULK_MAX_RETRIES})`, {
+      errors: buildBufferedEngineBulkFailureDetails([...retryableFailures, ...versionConflicts], attempt + 1),
     });
     await waitForRetry(delayMs);
-    pendingActions = retryableFailures.map((failure) => failure.action);
+    pendingActions = [
+      ...retryableFailures.map((failure) => failure.action),
+      ...replannedConflictActions,
+    ];
   }
 };
 
@@ -6401,20 +6421,38 @@ const isBufferedEngineRelationImpactNoop = (
   );
 };
 
+const buildBufferedEngineFinalWriteMetadata = (
+  metadata: Record<string, any>,
+  version: BufferedEngineOriginalDocumentVersion | undefined,
+): Record<string, any> => {
+  const { retry_on_conflict: _retryOnConflict, ...finalMetadata } = metadata;
+  if (!version) {
+    return finalMetadata;
+  }
+  return {
+    ...finalMetadata,
+    if_primary_term: version.primaryTerm,
+    if_seq_no: version.seqNo,
+  };
+};
+
 const buildBufferedEngineFinalIndexAction = (
   group: BufferedEngineBulkActionGroup,
   document: Record<string, any>,
+  originalDocuments: BufferedEngineOriginalDocuments,
 ): BufferedEngineBulkAction => {
   const finalEntry = getBufferedEngineGroupFinalEntry(group);
   const metadata = finalEntry.action.body[0][finalEntry.descriptor.kind];
+  const version = originalDocuments.versions.get(group.key);
   return {
     context: finalEntry.action.context,
     refresh: getBufferedEngineGroupRefresh(group),
     metric: getBufferedEngineGroupMetric(group),
+    ...(version ? { versionConflictGroup: group } : {}),
     body: [
       {
         index: {
-          ...metadata,
+          ...buildBufferedEngineFinalWriteMetadata(metadata, version),
           _index: finalEntry.descriptor.index,
           _id: finalEntry.descriptor.documentId,
         },
@@ -6424,17 +6462,22 @@ const buildBufferedEngineFinalIndexAction = (
   };
 };
 
-const buildBufferedEngineFinalDeleteAction = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkAction => {
+const buildBufferedEngineFinalDeleteAction = (
+  group: BufferedEngineBulkActionGroup,
+  originalDocuments: BufferedEngineOriginalDocuments,
+): BufferedEngineBulkAction => {
   const finalEntry = getBufferedEngineGroupFinalEntry(group);
   const metadata = finalEntry.action.body[0][finalEntry.descriptor.kind];
+  const version = originalDocuments.versions.get(group.key);
   return {
     context: finalEntry.action.context,
     refresh: getBufferedEngineGroupRefresh(group),
     metric: getBufferedEngineGroupMetric(group),
+    ...(version ? { versionConflictGroup: group } : {}),
     body: [
       {
         delete: {
-          ...metadata,
+          ...buildBufferedEngineFinalWriteMetadata(metadata, version),
           _index: finalEntry.descriptor.index,
           _id: finalEntry.descriptor.documentId,
         },
@@ -6497,20 +6540,20 @@ const materializeBufferedEngineBulkActionGroup = (
     if (isBufferedEngineRelationImpactNoop(group, originalDocument, document)) {
       return [];
     }
-    return [buildBufferedEngineFinalIndexAction(group, document)];
+    return [buildBufferedEngineFinalIndexAction(group, document, originalDocuments)];
   }
   if (!documentStateKnown) {
     return undefined;
   }
   if (originalDocument) {
-    return [buildBufferedEngineFinalDeleteAction(group)];
+    return [buildBufferedEngineFinalDeleteAction(group, originalDocuments)];
   }
   return [];
 };
 
 export const materializeBufferedEngineBulkActions = (
   actions: BufferedEngineBulkAction[],
-  originalDocuments: BufferedEngineOriginalDocuments = { documents: new Map(), loadedKeys: new Set() },
+  originalDocuments: BufferedEngineOriginalDocuments = { documents: new Map(), loadedKeys: new Set(), versions: new Map() },
 ): BufferedEngineBulkAction[] => {
   const { groups, standaloneEntries } = buildBufferedEngineBulkActionGroups(actions);
   const sequencedActions: { action: BufferedEngineBulkAction; sequence: number }[] = [...standaloneEntries];
@@ -6531,6 +6574,7 @@ export const materializeBufferedEngineBulkActions = (
 const loadBufferedEngineOriginalDocuments = async (groups: BufferedEngineBulkActionGroup[]): Promise<BufferedEngineOriginalDocuments> => {
   const documents = new Map<string, Record<string, any>>();
   const loadedKeys = new Set<string>();
+  const versions = new Map<string, BufferedEngineOriginalDocumentVersion>();
   const idsByIndex = new Map<string, { context: AuthContext; ids: Set<string> }>();
   groups
     .filter((group) => shouldMaterializeBufferedEngineBulkActionGroup(group)
@@ -6549,6 +6593,7 @@ const loadBufferedEngineOriginalDocuments = async (groups: BufferedEngineBulkAct
       idsBulk.forEach((id) => loadedKeys.add(`${index}:${id}`));
       const data = await elRawSearch(context, SYSTEM_USER, 'batch final state', {
         index,
+        seq_no_primary_term: true,
         size: idsBulk.length,
         track_total_hits: false,
         body: {
@@ -6560,11 +6605,40 @@ const loadBufferedEngineOriginalDocuments = async (groups: BufferedEngineBulkAct
         },
       });
       (data.hits.hits ?? []).forEach((hit: any) => {
-        documents.set(`${index}:${hit._id}`, hit._source);
+        const key = `${index}:${hit._id}`;
+        documents.set(key, hit._source);
+        if (typeof hit._seq_no === 'number' && typeof hit._primary_term === 'number') {
+          versions.set(key, {
+            primaryTerm: hit._primary_term,
+            seqNo: hit._seq_no,
+          });
+        }
       });
     }
   }
-  return { documents, loadedKeys };
+  return { documents, loadedKeys, versions };
+};
+
+const replanBufferedEngineVersionConflicts = async (
+  failures: BufferedEngineBulkItemFailure[],
+): Promise<BufferedEngineBulkAction[]> => {
+  const groups = failures.flatMap((failure) => (failure.action.versionConflictGroup ? [failure.action.versionConflictGroup] : []));
+  if (groups.length !== failures.length) {
+    throw DatabaseError('Bulk version conflict cannot be replanned', {
+      errors: buildBufferedEngineBulkFailureDetails(failures, 1),
+    });
+  }
+  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups);
+  return groups.flatMap((group) => {
+    const materialized = materializeBufferedEngineBulkActionGroup(group, originalDocuments);
+    if (!materialized) {
+      throw DatabaseError('Bulk version conflict replan failed', {
+        documentId: getBufferedEngineGroupFinalEntry(group).descriptor.documentId,
+        index: getBufferedEngineGroupFinalEntry(group).descriptor.index,
+      });
+    }
+    return materialized;
+  });
 };
 
 const finalizeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]): Promise<BufferedEngineBulkAction[]> => {
