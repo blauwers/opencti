@@ -339,7 +339,7 @@ type BufferedEngineBulkAction = {
 type BufferedEngineBulkActionDescriptor = {
   documentId: string;
   index: string;
-  kind: 'delete' | 'index' | 'update';
+  kind: 'create' | 'delete' | 'index' | 'update';
 };
 
 type BufferedEngineBulkActionEntry = {
@@ -5828,7 +5828,7 @@ const parseBufferedEngineBulkAction = (action: BufferedEngineBulkAction): Buffer
   if (!operation || typeof operation !== 'object') {
     return undefined;
   }
-  const kind = ['delete', 'index', 'update'].find((candidate) => operation[candidate] !== undefined) as BufferedEngineBulkActionDescriptor['kind'] | undefined;
+  const kind = ['create', 'delete', 'index', 'update'].find((candidate) => operation[candidate] !== undefined) as BufferedEngineBulkActionDescriptor['kind'] | undefined;
   if (!kind) {
     return undefined;
   }
@@ -5886,7 +5886,7 @@ export const classifyBufferedEngineBulkResponseItems = (
       error: getBufferedEngineBulkFailureError(operation),
       status: operation.status,
     };
-    if (operation.error.type === VERSION_CONFLICT_EXCEPTION) {
+    if (operation.error.type === VERSION_CONFLICT_EXCEPTION && action.versionConflictGroup) {
       classification.versionConflicts.push(failure);
     } else if (isTransitoryError(failure.error)) {
       classification.retryableFailures.push(failure);
@@ -6147,7 +6147,7 @@ export const coalesceBufferedEngineBulkActions = (actions: BufferedEngineBulkAct
       return;
     }
     const key = buildBufferedEngineBulkActionKey(descriptor);
-    if (descriptor.kind === 'index') {
+    if (descriptor.kind === 'index' || descriptor.kind === 'create') {
       pendingIndicesByDocument.set(key, coalescedActions.length);
       pendingUpdatesByDocument.delete(key);
       coalescedActions.push(action);
@@ -6352,7 +6352,7 @@ const canMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkAc
   let documentState: 'missing' | 'present' | 'unknown' = 'unknown';
   for (let index = 0; index < group.entries.length; index += 1) {
     const entry = group.entries[index];
-    if (entry.descriptor.kind === 'index') {
+    if (entry.descriptor.kind === 'index' || entry.descriptor.kind === 'create') {
       if (!getBufferedEngineIndexSource(entry.action)) {
         return false;
       }
@@ -6373,11 +6373,6 @@ const canMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkAc
 
 const shouldMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkActionGroup): boolean => {
   return group.entries.length > 1;
-};
-
-const requiresBufferedEngineOriginalDocument = (group: BufferedEngineBulkActionGroup): boolean => {
-  return group.entries[0].descriptor.kind !== 'index'
-    || group.entries.some((entry) => entry.descriptor.kind === 'delete');
 };
 
 const getBufferedEngineGroupMetric = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkMetric | undefined => {
@@ -6436,7 +6431,7 @@ const buildBufferedEngineFinalWriteMetadata = (
   };
 };
 
-const buildBufferedEngineFinalIndexAction = (
+const buildBufferedEngineFinalDocumentAction = (
   group: BufferedEngineBulkActionGroup,
   document: Record<string, any>,
   originalDocuments: BufferedEngineOriginalDocuments,
@@ -6444,14 +6439,17 @@ const buildBufferedEngineFinalIndexAction = (
   const finalEntry = getBufferedEngineGroupFinalEntry(group);
   const metadata = finalEntry.action.body[0][finalEntry.descriptor.kind];
   const version = originalDocuments.versions.get(group.key);
+  const actionKind = originalDocuments.loadedKeys.has(group.key) && !originalDocuments.documents.has(group.key)
+    ? 'create'
+    : 'index';
   return {
     context: finalEntry.action.context,
     refresh: getBufferedEngineGroupRefresh(group),
     metric: getBufferedEngineGroupMetric(group),
-    ...(version ? { versionConflictGroup: group } : {}),
+    ...(actionKind === 'index' && version ? { versionConflictGroup: group } : {}),
     body: [
       {
-        index: {
+        [actionKind]: {
           ...buildBufferedEngineFinalWriteMetadata(metadata, version),
           _index: finalEntry.descriptor.index,
           _id: finalEntry.descriptor.documentId,
@@ -6507,7 +6505,7 @@ const materializeBufferedEngineBulkActionGroup = (
   };
   for (let index = 0; index < group.entries.length; index += 1) {
     const entry = group.entries[index];
-    if (entry.descriptor.kind === 'index') {
+    if (entry.descriptor.kind === 'index' || entry.descriptor.kind === 'create') {
       flushPendingRelationImpacts();
       const source = getBufferedEngineIndexSource(entry.action);
       if (!source) {
@@ -6540,7 +6538,7 @@ const materializeBufferedEngineBulkActionGroup = (
     if (isBufferedEngineRelationImpactNoop(group, originalDocument, document)) {
       return [];
     }
-    return [buildBufferedEngineFinalIndexAction(group, document, originalDocuments)];
+    return [buildBufferedEngineFinalDocumentAction(group, document, originalDocuments)];
   }
   if (!documentStateKnown) {
     return undefined;
@@ -6578,8 +6576,7 @@ const loadBufferedEngineOriginalDocuments = async (groups: BufferedEngineBulkAct
   const idsByIndex = new Map<string, { context: AuthContext; ids: Set<string> }>();
   groups
     .filter((group) => shouldMaterializeBufferedEngineBulkActionGroup(group)
-      && canMaterializeBufferedEngineBulkActionGroup(group)
-      && requiresBufferedEngineOriginalDocument(group))
+      && canMaterializeBufferedEngineBulkActionGroup(group))
     .forEach((group) => {
       const descriptor = group.entries[0].descriptor;
       const idsForIndex = idsByIndex.get(descriptor.index) ?? { context: group.entries[0].action.context, ids: new Set<string>() };

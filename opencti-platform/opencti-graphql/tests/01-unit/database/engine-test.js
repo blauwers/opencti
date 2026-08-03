@@ -181,7 +181,12 @@ describe('classifyBufferedEngineBulkResponseItems testing', () => {
   });
 
   it('classifies optimistic concurrency conflicts separately from transient retries', () => {
-    const classified = classifyBufferedEngineBulkResponseItems(actions, [
+    const guardedActions = [
+      { ...actions[0], versionConflictGroup: { entries: [], key: 'test_index:entity--1' } },
+      actions[1],
+      actions[2],
+    ];
+    const classified = classifyBufferedEngineBulkResponseItems(guardedActions, [
       { index: { status: 409, error: { type: 'version_conflict_engine_exception' } } },
       { update: { status: 201 } },
       { delete: { status: 200 } },
@@ -190,7 +195,7 @@ describe('classifyBufferedEngineBulkResponseItems testing', () => {
     expect(classified.permanentFailures).toEqual([]);
     expect(classified.retryableFailures).toEqual([]);
     expect(classified.versionConflicts).toHaveLength(1);
-    expect(classified.versionConflicts[0].action).toBe(actions[0]);
+    expect(classified.versionConflicts[0].action).toBe(guardedActions[0]);
   });
 });
 
@@ -271,8 +276,12 @@ describe('executeBufferedEngineBulkActionGroup testing', () => {
   });
 
   it('replans only optimistic concurrency conflicts before retrying', async () => {
+    const guardedActions = [
+      { ...actions[0], versionConflictGroup: { entries: [], key: 'test_index:entity--1' } },
+      actions[1],
+    ];
     const replannedAction = {
-      ...actions[0],
+      ...guardedActions[0],
       body: [
         { index: { _index: 'test_index', _id: 'entity--1', if_seq_no: 11, if_primary_term: 4 } },
         { internal_id: 'entity--1', name: 'replanned' },
@@ -293,7 +302,7 @@ describe('executeBufferedEngineBulkActionGroup testing', () => {
     const replanVersionConflicts = vi.fn().mockResolvedValue([replannedAction]);
     const waitForRetry = vi.fn().mockResolvedValue(undefined);
 
-    await executeBufferedEngineBulkActionGroup(actions, {
+    await executeBufferedEngineBulkActionGroup(guardedActions, {
       executeBulk,
       random: () => 0,
       replanVersionConflicts,
@@ -302,7 +311,7 @@ describe('executeBufferedEngineBulkActionGroup testing', () => {
 
     expect(replanVersionConflicts).toHaveBeenCalledTimes(1);
     expect(replanVersionConflicts.mock.calls[0][0]).toHaveLength(1);
-    expect(replanVersionConflicts.mock.calls[0][0][0].action).toBe(actions[0]);
+    expect(replanVersionConflicts.mock.calls[0][0][0].action).toBe(guardedActions[0]);
     expect(executeBulk).toHaveBeenCalledTimes(2);
     expect(executeBulk.mock.calls[1][1].body).toEqual(replannedAction.body);
     expect(waitForRetry).toHaveBeenCalledWith(250);
@@ -602,6 +611,37 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     expect(materialized[0].body).toEqual([
       { index: { _index: 'test_index', _id: 'entity--1', if_seq_no: 12, if_primary_term: 3 } },
       { internal_id: 'entity--1', name: 'existing', description: 'first', confidence: 88 },
+    ]);
+  });
+
+  it('uses create when the final document state is confirmed new in the batch prefetch', () => {
+    const actions = [
+      {
+        context: {},
+        refresh: true,
+        body: [
+          { index: { _index: 'test_index', _id: 'entity--1', retry_on_conflict: 30 } },
+          { internal_id: 'entity--1', name: 'created' },
+        ],
+      },
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: (existing) => ({ ...existing, description: 'after-create' }),
+        body: [
+          { update: { _index: 'test_index', _id: 'entity--1', retry_on_conflict: 30 } },
+          { doc: { description: 'after-create' } },
+        ],
+      },
+    ];
+
+    expect(materializeBufferedEngineBulkActions(actions, {
+      documents: new Map(),
+      loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map(),
+    })[0].body).toEqual([
+      { create: { _index: 'test_index', _id: 'entity--1' } },
+      { internal_id: 'entity--1', name: 'created', description: 'after-create' },
     ]);
   });
 
