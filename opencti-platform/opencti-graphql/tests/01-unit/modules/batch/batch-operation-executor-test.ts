@@ -23,9 +23,14 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
       expensive: String!
     }
 
+    type RecordEditPayload {
+      apply(value: String!): String!
+    }
+
     type Mutation {
       record(value: String!): String!
       createRecord(value: String!): RecordPayload!
+      recordEdit(id: String!): RecordEditPayload!
       echo(value: String!): String!
       upload(file: Upload!): String!
       fail: String!
@@ -62,6 +67,10 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
           expensive: `expensive:${value}`,
         };
       },
+      recordEdit: (_: unknown, { id }: { id: string }) => {
+        calls.push(`edit:${id}`);
+        return { id };
+      },
       echo: (_: unknown, { value }: { value: string }) => {
         calls.push(`echo:${value}`);
         return value;
@@ -85,6 +94,12 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
       expensive: ({ id, expensive }: { id: string; expensive: string }) => {
         calls.push(`expensive:${id}`);
         return expensive;
+      },
+    },
+    RecordEditPayload: {
+      apply: ({ id }: { id: string }, { value }: { value: string }) => {
+        calls.push(`apply:${id}:${value}`);
+        return value;
       },
     },
   },
@@ -264,6 +279,28 @@ describe('batch GraphQL operation executor', () => {
     expect(calls).toEqual(['create:source']);
     expect(execution.results).toEqual([
       { createRecord: { __typename: 'RecordPayload' } },
+    ]);
+  });
+
+  it('does not prune nested edit mutation resolvers', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation RecordEdit($id: String!, $value: String!) { recordEdit(id: $id) { apply(value: $value) } }',
+        variables: JSON.stringify({ id: 'target', value: 'source' }),
+      },
+    ], {
+      pruneUnusedResultFields: true,
+    });
+
+    expect(calls).toEqual([
+      'edit:target',
+      'apply:target:source',
+    ]);
+    expect(execution.results).toEqual([
+      { recordEdit: { apply: 'source' } },
     ]);
   });
 

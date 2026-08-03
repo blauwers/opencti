@@ -317,6 +317,13 @@ const pruneUnusedResultFields = (
     return document;
   }
   const topLevelField = operationDefinition.selectionSet.selections[0] as FieldNode;
+  // OpenCTI edit mutations are accessor fields whose nested selection performs the
+  // write, for example `stixCoreObjectEdit { restrictionOrganizationAdd { id } }`.
+  // Replacing that selection with `__typename` would keep the accessor but skip the
+  // actual mutation resolver.
+  if ((!requiredPaths || requiredPaths.size === 0) && topLevelField.name.value.endsWith('Edit')) {
+    return document;
+  }
   let nextTopLevelField = topLevelField;
   if (!requiredPaths || requiredPaths.size === 0) {
     if (topLevelField.selectionSet) {
