@@ -194,6 +194,7 @@ import {
   registerBatchSideEffect,
   setBatchExecutionMetadata,
 } from '../modules/batch/batch-executor';
+import { resolveBatchEntityCreateLookup } from '../modules/batch/batch-entity-create-coordinator';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
@@ -3827,14 +3828,28 @@ const internalCreateEntityRaw = async (
   // Create the element
   let lock;
   try {
-    // Try to get the lock in redis
-    lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });
-    // Generate the internal id if needed
-    const standardId = resolvedInput.standard_id || generateStandardId(type, resolvedInput);
     // Check if the entity exists, must be done with SYSTEM USER to really find it.
     const existingEntities: BasicStoreObject[] = [];
     const finderIds = [...participantIds, ...(context.previousStandard ? [context.previousStandard] : [])];
-    const existingByIdsPromise = findExistingEntitiesByIds(context, finderIds, type) as Promise<BasicStoreObject[]>;
+    const draftId = getDraftContext(context, user);
+    const coordinatedLookup = resolveBatchEntityCreateLookup({
+      draftId,
+      finderIds,
+      participantIds,
+      type,
+    });
+    let existingByIdsPromise: Promise<BasicStoreObject[]>;
+    if (coordinatedLookup) {
+      const coordinatedResolution = await coordinatedLookup;
+      lock = coordinatedResolution.lock;
+      existingByIdsPromise = Promise.resolve(coordinatedResolution.existingByIds);
+    } else {
+      // Try to get the lock in redis
+      lock = await lockResources(participantIds, { draftId });
+      existingByIdsPromise = findExistingEntitiesByIds(context, finderIds, type) as Promise<BasicStoreObject[]>;
+    }
+    // Generate the internal id if needed
+    const standardId = resolvedInput.standard_id || generateStandardId(type, resolvedInput);
     // Hash are per definition keys.
     // When creating a hash, we can check all hashes to update or merge the result
     // Generating multiple standard ids could be a solution but to complex to implements

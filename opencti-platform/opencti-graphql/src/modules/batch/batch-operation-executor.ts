@@ -15,6 +15,7 @@ import Upload from 'graphql-upload/Upload.mjs';
 import conf from '../../config/conf';
 import { FunctionalError } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
+import { BatchEntityCreateCoordinator, runWithBatchEntityCreateCoordinator } from './batch-entity-create-coordinator';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
 import type { BatchGraphqlExecutionPlanInput, BatchGraphqlFileInput, BatchGraphqlOperationInput } from './batch-types';
 
@@ -229,6 +230,14 @@ const buildRequiredResultPathTree = (
 };
 
 const getFieldResponseKey = (field: FieldNode): string => field.alias?.value ?? field.name.value;
+
+const getTopLevelMutationFieldName = (operation: PreparedBatchGraphqlOperation): string | undefined => {
+  const operationDefinition = operation.document.definitions.find((definition): definition is OperationDefinitionNode => (
+    definition.kind === Kind.OPERATION_DEFINITION
+  ));
+  const topLevelField = operationDefinition?.selectionSet.selections[0];
+  return topLevelField?.kind === Kind.FIELD ? topLevelField.name.value : undefined;
+};
 
 const selectionSetContainsFragments = (selectionSet: SelectionSetNode): boolean => {
   return selectionSet.selections.some((selection) => {
@@ -696,6 +705,43 @@ const executeOperationGroupsWithConcurrency = async (
   }));
 };
 
+const canCoordinateEntityCreatePhase = (groups: PreparedBatchGraphqlOperationGroup[]): boolean => {
+  return groups.length > 1 && groups.every((group) => {
+    const fieldName = getTopLevelMutationFieldName(group.operations[0]);
+    return group.operations[0].objectId !== undefined
+      && fieldName !== undefined
+      && fieldName.endsWith('Add')
+      && !fieldName.includes('Relationship')
+      && !fieldName.endsWith('RelationsAdd');
+  });
+};
+
+const executeOperationGroupsWithEntityCreateCoordinator = async (
+  schema: GraphQLSchema,
+  context: AuthContext,
+  groups: PreparedBatchGraphqlOperationGroup[],
+  resultBindings: BatchGraphqlResultBindings,
+  results: BatchGraphqlOperationResult[],
+): Promise<void> => {
+  const coordinator = new BatchEntityCreateCoordinator(context, groups.map((group) => group.groupId), BATCH_GRAPHQL_MAX_CONCURRENCY);
+  let firstError: unknown;
+  await Promise.all(groups.map(async (group) => {
+    try {
+      await runWithBatchEntityCreateCoordinator(
+        coordinator,
+        group.groupId,
+        () => executeOperationGroup(schema, context, group, resultBindings, results),
+      );
+    } catch (error) {
+      firstError ??= error;
+    }
+  }));
+  await coordinator.close();
+  if (firstError) {
+    throw firstError;
+  }
+};
+
 const executeOperationGroups = async (
   schema: GraphQLSchema,
   context: AuthContext,
@@ -713,13 +759,12 @@ const executeOperationGroups = async (
   const results = new Array<BatchGraphqlOperationResult>(operations.length);
   const phases = Array.from(groupsByPhase.keys()).sort((left, right) => left - right);
   for (const phase of phases) {
-    await executeOperationGroupsWithConcurrency(
-      schema,
-      context,
-      groupsByPhase.get(phase) ?? [],
-      resultBindings,
-      results,
-    );
+    const phaseGroups = groupsByPhase.get(phase) ?? [];
+    if (canCoordinateEntityCreatePhase(phaseGroups)) {
+      await executeOperationGroupsWithEntityCreateCoordinator(schema, context, phaseGroups, resultBindings, results);
+    } else {
+      await executeOperationGroupsWithConcurrency(schema, context, phaseGroups, resultBindings, results);
+    }
   }
   return results;
 };
