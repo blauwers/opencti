@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, coalesceBufferedEngineBulkActions, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
+import { buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 
 describe('prepareElementForIndexing testing', () => {
@@ -128,6 +128,133 @@ describe('extractBulkOperationErrors testing', () => {
       { create: { error: createError } },
       { index: { status: 201 } },
     ])).toEqual([indexError, updateError, deleteError, createError]);
+  });
+});
+
+describe('classifyBufferedEngineBulkResponseItems testing', () => {
+  const context = {};
+  const actions = [
+    {
+      context,
+      refresh: false,
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--1' } },
+        { internal_id: 'entity--1' },
+      ],
+    },
+    {
+      context,
+      refresh: false,
+      body: [
+        { update: { _index: 'test_index', _id: 'entity--2' } },
+        { doc: { name: 'updated' } },
+      ],
+    },
+    {
+      context,
+      refresh: false,
+      body: [
+        { delete: { _index: 'test_index', _id: 'entity--3' } },
+      ],
+    },
+  ];
+
+  it('keeps response items aligned with the action that must be retried', () => {
+    const classified = classifyBufferedEngineBulkResponseItems(actions, [
+      { index: { status: 201 } },
+      { update: { status: 429, error: { type: 'es_rejected_execution_exception' } } },
+      { delete: { status: 404, error: { type: 'document_missing_exception' } } },
+    ]);
+
+    expect(classified.permanentFailures).toEqual([]);
+    expect(classified.retryableFailures).toHaveLength(1);
+    expect(classified.retryableFailures[0].action).toBe(actions[1]);
+    expect(classified.retryableFailures[0].error).toEqual({
+      type: 'es_rejected_execution_exception',
+      status: 429,
+    });
+  });
+
+  it('rejects malformed bulk responses that cannot be mapped to submitted actions', () => {
+    expect(() => classifyBufferedEngineBulkResponseItems(actions, [{ index: { status: 201 } }]))
+      .toThrow(/Bulk indexing response does not match submitted actions/);
+  });
+});
+
+describe('executeBufferedEngineBulkActionGroup testing', () => {
+  const context = {};
+  const actions = [
+    {
+      context,
+      refresh: false,
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--1' } },
+        { internal_id: 'entity--1' },
+      ],
+    },
+    {
+      context,
+      refresh: false,
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--2' } },
+        { internal_id: 'entity--2' },
+      ],
+    },
+  ];
+
+  it('retries only transient failed items from a partial bulk response', async () => {
+    const executeBulk = vi.fn()
+      .mockResolvedValueOnce({
+        errors: true,
+        items: [
+          { index: { status: 201 } },
+          { index: { status: 429, error: { type: 'es_rejected_execution_exception' } } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        errors: false,
+        items: [{ index: { status: 201 } }],
+      });
+    const waitForRetry = vi.fn().mockResolvedValue(undefined);
+
+    await executeBufferedEngineBulkActionGroup(actions, {
+      executeBulk,
+      random: () => 0,
+      waitForRetry,
+    });
+
+    expect(executeBulk).toHaveBeenCalledTimes(2);
+    expect(executeBulk.mock.calls[0][1].body).toEqual([...actions[0].body, ...actions[1].body]);
+    expect(executeBulk.mock.calls[1][1].body).toEqual(actions[1].body);
+    expect(waitForRetry).toHaveBeenCalledWith(250);
+  });
+
+  it('fails permanent item errors immediately without replaying successful actions', async () => {
+    const executeBulk = vi.fn().mockResolvedValue({
+      errors: true,
+      items: [
+        { index: { status: 201 } },
+        { index: { status: 400, error: { type: 'mapper_parsing_exception' } } },
+      ],
+    });
+
+    await expect(executeBufferedEngineBulkActionGroup(actions, {
+      executeBulk,
+      waitForRetry: vi.fn().mockResolvedValue(undefined),
+    })).rejects.toMatchObject({
+      extensions: {
+        data: {
+          errors: [{
+            action: 'index',
+            documentId: 'entity--2',
+            index: 'test_index',
+            status: 400,
+            type: 'mapper_parsing_exception',
+          }],
+        },
+      },
+    });
+    expect(executeBulk).toHaveBeenCalledTimes(1);
   });
 });
 

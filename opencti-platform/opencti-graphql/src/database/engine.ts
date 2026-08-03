@@ -351,6 +351,18 @@ type BufferedEngineBulkActionGroup = {
   key: string;
 };
 
+type BufferedEngineBulkItemFailure = {
+  action: BufferedEngineBulkAction;
+  descriptor?: BufferedEngineBulkActionDescriptor;
+  error: any;
+  status?: number;
+};
+
+type BufferedEngineBulkResponseClassification = {
+  permanentFailures: BufferedEngineBulkItemFailure[];
+  retryableFailures: BufferedEngineBulkItemFailure[];
+};
+
 type BufferedEngineOriginalDocuments = {
   documents: Map<string, Record<string, any>>;
   loadedKeys: Set<string>;
@@ -5822,6 +5834,123 @@ const parseBufferedEngineBulkAction = (action: BufferedEngineBulkAction): Buffer
   };
 };
 
+const getBufferedEngineBulkResponseOperation = (item: any): any => {
+  return Object.values(item ?? {})[0];
+};
+
+const getBufferedEngineBulkFailureError = (operation: any): any => {
+  if (!operation?.error || typeof operation.error !== 'object') {
+    return operation?.error;
+  }
+  return operation.status === undefined
+    ? operation.error
+    : { ...operation.error, status: operation.status };
+};
+
+export const classifyBufferedEngineBulkResponseItems = (
+  actions: BufferedEngineBulkAction[],
+  items: any[] = [],
+): BufferedEngineBulkResponseClassification => {
+  if (actions.length !== items.length) {
+    throw DatabaseError('Bulk indexing response does not match submitted actions', {
+      submittedActions: actions.length,
+      responseItems: items.length,
+    });
+  }
+  const classification: BufferedEngineBulkResponseClassification = {
+    permanentFailures: [],
+    retryableFailures: [],
+  };
+  actions.forEach((action, index) => {
+    const operation = getBufferedEngineBulkResponseOperation(items[index]);
+    if (!operation?.error || operation.error.type === DOCUMENT_MISSING_EXCEPTION) {
+      return;
+    }
+    const failure: BufferedEngineBulkItemFailure = {
+      action,
+      descriptor: parseBufferedEngineBulkAction(action),
+      error: getBufferedEngineBulkFailureError(operation),
+      status: operation.status,
+    };
+    if (isTransitoryError(failure.error)) {
+      classification.retryableFailures.push(failure);
+    } else {
+      classification.permanentFailures.push(failure);
+    }
+  });
+  return classification;
+};
+
+const buildBufferedEngineBulkFailureDetails = (
+  failures: BufferedEngineBulkItemFailure[],
+  attempt: number,
+) => {
+  return failures.map((failure) => ({
+    ...failure.error,
+    action: failure.descriptor?.kind,
+    attempt,
+    documentId: failure.descriptor?.documentId,
+    index: failure.descriptor?.index,
+    status: failure.status,
+  }));
+};
+
+const getBufferedEngineBulkRetryDelayMs = (attempt: number, random: () => number): number => {
+  const maxDelayMs = BULK_INITIAL_DELAY_MS * (2 ** attempt);
+  return Math.floor((maxDelayMs / 2) + ((maxDelayMs / 2) * random()));
+};
+
+type ExecuteBufferedEngineBulkActionGroupOptions = {
+  executeBulk?: (context: AuthContext, args: any) => Promise<any>;
+  random?: () => number;
+  waitForRetry?: (delayMs: number) => Promise<any>;
+};
+
+export const executeBufferedEngineBulkActionGroup = async (
+  actions: BufferedEngineBulkAction[],
+  options: ExecuteBufferedEngineBulkActionGroupOptions = {},
+) => {
+  const executeBulk = options.executeBulk ?? elRawBulk;
+  const random = options.random ?? Math.random;
+  const waitForRetry = options.waitForRetry ?? wait;
+  let pendingActions = actions;
+  for (let attempt = 0; pendingActions.length > 0; attempt += 1) {
+    const body = pendingActions.flatMap((action) => action.body);
+    if (body.length === 0) {
+      return;
+    }
+    recordBufferedEngineBulkMetrics(pendingActions);
+    const data = await executeBulk(pendingActions[0].context, {
+      refresh: pendingActions[0].refresh,
+      timeout: BULK_TIMEOUT,
+      body,
+    });
+    if (!data.errors) {
+      return;
+    }
+    const { permanentFailures, retryableFailures } = classifyBufferedEngineBulkResponseItems(pendingActions, data.items);
+    if (permanentFailures.length > 0) {
+      throw DatabaseError('Bulk indexing fail', {
+        errors: buildBufferedEngineBulkFailureDetails(permanentFailures, attempt + 1),
+      });
+    }
+    if (retryableFailures.length === 0) {
+      return;
+    }
+    if (attempt >= BULK_MAX_RETRIES) {
+      throw DatabaseError('Bulk indexing fail after retries', {
+        errors: buildBufferedEngineBulkFailureDetails(retryableFailures, attempt + 1),
+      });
+    }
+    const delayMs = getBufferedEngineBulkRetryDelayMs(attempt, random);
+    logApp.warn(`[SEARCH] Bulk item transitory error, retrying ${retryableFailures.length} item(s) in ${delayMs}ms (attempt ${attempt + 1}/${BULK_MAX_RETRIES})`, {
+      errors: buildBufferedEngineBulkFailureDetails(retryableFailures, attempt + 1),
+    });
+    await waitForRetry(delayMs);
+    pendingActions = retryableFailures.map((failure) => failure.action);
+  }
+};
+
 const buildBufferedEngineBulkActionKey = (descriptor: BufferedEngineBulkActionDescriptor): string => {
   return `${descriptor.index}:${descriptor.documentId}`;
 };
@@ -6010,12 +6139,7 @@ const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkActio
     const groupsOfActions = splitBufferedEngineBulkActions(segment);
     for (let index = 0; index < groupsOfActions.length; index += 1) {
       const actionsBulk = groupsOfActions[index];
-      const body = actionsBulk.flatMap((action) => action.body);
-      if (body.length === 0) {
-        continue;
-      }
-      recordBufferedEngineBulkMetrics(actionsBulk);
-      await elBulk(actionsBulk[0].context, { refresh: actionsBulk[0].refresh, timeout: BULK_TIMEOUT, body });
+      await executeBufferedEngineBulkActionGroup(actionsBulk);
     }
   };
   for (let index = 0; index <= actions.length; index += 1) {
