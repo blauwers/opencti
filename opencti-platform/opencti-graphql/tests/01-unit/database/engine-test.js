@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
+import { buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 
 describe('prepareElementForIndexing testing', () => {
@@ -255,6 +255,55 @@ describe('executeBufferedEngineBulkActionGroup testing', () => {
       },
     });
     expect(executeBulk).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('executeWithBufferedEngineDocumentLanes testing', () => {
+  const context = {};
+  const buildAction = (id) => ({
+    context,
+    refresh: false,
+    body: [
+      { index: { _index: 'test_index', _id: id } },
+      { internal_id: id },
+    ],
+  });
+
+  it('serializes overlapping document IDs while unrelated IDs continue', async () => {
+    const order = [];
+    let releaseFirst = () => {};
+    let signalFirstStarted = () => {};
+    let signalThirdStarted = () => {};
+    const firstBlocked = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = new Promise((resolve) => {
+      signalFirstStarted = resolve;
+    });
+    const thirdStarted = new Promise((resolve) => {
+      signalThirdStarted = resolve;
+    });
+
+    const first = executeWithBufferedEngineDocumentLanes([buildAction('entity--1')], async () => {
+      order.push('first-start');
+      signalFirstStarted();
+      await firstBlocked;
+      order.push('first-end');
+    });
+    await firstStarted;
+    const second = executeWithBufferedEngineDocumentLanes([buildAction('entity--1')], async () => {
+      order.push('second-start');
+    });
+    const third = executeWithBufferedEngineDocumentLanes([buildAction('entity--2')], async () => {
+      order.push('third-start');
+      signalThirdStarted();
+    });
+    await thirdStarted;
+
+    expect(order).toEqual(['first-start', 'third-start']);
+    releaseFirst();
+    await Promise.all([first, second, third]);
+    expect(order).toEqual(['first-start', 'third-start', 'first-end', 'second-start']);
   });
 });
 

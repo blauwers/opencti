@@ -5834,6 +5834,10 @@ const parseBufferedEngineBulkAction = (action: BufferedEngineBulkAction): Buffer
   };
 };
 
+const buildBufferedEngineBulkActionKey = (descriptor: BufferedEngineBulkActionDescriptor): string => {
+  return `${descriptor.index}:${descriptor.documentId}`;
+};
+
 const getBufferedEngineBulkResponseOperation = (item: any): any => {
   return Object.values(item ?? {})[0];
 };
@@ -5906,6 +5910,42 @@ type ExecuteBufferedEngineBulkActionGroupOptions = {
   waitForRetry?: (delayMs: number) => Promise<any>;
 };
 
+const bufferedEngineDocumentLanes = new Map<string, Promise<void>>();
+
+const getBufferedEngineDocumentLaneKeys = (actions: BufferedEngineBulkAction[]): string[] => {
+  return R.uniq(actions.flatMap((action) => {
+    const descriptor = parseBufferedEngineBulkAction(action);
+    return descriptor ? [buildBufferedEngineBulkActionKey(descriptor)] : [];
+  })).sort();
+};
+
+export const executeWithBufferedEngineDocumentLanes = async <T>(
+  actions: BufferedEngineBulkAction[],
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const keys = getBufferedEngineDocumentLaneKeys(actions);
+  if (keys.length === 0) {
+    return operation();
+  }
+  const pending = keys.map((key) => bufferedEngineDocumentLanes.get(key) ?? Promise.resolve());
+  let release: () => void = () => {};
+  const completion = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  keys.forEach((key) => bufferedEngineDocumentLanes.set(key, completion));
+  await Promise.all(pending);
+  try {
+    return await operation();
+  } finally {
+    release();
+    keys.forEach((key) => {
+      if (bufferedEngineDocumentLanes.get(key) === completion) {
+        bufferedEngineDocumentLanes.delete(key);
+      }
+    });
+  }
+};
+
 export const executeBufferedEngineBulkActionGroup = async (
   actions: BufferedEngineBulkAction[],
   options: ExecuteBufferedEngineBulkActionGroupOptions = {},
@@ -5949,10 +5989,6 @@ export const executeBufferedEngineBulkActionGroup = async (
     await waitForRetry(delayMs);
     pendingActions = retryableFailures.map((failure) => failure.action);
   }
-};
-
-const buildBufferedEngineBulkActionKey = (descriptor: BufferedEngineBulkActionDescriptor): string => {
-  return `${descriptor.index}:${descriptor.documentId}`;
 };
 
 const metricsMatchForCoalesce = (
@@ -6139,7 +6175,7 @@ const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkActio
     const groupsOfActions = splitBufferedEngineBulkActions(segment);
     for (let index = 0; index < groupsOfActions.length; index += 1) {
       const actionsBulk = groupsOfActions[index];
-      await executeBufferedEngineBulkActionGroup(actionsBulk);
+      await executeWithBufferedEngineDocumentLanes(actionsBulk, () => executeBufferedEngineBulkActionGroup(actionsBulk));
     }
   };
   for (let index = 0; index <= actions.length; index += 1) {
