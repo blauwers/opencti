@@ -9,6 +9,7 @@ import {
   buildDeleteEvent,
   buildMergeEvent,
   buildUpdateEvent,
+  coalesceBufferedStreamDataEvents,
   type FetchEventRangeOption,
   isStreamPublishable,
   LIVE_STREAM_NAME,
@@ -23,9 +24,38 @@ import { getDraftContext } from '../../utils/draftContext';
 import { rawRedisStreamClient } from '../redis-stream';
 import { telemetry } from '../../config/tracing';
 import { logApp } from '../../config/conf';
-import { BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../../modules/batch/batch-executor';
+import { BatchSideEffectKind, getBatchExecutionMetadata, isBatchWriteBoundaryOpen, registerBatchSideEffect, setBatchExecutionMetadata } from '../../modules/batch/batch-executor';
 
 const streamClient: RawStreamClient = rawRedisStreamClient;
+const BATCH_STREAM_PUBLICATIONS_METADATA_KEY = 'stream.publications';
+
+type BufferedStreamPublication = {
+  context: AuthContext;
+  events: StreamDataEvent[];
+  user: AuthUser;
+};
+
+type BufferedStreamPublicationState = {
+  publications: Map<string, BufferedStreamPublication>;
+};
+
+const getBufferedStreamPublicationKey = (event: BaseEvent): string | undefined => {
+  const data = (event as StreamDataEvent).data;
+  if (!data || typeof data.id !== 'string' || !['create', 'delete', 'update'].includes(event.type)) {
+    return undefined;
+  }
+  return `${(event as StreamDataEvent).scope}:${data.id}`;
+};
+
+const getOrCreateBufferedStreamPublicationState = (): BufferedStreamPublicationState | undefined => {
+  let state = getBatchExecutionMetadata<BufferedStreamPublicationState>(BATCH_STREAM_PUBLICATIONS_METADATA_KEY);
+  if (!state) {
+    state = { publications: new Map() };
+    setBatchExecutionMetadata(BATCH_STREAM_PUBLICATIONS_METADATA_KEY, state);
+  }
+  return state;
+};
+
 export const initializeStreamStack = async () => {
   if (streamClient.initializeStreams) {
     await streamClient.initializeStreams();
@@ -51,6 +81,38 @@ const pushToStream = async <T extends BaseEvent> (context: AuthContext, user: Au
   const eventToPush = { ...event, event_id: context.eventId };
   if (!draftContext && isStreamPublishable(opts)) {
     if (isBatchWriteBoundaryOpen()) {
+      const publicationKey = getBufferedStreamPublicationKey(eventToPush);
+      if (publicationKey) {
+        const streamEventToPush = eventToPush as unknown as StreamDataEvent;
+        const state = getOrCreateBufferedStreamPublicationState();
+        if (state) {
+          const publication = state.publications.get(publicationKey);
+          if (publication) {
+            publication.events.push(streamEventToPush);
+            return;
+          }
+          const bufferedPublication = {
+            context,
+            events: [streamEventToPush],
+            user,
+          };
+          state.publications.set(publicationKey, bufferedPublication);
+          await registerBatchSideEffect({
+            kind: BatchSideEffectKind.StreamPublication,
+            execute: async () => {
+              const publicationToPush = state.publications.get(publicationKey);
+              if (!publicationToPush) {
+                return;
+              }
+              const eventsToPush = coalesceBufferedStreamDataEvents(publicationToPush.events);
+              for (let index = 0; index < eventsToPush.length; index += 1) {
+                await pushToStreamNow(publicationToPush.context, publicationToPush.user, eventsToPush[index]);
+              }
+            },
+          });
+          return;
+        }
+      }
       await registerBatchSideEffect({
         kind: BatchSideEffectKind.StreamPublication,
         execute: () => pushToStreamNow(context, user, eventToPush),

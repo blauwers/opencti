@@ -154,6 +154,94 @@ export const buildUpdateEvent = (user: AuthUser, previous: StoreObject, instance
   const previousStix = convertStoreToStix_2_1(previous) as StixCoreObject;
   return buildStixUpdateEvent(user, previousStix, stix, changes, opts);
 };
+
+type CoalescableStreamDataEvent = StreamDataEvent;
+
+const mergeStringArrays = (left: string[] | undefined, right: string[] | undefined): string[] | undefined => {
+  if (!left && !right) {
+    return undefined;
+  }
+  return Array.from(new Set([...(left ?? []), ...(right ?? [])]));
+};
+
+const mergeUpdateRelatedRestrictions = (
+  left: UpdateEvent['context']['related_restrictions'],
+  right: UpdateEvent['context']['related_restrictions'],
+): UpdateEvent['context']['related_restrictions'] => {
+  const markings = mergeStringArrays(left?.markings, right?.markings);
+  return markings ? { markings } : undefined;
+};
+
+const rebuildCombinedUpdateEvent = (left: UpdateEvent, right: UpdateEvent): UpdateEvent | undefined => {
+  const previousStix = jsonpatch.applyPatch(structuredClone(left.data), left.context.reverse_patch).newDocument as StixCoreObject;
+  const patch = jsonpatch.compare(previousStix, right.data);
+  const reversePatch = jsonpatch.compare(right.data, previousStix);
+  if (patch.length === 0 || reversePatch.length === 0) {
+    return undefined;
+  }
+  const changes = [...left.context.changes, ...right.context.changes];
+  return {
+    ...right,
+    commit: right.commit ?? left.commit,
+    message: `Update ${changes.length} elements`,
+    noHistory: left.noHistory && right.noHistory ? true : undefined,
+    context: {
+      ...right.context,
+      changes,
+      patch,
+      pir_ids: mergeStringArrays(left.context.pir_ids, right.context.pir_ids),
+      related_restrictions: mergeUpdateRelatedRestrictions(left.context.related_restrictions, right.context.related_restrictions),
+      reverse_patch: reversePatch,
+    },
+  };
+};
+
+type BufferedStreamEventCombination = {
+  event?: CoalescableStreamDataEvent;
+  handled: boolean;
+};
+
+const combineBufferedStreamDataEvents = (
+  left: CoalescableStreamDataEvent,
+  right: CoalescableStreamDataEvent,
+): BufferedStreamEventCombination => {
+  if (left.type === 'update' && right.type === 'update') {
+    return { event: rebuildCombinedUpdateEvent(left as UpdateEvent, right as UpdateEvent), handled: true };
+  }
+  if (left.type === 'create' && right.type === 'update') {
+    return { event: { ...left, data: right.data }, handled: true };
+  }
+  if (left.type === 'create' && right.type === 'delete') {
+    return { handled: true };
+  }
+  if (left.type === 'update' && right.type === 'delete') {
+    return { event: right, handled: true };
+  }
+  return { handled: false };
+};
+
+export const coalesceBufferedStreamDataEvents = (
+  events: CoalescableStreamDataEvent[],
+): CoalescableStreamDataEvent[] => {
+  const coalesced: CoalescableStreamDataEvent[] = [];
+  events.forEach((event) => {
+    const previous = coalesced[coalesced.length - 1];
+    if (!previous) {
+      coalesced.push(event);
+      return;
+    }
+    const combined = combineBufferedStreamDataEvents(previous, event);
+    if (!combined.handled) {
+      coalesced.push(event);
+      return;
+    }
+    coalesced.pop();
+    if (combined.event) {
+      coalesced.push(combined.event);
+    }
+  });
+  return coalesced;
+};
 // Create
 export const buildCreateEvent = (user: AuthUser, instance: StoreObject, message: string): StreamDataEvent => {
   const stix = convertStoreToStix_2_1(instance) as StixCoreObject;
