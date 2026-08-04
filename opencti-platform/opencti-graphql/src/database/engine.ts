@@ -6388,8 +6388,8 @@ const getBufferedEngineGroupFinalEntry = (group: BufferedEngineBulkActionGroup):
   return group.entries[group.entries.length - 1];
 };
 
-const isBufferedEngineUpdateOnlyGroup = (group: BufferedEngineBulkActionGroup): boolean => {
-  return group.entries.every((entry) => entry.descriptor.kind === 'update');
+const isBufferedEngineNonDestructiveGroup = (group: BufferedEngineBulkActionGroup): boolean => {
+  return group.entries.every((entry) => entry.descriptor.kind === 'index' || entry.descriptor.kind === 'update');
 };
 
 const omitBufferedEngineFreshnessFields = (document: Record<string, any>): Record<string, any> => {
@@ -6407,7 +6407,7 @@ const isBufferedEngineMaterializedNoop = (
   originalDocument: Record<string, any> | undefined,
   finalDocument: Record<string, any>,
 ): boolean => {
-  if (!originalDocument || !isBufferedEngineUpdateOnlyGroup(group)) {
+  if (!originalDocument || !isBufferedEngineNonDestructiveGroup(group)) {
     return false;
   }
   return R.equals(

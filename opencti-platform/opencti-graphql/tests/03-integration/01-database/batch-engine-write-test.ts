@@ -126,6 +126,21 @@ describe('batch engine writes', () => {
     return data.hits.hits[0]?._version;
   };
 
+  const loadDocumentSource = async (entity: any) => {
+    const data = await elRawSearch(testContext, ADMIN_USER, entity.entity_type, {
+      index: entity._index,
+      size: 1,
+      body: {
+        query: {
+          ids: {
+            values: [entity._id ?? entity.internal_id],
+          },
+        },
+      },
+    });
+    return data.hits.hits[0]?._source;
+  };
+
   afterAll(async () => {
     if (malware) {
       await deleteElementById(testContext, ADMIN_USER, malware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
@@ -268,6 +283,46 @@ describe('batch engine writes', () => {
             refreshed_at: '2026-08-03T00:00:01.000Z',
             updated_at: '2026-08-03T00:00:01.000Z',
           } as any);
+          return null;
+        },
+      },
+    ]);
+
+    const versionAfter = await loadDocumentVersion(target);
+    const committed = await internalLoadById(testContext, ADMIN_USER, target.internal_id) as any;
+    expect(versionAfter).toBe(versionBefore);
+    expect(committed.description).toBe(target.description);
+    expect(committed.updated_at).toEqual(target.updated_at);
+  });
+
+  it('skips a final direct index when later buffered updates only leave freshness fields changed', async () => {
+    const target = await addMalware(testContext, ADMIN_USER, {
+      description: 'batch direct semantic original',
+      name: `Batch direct semantic noop ${uuidv4()}`,
+    });
+    cleanupMalwares.push(target);
+    const sourceBefore = await loadDocumentSource(target);
+    const versionBefore = await loadDocumentVersion(target);
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elIndex(target._index, {
+            ...sourceBefore,
+            modified: '2026-08-03T00:00:00.000Z',
+            refreshed_at: '2026-08-03T00:00:00.000Z',
+            updated_at: '2026-08-03T00:00:00.000Z',
+          }, { context: testContext });
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdate(testContext, target._index, target._id ?? target.internal_id, {
+            doc: { description: sourceBefore.description },
+          });
           return null;
         },
       },
