@@ -922,20 +922,20 @@ describe('batch engine writes', () => {
     expect(committedSource[RELATION_RELATED_TO]).toContain(replacementTarget.internal_id);
     expect(committedSource[RELATION_RELATED_TO]).not.toContain(originalTarget.internal_id);
     const relationBeforeProjection = await loadDocumentSource(relation);
-    await elReplace(testContext, relation._index, relation._id ?? relation.internal_id, {
-      doc: {
-        connections: relationBeforeProjection.connections.map((connection: any) => ({
-          ...connection,
-          name: `${connection.name} stale`,
-        })),
-      },
-    });
     const projectionVersionBefore = await loadDocumentVersion(relation);
 
     const projectionExecution = await executeBatchMutations([
       {
         kind: BatchMutationKind.UpdateAttribute,
         executeWrite: async () => {
+          await elReplace(testContext, relation._index, relation._id ?? relation.internal_id, {
+            doc: {
+              connections: relationBeforeProjection.connections.map((connection: any) => ({
+                ...connection,
+                name: `${connection.name} stale`,
+              })),
+            },
+          });
           await elUpdateElement(testContext, ADMIN_USER, {
             _id: source._id,
             _index: source._index,
@@ -977,7 +977,7 @@ describe('batch engine writes', () => {
     });
     expect(projectedRelation.connections.find((connection: any) => connection.internal_id === source.internal_id)?.name).toBe(source.name);
     expect(projectedRelation.connections.find((connection: any) => connection.internal_id === replacementTarget.internal_id)?.name).toBe(replacementTarget.name);
-    expect(await loadDocumentVersion(relation)).toBe(projectionVersionBefore + 1);
+    expect(await loadDocumentVersion(relation)).toBe(projectionVersionBefore);
   });
 
   it('skips direct relation connection rewrites when the projected connection is unchanged', async () => {

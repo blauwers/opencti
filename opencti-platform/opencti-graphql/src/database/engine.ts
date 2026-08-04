@@ -318,6 +318,28 @@ type BufferedConnectionProjectionState = {
   sideEffectRegistered: boolean;
 };
 
+const applyBufferedConnectionProjections = (
+  document: Record<string, any>,
+  projections: Map<string, BufferedConnectionProjection>,
+): Record<string, any> => {
+  if (document.base_type !== BASE_TYPE_RELATION || !Array.isArray(document.connections) || projections.size === 0) {
+    return document;
+  }
+  let changed = false;
+  const connections = document.connections.map((connection: Record<string, any>) => {
+    const projection = projections.get(connection.internal_id);
+    if (!projection) {
+      return connection;
+    }
+    const projected = { ...connection, ...projection.documentBody };
+    if (!R.equals(projected, connection)) {
+      changed = true;
+    }
+    return projected;
+  });
+  return changed ? { ...document, connections } : document;
+};
+
 type BufferedEngineBulkMetric = {
   kind: 'direct' | 'side';
   indexingType: string | undefined;
@@ -6339,6 +6361,33 @@ const getBufferedEngineIndexSource = (action: BufferedEngineBulkAction): Record<
   return source;
 };
 
+const applyBufferedConnectionProjectionsToIndexActions = (
+  actions: BufferedEngineBulkAction[],
+  projections: Map<string, BufferedConnectionProjection>,
+): BufferedEngineBulkAction[] => {
+  if (projections.size === 0) {
+    return actions;
+  }
+  return actions.map((action) => {
+    const descriptor = parseBufferedEngineBulkAction(action);
+    if (!descriptor || (descriptor.kind !== 'index' && descriptor.kind !== 'create')) {
+      return action;
+    }
+    const source = getBufferedEngineIndexSource(action);
+    if (!source) {
+      return action;
+    }
+    const projected = applyBufferedConnectionProjections(source, projections);
+    if (projected === source) {
+      return action;
+    }
+    return {
+      ...action,
+      body: [action.body[0], projected],
+    };
+  });
+};
+
 const buildBufferedEngineBulkActionGroups = (actions: BufferedEngineBulkAction[]): {
   groups: BufferedEngineBulkActionGroup[];
   standaloneEntries: { action: BufferedEngineBulkAction; sequence: number }[];
@@ -6386,8 +6435,23 @@ const isSingleBufferedEngineIndexGroup = (group: BufferedEngineBulkActionGroup):
   return group.entries.length === 1 && group.entries[0].descriptor.kind === 'index';
 };
 
-const shouldMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkActionGroup): boolean => {
-  return group.entries.length > 1 || isSingleBufferedEngineIndexGroup(group);
+const isSingleBufferedEngineRelationshipUpdateGroup = (
+  group: BufferedEngineBulkActionGroup,
+  connectionProjections: Map<string, BufferedConnectionProjection>,
+): boolean => {
+  if (connectionProjections.size === 0 || group.entries.length !== 1 || group.entries[0].descriptor.kind !== 'update') {
+    return false;
+  }
+  return READ_RELATIONSHIPS_INDICES.some((index) => matchesBufferedEngineIndex(group.entries[0].descriptor.index, index));
+};
+
+const shouldMaterializeBufferedEngineBulkActionGroup = (
+  group: BufferedEngineBulkActionGroup,
+  connectionProjections: Map<string, BufferedConnectionProjection> = new Map(),
+): boolean => {
+  return group.entries.length > 1
+    || isSingleBufferedEngineIndexGroup(group)
+    || isSingleBufferedEngineRelationshipUpdateGroup(group, connectionProjections);
 };
 
 const getBufferedEngineGroupMetric = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkMetric | undefined => {
@@ -6502,8 +6566,9 @@ const buildBufferedEngineFinalDeleteAction = (
 const materializeBufferedEngineBulkActionGroup = (
   group: BufferedEngineBulkActionGroup,
   originalDocuments: BufferedEngineOriginalDocuments,
+  connectionProjections: Map<string, BufferedConnectionProjection> = new Map(),
 ): BufferedEngineBulkAction[] | undefined => {
-  if (!shouldMaterializeBufferedEngineBulkActionGroup(group) || !canMaterializeBufferedEngineBulkActionGroup(group)) {
+  if (!shouldMaterializeBufferedEngineBulkActionGroup(group, connectionProjections) || !canMaterializeBufferedEngineBulkActionGroup(group)) {
     return undefined;
   }
   const originalDocumentLoaded = originalDocuments.loadedKeys.has(group.key);
@@ -6553,6 +6618,7 @@ const materializeBufferedEngineBulkActionGroup = (
   }
   flushPendingRelationImpacts();
   if (documentExists && document) {
+    document = applyBufferedConnectionProjections(document, connectionProjections);
     if (isBufferedEngineMaterializedNoop(group, originalDocument, document)) {
       return [];
     }
@@ -6570,11 +6636,13 @@ const materializeBufferedEngineBulkActionGroup = (
 export const materializeBufferedEngineBulkActions = (
   actions: BufferedEngineBulkAction[],
   originalDocuments: BufferedEngineOriginalDocuments = { documents: new Map(), loadedKeys: new Set(), versions: new Map() },
+  connectionProjections: Map<string, BufferedConnectionProjection> = new Map(),
 ): BufferedEngineBulkAction[] => {
-  const { groups, standaloneEntries } = buildBufferedEngineBulkActionGroups(actions);
+  const projectedActions = applyBufferedConnectionProjectionsToIndexActions(actions, connectionProjections);
+  const { groups, standaloneEntries } = buildBufferedEngineBulkActionGroups(projectedActions);
   const sequencedActions: { action: BufferedEngineBulkAction; sequence: number }[] = [...standaloneEntries];
   groups.forEach((group) => {
-    const materialized = materializeBufferedEngineBulkActionGroup(group, originalDocuments);
+    const materialized = materializeBufferedEngineBulkActionGroup(group, originalDocuments, connectionProjections);
     if (!materialized) {
       sequencedActions.push(...group.entries.map((entry) => ({ action: entry.action, sequence: entry.sequence })));
       return;
@@ -6587,13 +6655,16 @@ export const materializeBufferedEngineBulkActions = (
     .map(({ action }) => action);
 };
 
-const loadBufferedEngineOriginalDocuments = async (groups: BufferedEngineBulkActionGroup[]): Promise<BufferedEngineOriginalDocuments> => {
+const loadBufferedEngineOriginalDocuments = async (
+  groups: BufferedEngineBulkActionGroup[],
+  connectionProjections: Map<string, BufferedConnectionProjection> = new Map(),
+): Promise<BufferedEngineOriginalDocuments> => {
   const documents = new Map<string, Record<string, any>>();
   const loadedKeys = new Set<string>();
   const versions = new Map<string, BufferedEngineOriginalDocumentVersion>();
   const idsByIndex = new Map<string, { context: AuthContext; ids: Set<string> }>();
   groups
-    .filter((group) => shouldMaterializeBufferedEngineBulkActionGroup(group)
+    .filter((group) => shouldMaterializeBufferedEngineBulkActionGroup(group, connectionProjections)
       && canMaterializeBufferedEngineBulkActionGroup(group))
     .forEach((group) => {
       const descriptor = group.entries[0].descriptor;
@@ -6643,9 +6714,10 @@ const replanBufferedEngineVersionConflicts = async (
       errors: buildBufferedEngineBulkFailureDetails(failures, 1),
     });
   }
-  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups);
+  const connectionProjections = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY)?.projections;
+  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups, connectionProjections);
   return groups.flatMap((group) => {
-    const materialized = materializeBufferedEngineBulkActionGroup(group, originalDocuments);
+    const materialized = materializeBufferedEngineBulkActionGroup(group, originalDocuments, connectionProjections);
     if (!materialized) {
       throw DatabaseError('Bulk version conflict replan failed', {
         documentId: getBufferedEngineGroupFinalEntry(group).descriptor.documentId,
@@ -6658,8 +6730,9 @@ const replanBufferedEngineVersionConflicts = async (
 
 const finalizeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]): Promise<BufferedEngineBulkAction[]> => {
   const { groups } = buildBufferedEngineBulkActionGroups(actions);
-  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups);
-  return materializeBufferedEngineBulkActions(actions, originalDocuments);
+  const connectionProjections = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY)?.projections;
+  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups, connectionProjections);
+  return materializeBufferedEngineBulkActions(actions, originalDocuments, connectionProjections);
 };
 
 const buildIndexBulkActions = async (

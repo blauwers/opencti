@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
+import { INDEX_STIX_CORE_RELATIONSHIPS } from '../../../src/database/utils';
 
 describe('prepareElementForIndexing testing', () => {
   it('should base trim applied', async () => {
@@ -712,6 +713,80 @@ describe('materializeBufferedEngineBulkActions testing', () => {
       { create: { _index: 'test_index', _id: 'entity--1' } },
       { internal_id: 'entity--1', name: 'created', description: 'after-create' },
     ]);
+  });
+
+  it('folds buffered connection projections into relationship documents already written by the batch', () => {
+    const action = {
+      context: {},
+      refresh: true,
+      body: [
+        { index: { _index: 'test_index', _id: 'relationship--1', retry_on_conflict: 30 } },
+        {
+          base_type: 'RELATION',
+          connections: [
+            { internal_id: 'entity--1', name: 'stale' },
+            { internal_id: 'entity--2', name: 'unchanged' },
+          ],
+          internal_id: 'relationship--1',
+        },
+      ],
+    };
+
+    expect(materializeBufferedEngineBulkActions([action], {
+      documents: new Map(),
+      loadedKeys: new Set(['test_index:relationship--1']),
+      versions: new Map(),
+    }, new Map([
+      ['entity--1', { documentBody: { name: 'current' }, documentId: 'entity--1' }],
+    ]))).toEqual([{
+      ...action,
+      body: [
+        action.body[0],
+        {
+          ...action.body[1],
+          connections: [
+            { internal_id: 'entity--1', name: 'current' },
+            { internal_id: 'entity--2', name: 'unchanged' },
+          ],
+        },
+      ],
+    }]);
+  });
+
+  it('materializes single relationship updates when buffered projections restore the final document state', () => {
+    const relationshipIndex = `${INDEX_STIX_CORE_RELATIONSHIPS}-000001`;
+    const action = {
+      context: {},
+      refresh: true,
+      applyToDocument: (existing) => ({
+        ...existing,
+        connections: existing.connections.map((connection) => ({
+          ...connection,
+          name: `${connection.name} stale`,
+        })),
+      }),
+      body: [
+        { update: { _index: relationshipIndex, _id: 'relationship--1', retry_on_conflict: 30 } },
+        { script: { source: 'stale connection names' } },
+      ],
+    };
+    const original = {
+      base_type: 'RELATION',
+      connections: [
+        { internal_id: 'entity--1', name: 'current' },
+        { internal_id: 'entity--2', name: 'unchanged' },
+      ],
+      internal_id: 'relationship--1',
+    };
+
+    expect(materializeBufferedEngineBulkActions([action], {
+      documents: new Map([[`${relationshipIndex}:relationship--1`, original]]),
+      loadedKeys: new Set([`${relationshipIndex}:relationship--1`]),
+      versions: new Map(),
+    }, new Map([
+      ['entity--1', { documentBody: { name: 'current' }, documentId: 'entity--1' }],
+      ['entity--2', { documentBody: { name: 'unchanged' }, documentId: 'entity--2' }],
+    ]))).toEqual([]);
   });
 
   it('aggregates indexed relationship impacts before applying the final document state', () => {
