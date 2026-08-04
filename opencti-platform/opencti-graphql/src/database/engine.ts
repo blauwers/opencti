@@ -6371,8 +6371,12 @@ const canMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkAc
   return true;
 };
 
+const isSingleBufferedEngineIndexGroup = (group: BufferedEngineBulkActionGroup): boolean => {
+  return group.entries.length === 1 && group.entries[0].descriptor.kind === 'index';
+};
+
 const shouldMaterializeBufferedEngineBulkActionGroup = (group: BufferedEngineBulkActionGroup): boolean => {
-  return group.entries.length > 1;
+  return group.entries.length > 1 || isSingleBufferedEngineIndexGroup(group);
 };
 
 const getBufferedEngineGroupMetric = (group: BufferedEngineBulkActionGroup): BufferedEngineBulkMetric | undefined => {
@@ -6493,6 +6497,9 @@ const materializeBufferedEngineBulkActionGroup = (
   }
   const originalDocumentLoaded = originalDocuments.loadedKeys.has(group.key);
   const originalDocument = originalDocuments.documents.get(group.key);
+  if (isSingleBufferedEngineIndexGroup(group) && (!originalDocumentLoaded || !originalDocument)) {
+    return undefined;
+  }
   let document = originalDocument ? cloneBufferedEngineDocument(originalDocument) : undefined;
   let documentExists = originalDocument !== undefined;
   let documentStateKnown = originalDocumentLoaded;

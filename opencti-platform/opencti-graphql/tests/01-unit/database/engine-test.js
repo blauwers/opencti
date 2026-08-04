@@ -579,6 +579,75 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     })).toEqual([action]);
   });
 
+  it('drops a single existing index action when only freshness fields change', () => {
+    const action = {
+      context: {},
+      refresh: true,
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--1', retry_on_conflict: 30 } },
+        {
+          internal_id: 'entity--1',
+          modified: '2026-08-03T00:00:00.000Z',
+          name: 'existing',
+          refreshed_at: '2026-08-03T00:00:00.000Z',
+          updated_at: '2026-08-03T00:00:00.000Z',
+        },
+      ],
+    };
+
+    expect(materializeBufferedEngineBulkActions([action], {
+      documents: new Map([['test_index:entity--1', {
+        internal_id: 'entity--1',
+        modified: '2026-08-02T00:00:00.000Z',
+        name: 'existing',
+        refreshed_at: '2026-08-02T00:00:00.000Z',
+        updated_at: '2026-08-02T00:00:00.000Z',
+      }]]),
+      loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map([['test_index:entity--1', { seqNo: 12, primaryTerm: 3 }]]),
+    })).toEqual([]);
+  });
+
+  it('guards a changed single existing index action after loading final state', () => {
+    const action = {
+      context: {},
+      refresh: true,
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--1', retry_on_conflict: 30 } },
+        { internal_id: 'entity--1', name: 'changed' },
+      ],
+    };
+
+    const materialized = materializeBufferedEngineBulkActions([action], {
+      documents: new Map([['test_index:entity--1', { internal_id: 'entity--1', name: 'existing' }]]),
+      loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map([['test_index:entity--1', { seqNo: 12, primaryTerm: 3 }]]),
+    });
+
+    expect(materialized).toHaveLength(1);
+    expect(materialized[0].body).toEqual([
+      { index: { _index: 'test_index', _id: 'entity--1', if_seq_no: 12, if_primary_term: 3 } },
+      { internal_id: 'entity--1', name: 'changed' },
+    ]);
+  });
+
+  it('keeps a single missing index action intact', () => {
+    const action = {
+      context: {},
+      refresh: true,
+      body: [
+        { index: { _index: 'test_index', _id: 'entity--1', retry_on_conflict: 30 } },
+        { internal_id: 'entity--1', name: 'created' },
+      ],
+    };
+
+    expect(materializeBufferedEngineBulkActions([action], {
+      documents: new Map(),
+      loadedKeys: new Set(['test_index:entity--1']),
+      versions: new Map(),
+    })).toEqual([action]);
+  });
+
   it('folds update-only document mutations from different contexts into one final index action', () => {
     const actions = [
       {
