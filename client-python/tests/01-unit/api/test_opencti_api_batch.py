@@ -1,5 +1,11 @@
+from unittest.mock import MagicMock
+
 from pycti.api.opencti_api_batch import BatchMutationPlan, build_batch_result_token
-from pycti.api.opencti_api_client import File
+from pycti.api.opencti_api_client import (
+    DEFAULT_BATCH_REQUESTS_TIMEOUT,
+    File,
+    OpenCTIApiClient,
+)
 
 
 def test_batch_mutation_plan_captures_mutation_shape_and_result_tokens():
@@ -117,3 +123,23 @@ def test_batch_mutation_plan_tags_operations_with_execution_group_metadata():
         (0, 2, "indicator--1"),
         (1, 3, "relationship--1"),
     ]
+
+
+def test_batch_mutation_plan_uses_batch_specific_request_timeout():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        requests_timeout=300,
+    )
+    client.query = MagicMock(return_value={"data": {"batchMutationsExecute": {}}})
+    plan = BatchMutationPlan()
+    plan.capture(
+        "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+        {"input": {"stix_id": "indicator--1"}},
+        [],
+    )
+
+    client.execute_batch_mutation_plan(plan)
+
+    assert client.query.call_args.kwargs["request_timeout"] == DEFAULT_BATCH_REQUESTS_TIMEOUT

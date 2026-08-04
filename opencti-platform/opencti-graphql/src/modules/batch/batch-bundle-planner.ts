@@ -1,4 +1,5 @@
 import { STIX_EXT_OCTI } from '../../types/stix-2-1-extensions';
+import { isSupportedStixType } from '../../schema/identifier';
 
 export interface BatchBundleObjectNormalization {
   externalReferenceIndexes?: number[];
@@ -57,6 +58,18 @@ const getObjectInternalIds = (object: Record<string, any>): string[] => {
 const isReferenceKey = (key: string): boolean => key.endsWith('_ref') || key.endsWith('_refs');
 
 const isReferenceValue = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+
+const isSupportedStixId = (id: string): boolean => {
+  if (!id.includes('--')) {
+    return true;
+  }
+  const [rawType] = id.split('--');
+  if (!rawType.startsWith('x-mitre-') && !rawType.startsWith('x-opencti-')) {
+    return true;
+  }
+  const type = rawType.replace(/^x-mitre-/, '').replace(/^x-opencti-/, '');
+  return isSupportedStixType(type);
+};
 
 const toReferenceIds = (key: string, value: unknown): string[] => {
   if (!isReferenceKey(key) || value === null || value === undefined) {
@@ -198,9 +211,11 @@ const normalizeBundleObjects = (
         refs.filter(isReferenceValue).forEach((referenceId) => {
           const referenceCanonicalId = aliases.get(referenceId);
           const isMissingReference = referenceCanonicalId === undefined;
+          const isUnsupportedReference = !isSupportedStixId(referenceId);
           const referencedObjectRefs = referenceCanonicalId ? referenceGraph.get(referenceCanonicalId) : undefined;
           const isDependencyBackEdge = referencedObjectRefs?.includes(canonicalId) === true;
-          const shouldRetain = !(cleanupInconsistentBundle && isMissingReference)
+          const shouldRetain = !isUnsupportedReference
+            && !(cleanupInconsistentBundle && isMissingReference)
             && referenceCanonicalId !== canonicalId
             && !parentIds.includes(referenceCanonicalId ?? referenceId)
             && !isDependencyBackEdge;
@@ -220,9 +235,11 @@ const normalizeBundleObjects = (
         const referenceId = isReferenceValue(value) ? value : undefined;
         const referenceCanonicalId = referenceId ? aliases.get(referenceId) : undefined;
         const isMissingReference = referenceId !== undefined && referenceCanonicalId === undefined;
+        const isUnsupportedReference = referenceId !== undefined && !isSupportedStixId(referenceId);
         const referencedObjectRefs = referenceCanonicalId ? referenceGraph.get(referenceCanonicalId) : undefined;
         const isDependencyBackEdge = referencedObjectRefs?.includes(canonicalId) === true;
         const shouldRetain = referenceId !== undefined
+          && !isUnsupportedReference
           && !(cleanupInconsistentBundle && isMissingReference)
           && referenceCanonicalId !== canonicalId
           && !parentIds.includes(referenceCanonicalId ?? referenceId)
@@ -242,11 +259,11 @@ const normalizeBundleObjects = (
       }
     });
 
-    const isCompatible = object.type === 'relationship'
+    const isCompatible = isSupportedStixId(object.id) && (object.type === 'relationship'
       ? isReferenceValue(object.object.source_ref) && isReferenceValue(object.object.target_ref)
       : object.type === 'sighting'
         ? isReferenceValue(object.object.sighting_of_ref) && Array.isArray(object.object.where_sighted_refs) && object.object.where_sighted_refs.length > 0
-        : true;
+        : true);
     if (isCompatible) {
       enlistedObjectIds.add(canonicalId);
     } else {

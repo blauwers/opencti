@@ -83,6 +83,33 @@ describe('batch bundle planner', () => {
     expect(plan.executionPhases).toEqual([]);
   });
 
+  it('drops unsupported STIX ids and relations that point to them', () => {
+    const unsupportedId = 'x-mitre-detection-strategy--11111111-1111-4111-8111-111111111111';
+    const attackPatternId = 'attack-pattern--22222222-2222-4222-8222-222222222222';
+    const relationshipId = 'relationship--33333333-3333-4333-8333-333333333333';
+    const plan = planStixBundleObjects([
+      {
+        type: 'x-mitre-detection-strategy',
+        id: unsupportedId,
+      },
+      {
+        type: 'attack-pattern',
+        id: attackPatternId,
+      },
+      {
+        type: 'relationship',
+        id: relationshipId,
+        relationship_type: 'detects',
+        source_ref: unsupportedId,
+        target_ref: attackPatternId,
+      },
+    ]);
+
+    expect(plan.plannedObjectCount).toBe(1);
+    expect(plan.incompatibleObjectIds).toEqual([unsupportedId, relationshipId]);
+    expect(plan.executionPhases).toEqual([{ phase: 0, objectIds: [attackPatternId] }]);
+  });
+
   it('records backend-owned reference cleanup patches without rewriting the source bundle', () => {
     const indicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
     const source = {

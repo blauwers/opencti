@@ -194,7 +194,11 @@ import {
   registerBatchSideEffect,
   setBatchExecutionMetadata,
 } from '../modules/batch/batch-executor';
-import { getBatchEntityCreateCoordinatorHeldParticipantIds, resolveBatchEntityCreateLookup } from '../modules/batch/batch-entity-create-coordinator';
+import {
+  getBatchEntityCreateCoordinatorHeldParticipantIds,
+  resolveBatchEntityCreateLookup,
+  resolveBatchParticipantLock,
+} from '../modules/batch/batch-entity-create-coordinator';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
@@ -3531,7 +3535,13 @@ export const createRelationRaw = async (
   const participantIds = inputIds.filter((e) => !alreadyHeldLockIds.has(e));
   try {
     // Try to get the lock in redis
-    lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });
+    const coordinatedLock = resolveBatchParticipantLock({
+      draftId: getDraftContext(context, user),
+      participantIds,
+    });
+    lock = coordinatedLock
+      ? await coordinatedLock
+      : await lockResources(participantIds, { draftId: getDraftContext(context, user) });
     // region check existing relationship
     const existingRelationships = await getExistingRelations(context, user, resolvedInput, opts);
     let existingRelationship = null;

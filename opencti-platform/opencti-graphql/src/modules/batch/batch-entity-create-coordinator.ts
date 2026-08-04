@@ -26,6 +26,11 @@ export type BatchEntityCreateLookupResolution = {
   lock: BatchEntityCreateLock;
 };
 
+export type BatchParticipantLockInput = {
+  draftId?: string;
+  participantIds: string[];
+};
+
 type PendingBatchEntityCreateLookup = {
   groupId: number;
   input: BatchEntityCreateLookupInput;
@@ -35,6 +40,7 @@ type PendingBatchEntityCreateLookup = {
 
 type ReadyBatchEntityCreateLookup = {
   lookup: PendingBatchEntityCreateLookup;
+  participantIds: string[];
   resolution: BatchEntityCreateLookupResolution;
 };
 
@@ -69,6 +75,10 @@ export class BatchEntityCreateCoordinator {
 
   private readonly heldParticipantIdsByDraft = new Map<string, Set<string>>();
 
+  private readonly ownedParticipantIdsByGroup = new Map<number, Map<string, Set<string>>>();
+
+  private readonly reservedParticipantIdsByGroup = new Map<number, Map<string, Set<string>>>();
+
   private readonly pendingLookups = new Map<number, PendingBatchEntityCreateLookup>();
 
   private readonly readyLookups: ReadyBatchEntityCreateLookup[] = [];
@@ -88,8 +98,8 @@ export class BatchEntityCreateCoordinator {
     this.groupOrder.forEach((groupId) => this.groupStates.set(groupId, 'collecting'));
   }
 
-  getHeldParticipantIds(draftId?: string): string[] {
-    return Array.from(this.heldParticipantIdsByDraft.get(draftId ?? '') ?? []);
+  getHeldParticipantIds(groupId: number, draftId?: string): string[] {
+    return Array.from(this.ownedParticipantIdsByGroup.get(groupId)?.get(draftId ?? '') ?? []);
   }
 
   registerLookup(groupId: number, input: BatchEntityCreateLookupInput): Promise<BatchEntityCreateLookupResolution> {
@@ -101,6 +111,7 @@ export class BatchEntityCreateCoordinator {
     }
     if (this.groupStates.get(groupId) === 'active') {
       this.activeGroupCount -= 1;
+      this.reservedParticipantIdsByGroup.delete(groupId);
     }
     return new Promise<BatchEntityCreateLookupResolution>((resolve, reject) => {
       this.pendingLookups.set(groupId, {
@@ -124,6 +135,8 @@ export class BatchEntityCreateCoordinator {
       this.activeGroupCount -= 1;
     }
     this.groupStates.set(groupId, 'completed');
+    this.ownedParticipantIdsByGroup.delete(groupId);
+    this.reservedParticipantIdsByGroup.delete(groupId);
     this.releaseReadyLookups();
     this.scheduleFlushIfReady();
   }
@@ -185,14 +198,18 @@ export class BatchEntityCreateCoordinator {
     try {
       await this.acquireParticipantLocks(selectedLookups);
       const resolvedByType = await this.resolveDirectIdsByType(selectedLookups);
-      selectedLookups.forEach((lookup) => {
+      const readyLookups = selectedLookups.map((lookup) => {
         const expectedIds = new Set(lookup.input.finderIds);
         const existingByIds = (resolvedByType.get(lookup.input.type) ?? []).filter((element) => {
           return getInstanceIds(element).some((id) => expectedIds.has(id));
         });
-        this.groupStates.set(lookup.groupId, 'ready');
-        this.readyLookups.push({
+        const participantIds = normalizeIds([
+          ...lookup.input.participantIds,
+          ...existingByIds.flatMap((element) => getInstanceIds(element)),
+        ]);
+        return {
           lookup,
+          participantIds,
           resolution: {
             existingByIds,
             lock: {
@@ -200,7 +217,21 @@ export class BatchEntityCreateCoordinator {
               unlock: async () => undefined,
             },
           },
-        });
+        };
+      });
+      await this.acquireParticipantLocks(readyLookups.map(({ lookup, participantIds }) => ({
+        ...lookup,
+        input: {
+          ...lookup.input,
+          participantIds,
+        },
+      })));
+      readyLookups.forEach((readyLookup) => {
+        const { lookup, participantIds } = readyLookup;
+        this.addGroupOwnedParticipantIds(lookup.groupId, lookup.input.draftId, participantIds);
+        this.reserveGroupParticipantIds(lookup.groupId);
+        this.groupStates.set(lookup.groupId, 'ready');
+        this.readyLookups.push(readyLookup);
       });
       this.releaseReadyLookups();
     } catch (cause) {
@@ -216,14 +247,58 @@ export class BatchEntityCreateCoordinator {
       return;
     }
     while (this.activeGroupCount < this.maxActiveGroups && this.readyLookups.length > 0) {
-      const ready = this.readyLookups.shift();
-      if (!ready) {
+      const readyIndex = this.readyLookups.findIndex((readyLookup) => !this.hasReservedParticipantConflict(readyLookup.lookup.groupId));
+      if (readyIndex === -1) {
         return;
       }
+      const [ready] = this.readyLookups.splice(readyIndex, 1);
       this.groupStates.set(ready.lookup.groupId, 'active');
       this.activeGroupCount += 1;
       ready.lookup.resolve(ready.resolution);
     }
+  }
+
+  private addGroupOwnedParticipantIds(groupId: number, draftId: string | undefined, participantIds: string[]): void {
+    const draftKey = draftId ?? '';
+    const idsByDraft = this.ownedParticipantIdsByGroup.get(groupId) ?? new Map<string, Set<string>>();
+    const groupParticipantIds = idsByDraft.get(draftKey) ?? new Set<string>();
+    participantIds.forEach((id) => groupParticipantIds.add(id));
+    idsByDraft.set(draftKey, groupParticipantIds);
+    this.ownedParticipantIdsByGroup.set(groupId, idsByDraft);
+  }
+
+  private reserveGroupParticipantIds(groupId: number): void {
+    const ownedIdsByDraft = this.ownedParticipantIdsByGroup.get(groupId);
+    if (!ownedIdsByDraft) {
+      this.reservedParticipantIdsByGroup.delete(groupId);
+      return;
+    }
+    this.reservedParticipantIdsByGroup.set(groupId, new Map(
+      Array.from(ownedIdsByDraft.entries()).map(([draftKey, participantIds]) => [draftKey, new Set(participantIds)]),
+    ));
+  }
+
+  private hasReservedParticipantConflict(groupId: number): boolean {
+    const participantIdsByDraft = this.reservedParticipantIdsByGroup.get(groupId);
+    if (!participantIdsByDraft) {
+      return false;
+    }
+    for (const [otherGroupId, otherIdsByDraft] of this.reservedParticipantIdsByGroup.entries()) {
+      if (otherGroupId === groupId) {
+        continue;
+      }
+      const otherState = this.groupStates.get(otherGroupId);
+      if (otherState !== 'active') {
+        continue;
+      }
+      for (const [draftKey, participantIds] of participantIdsByDraft.entries()) {
+        const otherParticipantIds = otherIdsByDraft.get(draftKey);
+        if (otherParticipantIds && Array.from(participantIds).some((id) => otherParticipantIds.has(id))) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private async acquireParticipantLocks(lookups: PendingBatchEntityCreateLookup[]): Promise<void> {
@@ -260,6 +335,9 @@ export class BatchEntityCreateCoordinator {
   private async resolveDirectIdsByType(lookups: PendingBatchEntityCreateLookup[]): Promise<Map<string, BasicStoreObject[]>> {
     const idsByType = new Map<string, Set<string>>();
     lookups.forEach((lookup) => {
+      if (lookup.input.finderIds.length === 0) {
+        return;
+      }
       const typeIds = idsByType.get(lookup.input.type) ?? new Set<string>();
       lookup.input.finderIds.forEach((id) => typeIds.add(id));
       idsByType.set(lookup.input.type, typeIds);
@@ -301,7 +379,18 @@ export const resolveBatchEntityCreateLookup = (
   return scope?.coordinator.registerLookup(scope.groupId, input);
 };
 
+export const resolveBatchParticipantLock = (
+  input: BatchParticipantLockInput,
+): Promise<BatchEntityCreateLock> | undefined => {
+  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  return scope?.coordinator.registerLookup(scope.groupId, {
+    ...input,
+    finderIds: [],
+    type: '',
+  }).then((resolution) => resolution.lock);
+};
+
 export const getBatchEntityCreateCoordinatorHeldParticipantIds = (draftId?: string): string[] => {
   const scope = batchEntityCreateCoordinatorStorage.getStore();
-  return scope?.coordinator.getHeldParticipantIds(draftId) ?? [];
+  return scope?.coordinator.getHeldParticipantIds(scope.groupId, draftId) ?? [];
 };

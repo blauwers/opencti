@@ -862,17 +862,16 @@ const executeOperationGroupsWithConcurrency = async (
   }));
 };
 
-const isCoordinatedEntityCreateOperation = (operation: PreparedBatchGraphqlOperation): boolean => {
+const isCoordinatedAddOperation = (operation: PreparedBatchGraphqlOperation): boolean => {
   const fieldName = getTopLevelMutationFieldName(operation);
   return operation.objectId !== undefined
     && fieldName !== undefined
     && fieldName.endsWith('Add')
-    && !fieldName.includes('Relationship')
     && !fieldName.endsWith('RelationsAdd');
 };
 
-const containsCoordinatedEntityCreateOperation = (group: PreparedBatchGraphqlOperationGroup): boolean => {
-  return group.operations.some(isCoordinatedEntityCreateOperation);
+const containsCoordinatedAddOperation = (group: PreparedBatchGraphqlOperationGroup): boolean => {
+  return group.operations.some(isCoordinatedAddOperation);
 };
 
 const executeOperationGroupsWithEntityCreateCoordinator = async (
@@ -883,7 +882,11 @@ const executeOperationGroupsWithEntityCreateCoordinator = async (
   results: BatchGraphqlOperationResult[],
   state: BatchGraphqlOperationExecutionState,
 ): Promise<void> => {
-  const coordinator = new BatchEntityCreateCoordinator(context, groups.map((group) => group.groupId), BATCH_GRAPHQL_MAX_CONCURRENCY);
+  // Coordinated entity creates do not issue their Elasticsearch writes until the
+  // enclosing batch boundary commits. Releasing the full disjoint lookup wave
+  // lets request-local loaders resolve the phase set-wise instead of cycling a
+  // large bundle through the generic Elasticsearch concurrency cap.
+  const coordinator = new BatchEntityCreateCoordinator(context, groups.map((group) => group.groupId));
   let firstError: unknown;
   await Promise.all(groups.map(async (group) => {
     try {
@@ -939,8 +942,8 @@ const executeOperationGroups = async (
         runnableGroups.push(group);
       }
     });
-    const coordinatedGroups = runnableGroups.filter(containsCoordinatedEntityCreateOperation);
-    const remainingGroups = runnableGroups.filter((group) => !containsCoordinatedEntityCreateOperation(group));
+    const coordinatedGroups = runnableGroups.filter(containsCoordinatedAddOperation);
+    const remainingGroups = runnableGroups.filter((group) => !containsCoordinatedAddOperation(group));
     if (coordinatedGroups.length > 1) {
       await executeOperationGroupsWithEntityCreateCoordinator(schema, context, coordinatedGroups, resultBindings, results, state);
     } else if (coordinatedGroups.length === 1) {

@@ -89,6 +89,8 @@ from pycti.utils.opencti_logger import logger
 from pycti.utils.opencti_stix2 import OpenCTIStix2
 from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 
+DEFAULT_BATCH_REQUESTS_TIMEOUT = 900
+
 # Global singleton variables for proxy certificate management
 _PROXY_CERT_BUNDLE = None
 _PROXY_CERT_DIR = None
@@ -184,6 +186,8 @@ class OpenCTIApiClient:
     :type perform_health_check: bool, optional
     :param requests_timeout: define the timeout for API requests in seconds
     :type requests_timeout: int, optional
+    :param batch_requests_timeout: define the timeout for backend batch mutation requests in seconds
+    :type batch_requests_timeout: int, optional
     :param provider: define client provider, and is used to specify it in requests user agent header
     :type provider: string, optional
     """
@@ -201,6 +205,7 @@ class OpenCTIApiClient:
         custom_headers: Optional[str] = None,
         perform_health_check: bool = True,
         requests_timeout: int = 300,
+        batch_requests_timeout: Optional[int] = None,
         provider: Optional[str] = None,
     ):
         """Initialize the OpenCTIApiClient instance.
@@ -227,6 +232,8 @@ class OpenCTIApiClient:
         :type perform_health_check: bool
         :param requests_timeout: timeout for API requests in seconds (default: 300)
         :type requests_timeout: int
+        :param batch_requests_timeout: timeout for backend batch mutation requests in seconds (default: 900)
+        :type batch_requests_timeout: int or None
         :param provider: client provider for User-Agent header (format: provider/version)
         :type provider: str or None
 
@@ -269,6 +276,11 @@ class OpenCTIApiClient:
         )
         self.session = requests.session()
         self.session_requests_timeout = requests_timeout
+        self.session_batch_requests_timeout = (
+            batch_requests_timeout
+            if batch_requests_timeout is not None
+            else max(requests_timeout, DEFAULT_BATCH_REQUESTS_TIMEOUT)
+        )
         self._batch_mutation_plan = None
         # Define the dependencies
         self.work = OpenCTIApiWork(self)
@@ -639,7 +651,13 @@ class OpenCTIApiClient:
 
         return obj, []
 
-    def query(self, query, variables=None, disable_impersonate=False):
+    def query(
+        self,
+        query,
+        variables=None,
+        disable_impersonate=False,
+        request_timeout: Optional[int] = None,
+    ):
         """Submit a query to the OpenCTI GraphQL API.
 
         :param query: GraphQL query string
@@ -648,6 +666,8 @@ class OpenCTIApiClient:
         :type variables: dict, optional
         :param disable_impersonate: removes impersonate header if set to True, defaults to False
         :type disable_impersonate: bool, optional
+        :param request_timeout: timeout override for this request in seconds
+        :type request_timeout: int, optional
         :return: returns the response JSON content
         :rtype: dict
         :raises ValueError: if the API returns an error or non-200 status code
@@ -665,6 +685,11 @@ class OpenCTIApiClient:
             return self._batch_mutation_plan.capture(query, query_var, files_vars)
 
         query_headers = self.request_headers.copy()
+        effective_request_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else self.session_requests_timeout
+        )
         if disable_impersonate and "opencti-applicant-id" in query_headers:
             del query_headers["opencti-applicant-id"]
         # If yes, transform variable (file to null) and create multipart query
@@ -737,7 +762,7 @@ class OpenCTIApiClient:
                 verify=self.ssl_verify,
                 cert=self.cert,
                 proxies=self.proxies,
-                timeout=self.session_requests_timeout,
+                timeout=effective_request_timeout,
             )
         # If no
         else:
@@ -748,7 +773,7 @@ class OpenCTIApiClient:
                 verify=self.ssl_verify,
                 cert=self.cert,
                 proxies=self.proxies,
-                timeout=self.session_requests_timeout,
+                timeout=effective_request_timeout,
             )
         # Build response
         if r.status_code == 200:
@@ -831,6 +856,7 @@ class OpenCTIApiClient:
                 "operations": plan.operations,
                 "options": options or None,
             },
+            request_timeout=self.session_batch_requests_timeout,
         )
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):

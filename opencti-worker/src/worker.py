@@ -105,6 +105,13 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
             config,
             default=300,
         )
+        self.opencti_api_batch_requests_timeout = get_config_variable(
+            "OPENCTI_BATCH_REQUESTS_TIMEOUT",
+            ["opencti", "batch_requests_timeout"],
+            config,
+            True,
+            default=None,
+        )
         self.opencti_api_custom_headers = get_config_variable(
             "OPENCTI_CUSTOM_HEADERS",
             ["opencti", "custom_headers"],
@@ -186,6 +193,7 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
             perform_health_check=False,  # No need to prevent worker start if API is not available yet
             custom_headers=self.opencti_api_custom_headers,
             requests_timeout=self.opencti_api_requests_timeout,
+            batch_requests_timeout=self.opencti_api_batch_requests_timeout,
             provider="worker/" + __version__,
         )
         self.worker_logger = self.api.logger_class("worker")
