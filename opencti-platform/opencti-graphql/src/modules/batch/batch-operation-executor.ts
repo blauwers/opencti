@@ -13,13 +13,20 @@ import {
 } from 'graphql';
 import Upload from 'graphql-upload/Upload.mjs';
 import conf from '../../config/conf';
-import { FunctionalError } from '../../config/errors';
+import { FunctionalError, MISSING_REF_ERROR } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
 import { BatchEntityCreateCoordinator, runWithBatchEntityCreateCoordinator } from './batch-entity-create-coordinator';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
-import type { BatchGraphqlExecutionPlanInput, BatchGraphqlFileInput, BatchGraphqlOperationInput } from './batch-types';
+import { BatchExecutionMode, type BatchGraphqlExecutionPlanInput, type BatchGraphqlFileInput, type BatchGraphqlOperationInput } from './batch-types';
 
 type BatchGraphqlOperationResult = Record<string, unknown> | null | undefined;
+export type BatchGraphqlOperationError = {
+  code?: string;
+  message: string;
+  objectId?: string;
+  operationIndex: number;
+  retryable: boolean;
+};
 type BatchGraphqlResultBindings = Map<string, unknown>;
 type BatchGraphqlRequiredResultPaths = Map<number, Set<string>>;
 type BatchGraphqlRequiredResultPathNode = {
@@ -49,10 +56,23 @@ type BatchGraphqlExecutionOptions = BatchExecutionOptions & {
   bundlePlan?: BatchGraphqlExecutionPlanInput;
   pruneUnusedResultFields?: boolean;
 };
+type BatchGraphqlOperationExecution = {
+  operationErrors: BatchGraphqlOperationError[];
+  results: BatchGraphqlOperationResult[];
+};
+type BatchGraphqlExecutionResult = BatchExecutionResult<BatchGraphqlOperationResult> & {
+  operationErrors: BatchGraphqlOperationError[];
+};
+type BatchGraphqlOperationExecutionState = {
+  allowPartialFailures: boolean;
+  failedGroupIds: Set<number>;
+  operationErrors: BatchGraphqlOperationError[];
+};
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
+const BATCH_DEPENDENCY_FAILED_CODE = 'BATCH_DEPENDENCY_FAILED';
 
 export const buildBatchGraphqlResultToken = (operationIndex: number, path: string[]): string => {
   return `${BATCH_RESULT_TOKEN_PREFIX}:${operationIndex}:${path.join('.')}`;
@@ -492,6 +512,37 @@ const executeOperation = async (
   return result.data;
 };
 
+const buildRetryableOperationError = (
+  operation: PreparedBatchGraphqlOperation,
+  error: any,
+): BatchGraphqlOperationError | undefined => {
+  const operationErrors = error?.extensions?.data?.operation_errors;
+  if (!Array.isArray(operationErrors) || operationErrors.length === 0) {
+    return undefined;
+  }
+  const errorCodes = operationErrors.map((operationError) => operationError?.extensions?.code);
+  if (errorCodes.some((code) => code !== MISSING_REF_ERROR)) {
+    return undefined;
+  }
+  return {
+    code: MISSING_REF_ERROR,
+    message: error.message,
+    objectId: operation.objectId,
+    operationIndex: operation.operationIndex,
+    retryable: true,
+  };
+};
+
+const buildDependencyFailedOperationError = (
+  group: PreparedBatchGraphqlOperationGroup,
+): BatchGraphqlOperationError => ({
+  code: BATCH_DEPENDENCY_FAILED_CODE,
+  message: 'Batch GraphQL operation dependency failed',
+  objectId: group.operations[0]?.objectId,
+  operationIndex: group.operations[0]?.operationIndex ?? 0,
+  retryable: true,
+});
+
 const prepareBatchGraphqlOperations = (
   schema: GraphQLSchema,
   operations: BatchGraphqlOperationInput[],
@@ -762,9 +813,24 @@ const executeOperationGroup = async (
   group: PreparedBatchGraphqlOperationGroup,
   resultBindings: BatchGraphqlResultBindings,
   results: BatchGraphqlOperationResult[],
+  state: BatchGraphqlOperationExecutionState,
 ): Promise<void> => {
-  for (const operation of group.operations) {
-    results[operation.operationIndex] = await executeOperation(schema, context, operation, resultBindings);
+  for (let index = 0; index < group.operations.length; index += 1) {
+    const operation = group.operations[index];
+    try {
+      results[operation.operationIndex] = await executeOperation(schema, context, operation, resultBindings);
+    } catch (error) {
+      const operationError = state.allowPartialFailures ? buildRetryableOperationError(operation, error) : undefined;
+      if (!operationError) {
+        throw error;
+      }
+      state.failedGroupIds.add(group.groupId);
+      state.operationErrors.push(operationError);
+      group.operations.slice(index).forEach((remainingOperation) => {
+        results[remainingOperation.operationIndex] = null;
+      });
+      return;
+    }
   }
 };
 
@@ -774,6 +840,7 @@ const executeOperationGroupsWithConcurrency = async (
   groups: PreparedBatchGraphqlOperationGroup[],
   resultBindings: BatchGraphqlResultBindings,
   results: BatchGraphqlOperationResult[],
+  state: BatchGraphqlOperationExecutionState,
 ): Promise<void> => {
   let nextGroupIndex = 0;
   const workerCount = Math.min(BATCH_GRAPHQL_MAX_CONCURRENCY, groups.length);
@@ -782,7 +849,7 @@ const executeOperationGroupsWithConcurrency = async (
     while (nextGroupIndex < groups.length) {
       const groupIndex = nextGroupIndex;
       nextGroupIndex += 1;
-      await executeOperationGroup(schema, context, groups[groupIndex], resultBindings, results);
+      await executeOperationGroup(schema, context, groups[groupIndex], resultBindings, results, state);
     }
   }));
 };
@@ -806,6 +873,7 @@ const executeOperationGroupsWithEntityCreateCoordinator = async (
   groups: PreparedBatchGraphqlOperationGroup[],
   resultBindings: BatchGraphqlResultBindings,
   results: BatchGraphqlOperationResult[],
+  state: BatchGraphqlOperationExecutionState,
 ): Promise<void> => {
   const coordinator = new BatchEntityCreateCoordinator(context, groups.map((group) => group.groupId), BATCH_GRAPHQL_MAX_CONCURRENCY);
   let firstError: unknown;
@@ -814,7 +882,7 @@ const executeOperationGroupsWithEntityCreateCoordinator = async (
       await runWithBatchEntityCreateCoordinator(
         coordinator,
         group.groupId,
-        () => executeOperationGroup(schema, context, group, resultBindings, results),
+        () => executeOperationGroup(schema, context, group, resultBindings, results, state),
       );
     } catch (error) {
       firstError ??= error;
@@ -832,7 +900,8 @@ const executeOperationGroups = async (
   operations: PreparedBatchGraphqlOperation[],
   resultBindings: BatchGraphqlResultBindings,
   bundlePlan: BatchGraphqlExecutionPlanInput | undefined,
-): Promise<BatchGraphqlOperationResult[]> => {
+  allowPartialFailures: boolean,
+): Promise<BatchGraphqlOperationExecution> => {
   const groups = buildOperationGroups(operations, bundlePlan);
   const groupsByPhase = new Map<number, PreparedBatchGraphqlOperationGroup[]>();
   groups.forEach((group) => {
@@ -841,16 +910,37 @@ const executeOperationGroups = async (
     groupsByPhase.set(group.executionPhase, phaseGroups);
   });
   const results = new Array<BatchGraphqlOperationResult>(operations.length);
+  const state: BatchGraphqlOperationExecutionState = {
+    allowPartialFailures,
+    failedGroupIds: new Set(),
+    operationErrors: [],
+  };
   const phases = Array.from(groupsByPhase.keys()).sort((left, right) => left - right);
   for (const phase of phases) {
     const phaseGroups = groupsByPhase.get(phase) ?? [];
-    if (canCoordinateEntityCreatePhase(phaseGroups)) {
-      await executeOperationGroupsWithEntityCreateCoordinator(schema, context, phaseGroups, resultBindings, results);
+    const runnableGroups: PreparedBatchGraphqlOperationGroup[] = [];
+    phaseGroups.forEach((group) => {
+      const hasFailedDependency = Array.from(group.dependencyGroupIds).some((dependencyGroupId) => state.failedGroupIds.has(dependencyGroupId));
+      if (hasFailedDependency) {
+        state.failedGroupIds.add(group.groupId);
+        state.operationErrors.push(buildDependencyFailedOperationError(group));
+        group.operations.forEach((operation) => {
+          results[operation.operationIndex] = null;
+        });
+      } else {
+        runnableGroups.push(group);
+      }
+    });
+    if (canCoordinateEntityCreatePhase(runnableGroups)) {
+      await executeOperationGroupsWithEntityCreateCoordinator(schema, context, runnableGroups, resultBindings, results, state);
     } else {
-      await executeOperationGroupsWithConcurrency(schema, context, phaseGroups, resultBindings, results);
+      await executeOperationGroupsWithConcurrency(schema, context, runnableGroups, resultBindings, results, state);
     }
   }
-  return results;
+  return {
+    operationErrors: state.operationErrors.sort((left, right) => left.operationIndex - right.operationIndex),
+    results,
+  };
 };
 
 export const executeBatchGraphqlOperations = async (
@@ -858,18 +948,26 @@ export const executeBatchGraphqlOperations = async (
   context: AuthContext,
   operations: BatchGraphqlOperationInput[],
   options: BatchGraphqlExecutionOptions = {},
-): Promise<BatchExecutionResult<BatchGraphqlOperationResult>> => {
+): Promise<BatchGraphqlExecutionResult> => {
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
   const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
   const resultBindings: BatchGraphqlResultBindings = new Map();
-  const execution = await executeBatchMutations<BatchGraphqlOperationResult[]>([{
+  const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
     kind: BatchMutationKind.GraphqlOperation,
-    executeWrite: () => executeOperationGroups(schema, context, preparedOperations, resultBindings, options.bundlePlan),
+    executeWrite: () => executeOperationGroups(
+      schema,
+      context,
+      preparedOperations,
+      resultBindings,
+      options.bundlePlan,
+      options.executionMode !== BatchExecutionMode.Atomic,
+    ),
   }], options);
   return {
     ...execution,
-    results: execution.results[0],
+    operationErrors: execution.results[0].operationErrors,
+    results: execution.results[0].results,
   };
 };

@@ -5,8 +5,12 @@ from unittest.mock import MagicMock
 from src import push_handler
 from src.push_handler import (
     PushHandler,
+    batch_replay_count,
     build_batch_expectation_error,
+    should_dead_letter_rejected_item,
     should_add_legacy_default_split_expectations,
+    should_replay_intact_bundle,
+    should_replay_rejected_item,
     should_report_batch_expectation,
     should_split_bundles,
 )
@@ -100,6 +104,26 @@ def test_new_unsplit_messages_report_one_batch_expectation():
         "error": "1 element(s) failed during batch import",
         "source": "Bundle bundle--1",
     }
+    assert should_dead_letter_rejected_item({"id": "indicator--1"}) is False
+    assert (
+        should_dead_letter_rejected_item(
+            {"id": "indicator--1", "rejection_info": {"reject_reason": "MAX_RETRY"}}
+        )
+        is True
+    )
+    retryable_item = {
+        "id": "relationship--1",
+        "rejection_info": {
+            "reject_reason": "MISSING_REFERENCE",
+            "retryable": True,
+        },
+    }
+    assert should_replay_rejected_item(retryable_item) is True
+    assert should_dead_letter_rejected_item(retryable_item) is False
+    assert batch_replay_count({"batch_replay_count": 2}) == 2
+    assert batch_replay_count({"batch_replay_count": "2"}) == 0
+    assert should_replay_intact_bundle({}, [retryable_item]) is True
+    assert should_replay_intact_bundle({"batch_replay_count": 4}, [retryable_item]) is False
 
 
 def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch):
@@ -154,6 +178,85 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
         == "COMMITTED"
     )
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+
+
+def test_handler_republishes_intact_bundle_for_retryable_batch_failures(monkeypatch):
+    handler = build_handler()
+    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [],
+        [
+            {
+                "id": "relationship--1",
+                "rejection_info": {
+                    "reject_reason": "MISSING_REFERENCE",
+                    "retryable": True,
+                },
+            }
+        ],
+    )
+
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(split_bundles=False, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.api.work.report_expectation.assert_not_called()
+    handler.send_bundle_to_specific_queue.assert_called_once()
+    replay_call = handler.send_bundle_to_specific_queue.call_args.args
+    assert replay_call[0] is channel
+    assert replay_call[1] == "push-exchange"
+    assert replay_call[2] == "push-routing"
+    assert replay_call[3]["batch_replay_count"] == 1
+    assert replay_call[4]["id"] == "bundle--11111111-1111-4111-8111-111111111111"
+    handler.api.set_retry_number.assert_any_call(None)
+
+
+def test_handler_reports_retryable_batch_failure_after_replay_budget(monkeypatch):
+    handler = build_handler()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [],
+        [
+            {
+                "id": "relationship--1",
+                "rejection_info": {
+                    "reject_reason": "MISSING_REFERENCE",
+                    "retryable": True,
+                },
+            }
+        ],
+    )
+
+    def fail_republish(*args, **kwargs):
+        raise AssertionError("exhausted retries must not republish the bundle")
+
+    monkeypatch.setattr(push_handler.pika, "BlockingConnection", fail_republish)
+
+    result = handler.handle_message(
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            batch_replay_count=4,
+        )
+    )
+
+    assert result == "ack"
+    handler.api.work.report_expectation.assert_called_once_with(
+        "work--1",
+        {
+            "error": "1 element(s) failed during batch import",
+            "source": "Bundle bundle--11111111-1111-4111-8111-111111111111",
+        },
+    )
+    handler.api.set_retry_number.assert_any_call(4)
 
 
 def test_handler_forwards_backend_batch_plan_to_batch_importer():

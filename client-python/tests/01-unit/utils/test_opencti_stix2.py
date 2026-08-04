@@ -350,6 +350,59 @@ def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
     )
 
 
+def test_import_bundle_batch_returns_retryable_missing_reference_items(monkeypatch) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    plan = BatchMutationPlan()
+
+    @contextmanager
+    def batch_mutation_plan():
+        yield plan
+
+    def fake_import_bundle(*args, **kwargs):
+        batch_plan = kwargs["batch_plan"]
+        with batch_plan.execution_group(0, "relationship--1"):
+            batch_plan.capture(
+                "mutation Record($value: String!) { record(value: $value) }",
+                {"value": "relationship--1"},
+                [],
+            )
+        return ([{"id": "relationship--1", "type": "relationship"}], [])
+
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    opencti.execute_batch_mutation_plan.return_value = {
+        "data": {
+            "batchMutationsExecute": {
+                "operation_errors": [
+                    {"object_id": "relationship--1", "retryable": True}
+                ]
+            }
+        }
+    }
+    monkeypatch.setattr(opencti_stix2, "import_bundle", fake_import_bundle)
+    imported, rejected = opencti_stix2.import_bundle_from_json_batch(
+        '{"type":"bundle","id":"bundle--1","objects":[{"type":"relationship","id":"relationship--1"}]}',
+        execution_mode="BULK",
+    )
+
+    assert imported == []
+    assert rejected == [
+        {
+            "type": "relationship",
+            "id": "relationship--1",
+            "rejection_info": {
+                "reject_reason": "MISSING_REFERENCE",
+                "retryable": True,
+            },
+        }
+    ]
+    opencti.execute_batch_mutation_plan.assert_called_once_with(
+        plan,
+        execution_mode="BULK",
+        wait_until=None,
+    )
+
+
 def test_import_bundle_batch_tags_item_mutations_with_dependency_phases(
     monkeypatch,
 ) -> None:

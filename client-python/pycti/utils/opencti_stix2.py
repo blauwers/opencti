@@ -54,6 +54,7 @@ UTC = getattr(datetime, "UTC", datetime.timezone.utc)
 SPEC_VERSION = "2.1"
 ERROR_TYPE_LOCK = "LOCK_ERROR"
 ERROR_TYPE_MISSING_REFERENCE = "MISSING_REFERENCE_ERROR"
+BATCH_RETRYABLE_REJECTION_REASON = "MISSING_REFERENCE"
 ERROR_TYPE_BAD_GATEWAY = "Bad Gateway"
 ERROR_TYPE_DRAFT_LOCK = "DRAFT_LOCKED"
 ERROR_TYPE_WORK_NOT_ALIVE = "WORK_NOT_ALIVE"
@@ -471,8 +472,51 @@ class OpenCTIStix2:
         }
         if backend_batch_plan is not None:
             execute_kwargs["backend_batch_plan"] = backend_batch_plan
-        self.opencti.execute_batch_mutation_plan(plan, **execute_kwargs)
-        return imported, rejected
+        execution_result = self.opencti.execute_batch_mutation_plan(
+            plan, **execute_kwargs
+        )
+        failed_object_ids = self._batch_retryable_object_ids(execution_result)
+        if len(failed_object_ids) == 0:
+            return imported, rejected
+
+        successful_imports = [
+            item for item in imported if item.get("id") not in failed_object_ids
+        ]
+        rejected_ids = {
+            item.get("id") for item in rejected if isinstance(item, dict)
+        }
+        failed_items = []
+        for item in data.get("objects", []):
+            if (
+                isinstance(item, dict)
+                and item.get("id") in failed_object_ids
+                and item.get("id") not in rejected_ids
+            ):
+                failed_item = deepcopy(item)
+                failed_item["rejection_info"] = {
+                    "reject_reason": BATCH_RETRYABLE_REJECTION_REASON,
+                    "retryable": True,
+                }
+                failed_items.append(failed_item)
+        return successful_imports, [*rejected, *failed_items]
+
+    @staticmethod
+    def _batch_retryable_object_ids(execution_result: Any) -> set[str]:
+        if not isinstance(execution_result, dict):
+            return set()
+        execution = execution_result.get("data", {}).get("batchMutationsExecute", {})
+        if not isinstance(execution, dict):
+            return set()
+        operation_errors = execution.get("operation_errors", [])
+        if not isinstance(operation_errors, list):
+            return set()
+        return {
+            operation_error["object_id"]
+            for operation_error in operation_errors
+            if isinstance(operation_error, dict)
+            and operation_error.get("retryable") is True
+            and isinstance(operation_error.get("object_id"), str)
+        }
 
     def resolve_author(self, title: str) -> Optional[Identity]:
         """Resolve an author identity from a title string.

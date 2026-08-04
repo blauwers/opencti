@@ -2186,8 +2186,18 @@ export type BatchMutationExecution = {
   execution_mode: BatchExecutionMode;
   materialized: Scalars['Boolean']['output'];
   operation_count: Scalars['Int']['output'];
+  operation_errors: Array<BatchMutationOperationError>;
   side_effect_kinds: Array<Scalars['String']['output']>;
   wait_until: BatchWaitUntil;
+};
+
+export type BatchMutationOperationError = {
+  __typename?: 'BatchMutationOperationError';
+  code?: Maybe<Scalars['String']['output']>;
+  message: Scalars['String']['output'];
+  object_id?: Maybe<Scalars['String']['output']>;
+  operation_index: Scalars['Int']['output'];
+  retryable: Scalars['Boolean']['output'];
 };
 
 export type BatchSubmitOptionsInput = {
@@ -39804,6 +39814,7 @@ export type ResolversTypes = ResolversObject<{
   BatchGraphqlFileInput: BatchGraphqlFileInput;
   BatchGraphqlOperationInput: BatchGraphqlOperationInput;
   BatchMutationExecution: ResolverTypeWrapper<BatchMutationExecution>;
+  BatchMutationOperationError: ResolverTypeWrapper<BatchMutationOperationError>;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;
   BatchWaitUntil: BatchWaitUntil;
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
@@ -40958,6 +40969,7 @@ export type ResolversParentTypes = ResolversObject<{
   BatchGraphqlFileInput: BatchGraphqlFileInput;
   BatchGraphqlOperationInput: BatchGraphqlOperationInput;
   BatchMutationExecution: BatchMutationExecution;
+  BatchMutationOperationError: BatchMutationOperationError;
   BatchSubmitOptionsInput: BatchSubmitOptionsInput;
   Boolean: Scalars['Boolean']['output'];
   CSVFeedAddInputFromImport: CsvFeedAddInputFromImport;
@@ -42630,8 +42642,17 @@ export type BatchMutationExecutionResolvers<ContextType = any, ParentType extend
   execution_mode?: Resolver<ResolversTypes['BatchExecutionMode'], ParentType, ContextType>;
   materialized?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
   operation_count?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  operation_errors?: Resolver<Array<ResolversTypes['BatchMutationOperationError']>, ParentType, ContextType>;
   side_effect_kinds?: Resolver<Array<ResolversTypes['String']>, ParentType, ContextType>;
   wait_until?: Resolver<ResolversTypes['BatchWaitUntil'], ParentType, ContextType>;
+}>;
+
+export type BatchMutationOperationErrorResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchMutationOperationError'] = ResolversParentTypes['BatchMutationOperationError']> = ResolversObject<{
+  code?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  message?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  object_id?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  operation_index?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  retryable?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
 }>;
 
 export type CsvFeedAddInputFromImportResolvers<ContextType = any, ParentType extends ResolversParentTypes['CSVFeedAddInputFromImport'] = ResolversParentTypes['CSVFeedAddInputFromImport']> = ResolversObject<{
@@ -53711,6 +53732,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   BasicRelationship?: BasicRelationshipResolvers<ContextType>;
   BatchAdmission?: BatchAdmissionResolvers<ContextType>;
   BatchMutationExecution?: BatchMutationExecutionResolvers<ContextType>;
+  BatchMutationOperationError?: BatchMutationOperationErrorResolvers<ContextType>;
   CSVFeedAddInputFromImport?: CsvFeedAddInputFromImportResolvers<ContextType>;
   Campaign?: CampaignResolvers<ContextType>;
   CampaignConnection?: CampaignConnectionResolvers<ContextType>;

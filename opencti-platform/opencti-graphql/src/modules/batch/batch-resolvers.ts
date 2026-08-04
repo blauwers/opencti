@@ -118,9 +118,14 @@ const batchResolvers = {
   },
   BatchMutationExecution: {
     operation_count: (execution: any) => execution.results.length,
+    operation_errors: (execution: any) => execution.operationErrors,
     execution_mode: (execution: any) => execution.executionMode,
     wait_until: (execution: any) => execution.waitUntil,
     side_effect_kinds: (execution: any) => execution.sideEffectKinds,
+  },
+  BatchMutationOperationError: {
+    operation_index: (operationError: any) => operationError.operationIndex,
+    object_id: (operationError: any) => operationError.objectId,
   },
 };
 

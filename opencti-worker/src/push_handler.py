@@ -11,6 +11,11 @@ from pika.exceptions import NackError, UnroutableError
 from pycti import OpenCTIApiClient, OpenCTIStix2Splitter, __version__
 
 
+BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
+BATCH_REPLAY_LIMIT = 4
+BATCH_RETRYABLE_REJECTION_REASON = "MISSING_REFERENCE"
+
+
 def should_split_bundles(data: Dict[str, Any], content: Dict[str, Any]) -> bool:
     return len(content["objects"]) > 1 and data.get("split_bundles") is True
 
@@ -40,6 +45,36 @@ def build_batch_expectation_error(
         "error": f"{len(rejected_items)} element(s) failed during batch import",
         "source": f"Bundle {content.get('id', 'unknown')}",
     }
+
+
+def should_dead_letter_rejected_item(item: Dict[str, Any]) -> bool:
+    rejection_info = item.get("rejection_info")
+    return isinstance(rejection_info, dict) and not (
+        rejection_info.get("reject_reason") == BATCH_RETRYABLE_REJECTION_REASON
+        and rejection_info.get("retryable") is True
+    )
+
+
+def should_replay_rejected_item(item: Dict[str, Any]) -> bool:
+    rejection_info = item.get("rejection_info")
+    return isinstance(rejection_info, dict) and (
+        rejection_info.get("reject_reason") == BATCH_RETRYABLE_REJECTION_REASON
+        and rejection_info.get("retryable") is True
+    )
+
+
+def batch_replay_count(data: Dict[str, Any]) -> int:
+    count = data.get(BATCH_REPLAY_COUNT_KEY)
+    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
+
+
+def should_replay_intact_bundle(
+    data: Dict[str, Any], rejected_items: List[Dict[str, Any]]
+) -> bool:
+    return (
+        batch_replay_count(data) < BATCH_REPLAY_LIMIT
+        and any(should_replay_rejected_item(item) for item in rejected_items)
+    )
 
 
 @dataclass(unsafe_hash=True)
@@ -137,6 +172,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             self.api.set_synchronized_upsert_header(data.get("synchronized", False))
             self.api.set_previous_standard_header(data.get("previous_standard"))
             self.api.set_batch_wait_until(data.get("batch_wait_until"))
+            replay_count = batch_replay_count(data)
+            self.api.set_retry_number(replay_count if replay_count > 0 else None)
             work_id = data.get("work_id")
             self.api.set_work_id(work_id)
 
@@ -191,14 +228,22 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         data.get("cleanup_inconsistent_bundle", False),
                         **import_kwargs,
                     )
-                    if report_batch_expectation:
-                        self.api.work.report_expectation(
-                            work_id,
-                            build_batch_expectation_error(
-                                content, too_large_items_bundles
-                            ),
+                    if should_replay_intact_bundle(data, too_large_items_bundles):
+                        next_replay_count = replay_count + 1
+                        self.logger.warning(
+                            "Deferring intact bundle replay for missing references",
+                            {
+                                "bundle_id": content.get("id"),
+                                "count": sum(
+                                    1
+                                    for item in too_large_items_bundles
+                                    if should_replay_rejected_item(item)
+                                ),
+                                "retry_number": next_replay_count,
+                            },
                         )
-                    if len(too_large_items_bundles) > 0:
+                        replay_data = dict(data)
+                        replay_data[BATCH_REPLAY_COUNT_KEY] = next_replay_count
                         with pika.BlockingConnection(
                             self.pika_parameters
                         ) as push_pika_connection:
@@ -207,7 +252,37 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                     push_channel.confirm_delivery()
                                 except Exception as err:  # pylint: disable=broad-except
                                     self.logger.warning(str(err))
-                                for too_large_item_bundle in too_large_items_bundles:
+                                self.send_bundle_to_specific_queue(
+                                    push_channel,
+                                    self.push_exchange,
+                                    self.push_routing,
+                                    replay_data,
+                                    content,
+                                )
+                        imported_items = []
+                        return "ack"
+                    if report_batch_expectation:
+                        self.api.work.report_expectation(
+                            work_id,
+                            build_batch_expectation_error(
+                                content, too_large_items_bundles
+                            ),
+                        )
+                    dead_letter_items = [
+                        item
+                        for item in too_large_items_bundles
+                        if should_dead_letter_rejected_item(item)
+                    ]
+                    if len(dead_letter_items) > 0:
+                        with pika.BlockingConnection(
+                            self.pika_parameters
+                        ) as push_pika_connection:
+                            with push_pika_connection.channel() as push_channel:
+                                try:
+                                    push_channel.confirm_delivery()
+                                except Exception as err:  # pylint: disable=broad-except
+                                    self.logger.warning(str(err))
+                                for too_large_item_bundle in dead_letter_items:
                                     rejection_info = too_large_item_bundle.setdefault(
                                         "rejection_info", {}
                                     )
@@ -338,6 +413,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             # Nack message and discard
             return "nack"
         finally:
+            self.api.set_retry_number(None)
             self.bundles_global_counter.add(len(imported_items))
             processing_delta = datetime.datetime.now() - start_processing
             self.bundles_processing_time_gauge.record(processing_delta.seconds)

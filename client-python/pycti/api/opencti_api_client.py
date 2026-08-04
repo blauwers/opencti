@@ -801,6 +801,13 @@ class OpenCTIApiClient:
             mutation BatchMutationsExecute($operations: [BatchGraphqlOperationInput!]!, $options: BatchExecuteOptionsInput) {
                 batchMutationsExecute(operations: $operations, options: $options) {
                     operation_count
+                    operation_errors {
+                        operation_index
+                        object_id
+                        code
+                        message
+                        retryable
+                    }
                     execution_mode
                     wait_until
                     side_effect_kinds

@@ -88,10 +88,19 @@ type BatchAdmission {
 
 type BatchMutationExecution {
   operation_count: Int!
+  operation_errors: [BatchMutationOperationError!]!
   execution_mode: BatchExecutionMode!
   wait_until: BatchWaitUntil!
   side_effect_kinds: [String!]!
   materialized: Boolean!
+}
+
+type BatchMutationOperationError {
+  operation_index: Int!
+  object_id: String
+  code: String
+  message: String!
+  retryable: Boolean!
 }
 
 type Mutation {
