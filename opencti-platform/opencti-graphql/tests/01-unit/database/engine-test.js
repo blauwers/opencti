@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
+import { buildBufferedConnectionProjectionActions, buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 import { INDEX_STIX_CORE_RELATIONSHIPS } from '../../../src/database/utils';
 
@@ -751,6 +751,63 @@ describe('materializeBufferedEngineBulkActions testing', () => {
         },
       ],
     }]);
+  });
+
+  it('plans one buffered relationship projection action only for untouched changed relations', () => {
+    const relationshipIndex = `${INDEX_STIX_CORE_RELATIONSHIPS}-000001`;
+    const touchedAction = {
+      context: {},
+      refresh: true,
+      body: [
+        { index: { _index: relationshipIndex, _id: 'relationship--1', retry_on_conflict: 30 } },
+        { base_type: 'RELATION', internal_id: 'relationship--1' },
+      ],
+    };
+    const relations = [
+      {
+        _id: 'relationship--1',
+        _index: relationshipIndex,
+        base_type: 'RELATION',
+        connections: [{ internal_id: 'entity--1', name: 'stale' }],
+        internal_id: 'relationship--1',
+      },
+      {
+        _id: 'relationship--2',
+        _index: relationshipIndex,
+        base_type: 'RELATION',
+        connections: [{ internal_id: 'entity--1', name: 'current' }],
+        internal_id: 'relationship--2',
+      },
+      {
+        _id: 'relationship--3',
+        _index: relationshipIndex,
+        base_type: 'RELATION',
+        connections: [
+          { internal_id: 'entity--1', name: 'stale' },
+          { internal_id: 'entity--2', name: 'untouched' },
+        ],
+        internal_id: 'relationship--3',
+      },
+    ];
+
+    const actions = buildBufferedConnectionProjectionActions({}, [touchedAction], relations, new Map([
+      ['entity--1', { documentBody: { name: 'current' }, documentId: 'entity--1' }],
+    ]));
+
+    expect(actions).toHaveLength(1);
+    expect(actions[0].body[0]).toEqual({
+      update: { _index: relationshipIndex, _id: 'relationship--3', retry_on_conflict: 30 },
+    });
+    expect(actions[0].body[1].script.params.changesById).toEqual({
+      'entity--1': { name: 'current' },
+    });
+    expect(actions[0].applyToDocument(relations[2])).toEqual({
+      ...relations[2],
+      connections: [
+        { internal_id: 'entity--1', name: 'current' },
+        { internal_id: 'entity--2', name: 'untouched' },
+      ],
+    });
   });
 
   it('materializes single relationship updates when buffered projections restore the final document state', () => {

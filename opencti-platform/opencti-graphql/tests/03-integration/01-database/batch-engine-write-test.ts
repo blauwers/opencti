@@ -969,7 +969,7 @@ describe('batch engine writes', () => {
       },
     ]);
 
-    expect(projectionExecution.sideEffectKinds.filter((kind) => kind === BatchSideEffectKind.CompatibilityProjection)).toHaveLength(1);
+    expect(projectionExecution.sideEffectKinds.filter((kind) => kind === BatchSideEffectKind.CompatibilityProjection)).toHaveLength(0);
     const projectedRelation = await waitForDocumentSource(relation, (document) => {
       const sourceConnection = document.connections.find((connection: any) => connection.internal_id === source.internal_id);
       const targetConnection = document.connections.find((connection: any) => connection.internal_id === replacementTarget.internal_id);
@@ -978,6 +978,27 @@ describe('batch engine writes', () => {
     expect(projectedRelation.connections.find((connection: any) => connection.internal_id === source.internal_id)?.name).toBe(source.name);
     expect(projectedRelation.connections.find((connection: any) => connection.internal_id === replacementTarget.internal_id)?.name).toBe(replacementTarget.name);
     expect(await loadDocumentVersion(relation)).toBe(projectionVersionBefore);
+    const historicalProjectionVersionBefore = await loadDocumentVersion(relation);
+    const historicalProjectionName = `${source.name} renamed`;
+    const historicalProjectionExecution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: source._id,
+            _index: source._index,
+            entity_type: source.entity_type,
+            internal_id: source.internal_id,
+            name: historicalProjectionName,
+          } as any);
+          return null;
+        },
+      },
+    ]);
+    expect(historicalProjectionExecution.sideEffectKinds.filter((kind) => kind === BatchSideEffectKind.CompatibilityProjection)).toHaveLength(0);
+    const historicalProjectedRelation = await loadDocumentSource(relation);
+    expect(historicalProjectedRelation.connections.find((connection: any) => connection.internal_id === source.internal_id)?.name).toBe(historicalProjectionName);
+    expect(await loadDocumentVersion(relation)).toBe(historicalProjectionVersionBefore + 1);
   });
 
   it('skips direct relation connection rewrites when the projected connection is unchanged', async () => {

@@ -315,7 +315,6 @@ type BufferedConnectionProjection = {
 
 type BufferedConnectionProjectionState = {
   projections: Map<string, BufferedConnectionProjection>;
-  sideEffectRegistered: boolean;
 };
 
 const applyBufferedConnectionProjections = (
@@ -338,6 +337,23 @@ const applyBufferedConnectionProjections = (
     return projected;
   });
   return changed ? { ...document, connections } : document;
+};
+
+const getBufferedConnectionProjectionsForDocument = (
+  document: Record<string, any>,
+  projections: Map<string, BufferedConnectionProjection>,
+): Map<string, BufferedConnectionProjection> => {
+  if (document.base_type !== BASE_TYPE_RELATION || !Array.isArray(document.connections) || projections.size === 0) {
+    return new Map();
+  }
+  const matchingProjections = new Map<string, BufferedConnectionProjection>();
+  document.connections.forEach((connection: Record<string, any>) => {
+    const projection = projections.get(connection.internal_id);
+    if (projection) {
+      matchingProjections.set(connection.internal_id, projection);
+    }
+  });
+  return matchingProjections;
 };
 
 type BufferedEngineBulkMetric = {
@@ -6728,11 +6744,98 @@ const replanBufferedEngineVersionConflicts = async (
   });
 };
 
+export const buildBufferedConnectionProjectionActions = (
+  context: AuthContext,
+  actions: BufferedEngineBulkAction[],
+  relations: BasicStoreRelation[],
+  projections: Map<string, BufferedConnectionProjection>,
+): BufferedEngineBulkAction[] => {
+  if (projections.size === 0 || relations.length === 0) {
+    return [];
+  }
+  const existingActionKeys = new Set(actions.flatMap((action) => {
+    const descriptor = parseBufferedEngineBulkAction(action);
+    return descriptor ? [buildBufferedEngineBulkActionKey(descriptor)] : [];
+  }));
+  const source = buildBufferedConnectionProjectionScript();
+  return relations.flatMap((relation) => {
+    const documentId = relation._id ?? relation.internal_id;
+    const key = `${relation._index}:${documentId}`;
+    if (existingActionKeys.has(key)) {
+      return [];
+    }
+    const matchingProjections = getBufferedConnectionProjectionsForDocument(relation, projections);
+    if (matchingProjections.size === 0 || applyBufferedConnectionProjections(relation, matchingProjections) === relation) {
+      return [];
+    }
+    const changesById = Object.fromEntries(
+      Array.from(matchingProjections.values()).map((projection) => [projection.documentId, projection.documentBody]),
+    );
+    return [{
+      context,
+      refresh: true,
+      body: [
+        { update: { _index: relation._index, _id: documentId, retry_on_conflict: ES_RETRY_ON_CONFLICT } },
+        { script: { source, params: { changesById } } },
+      ],
+      applyToDocument: (existing) => applyBufferedConnectionProjections(existing, matchingProjections),
+    }];
+  });
+};
+
+const loadBufferedConnectionProjectionRelations = async (
+  context: AuthContext,
+  projections: Map<string, BufferedConnectionProjection>,
+): Promise<BasicStoreRelation[]> => {
+  if (projections.size === 0) {
+    return [];
+  }
+  const relations: BasicStoreRelation[] = [];
+  const documentIds = Array.from(projections.keys());
+  let searchAfter: any[] | undefined;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const data = await elRawSearch(bypassDraftContext(context), SYSTEM_USER, 'batch connection projections', {
+      index: READ_RELATIONSHIPS_INDICES,
+      size: MAX_BULK_OPERATIONS,
+      track_total_hits: false,
+      body: {
+        query: {
+          nested: {
+            path: 'connections',
+            query: {
+              terms: { 'connections.internal_id.keyword': documentIds },
+            },
+          },
+        },
+        sort: [{ 'internal_id.keyword': 'asc' }, { 'standard_id.keyword': 'asc' }],
+        ...(searchAfter ? { search_after: searchAfter } : {}),
+      },
+    });
+    const hits = data.hits.hits ?? [];
+    relations.push(...hits.map((hit: any) => ({
+      ...hit._source,
+      _id: hit._id,
+      _index: hit._index,
+    })));
+    searchAfter = hits.length === MAX_BULK_OPERATIONS ? hits[hits.length - 1]?.sort : undefined;
+    hasNextPage = searchAfter !== undefined;
+  }
+  return relations;
+};
+
 const finalizeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]): Promise<BufferedEngineBulkAction[]> => {
-  const { groups } = buildBufferedEngineBulkActionGroups(actions);
   const connectionProjections = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY)?.projections;
+  const projectionRelations = connectionProjections && actions.length > 0
+    ? await loadBufferedConnectionProjectionRelations(actions[0].context, connectionProjections)
+    : [];
+  const projectionActions = connectionProjections && actions.length > 0
+    ? buildBufferedConnectionProjectionActions(actions[0].context, actions, projectionRelations, connectionProjections)
+    : [];
+  const finalActions = [...actions, ...projectionActions];
+  const { groups } = buildBufferedEngineBulkActionGroups(finalActions);
   const originalDocuments = await loadBufferedEngineOriginalDocuments(groups, connectionProjections);
-  return materializeBufferedEngineBulkActions(actions, originalDocuments, connectionProjections);
+  return materializeBufferedEngineBulkActions(finalActions, originalDocuments, connectionProjections);
 };
 
 const buildIndexBulkActions = async (
@@ -7163,41 +7266,10 @@ const buildBufferedConnectionProjectionScript = () => `
   }
 `;
 
-const elUpdateConnectionsOfElements = async (projections: BufferedConnectionProjection[]) => {
-  if (projections.length === 0) {
-    return;
-  }
-  const source = buildBufferedConnectionProjectionScript();
-  const documentIds = projections.map((projection) => projection.documentId);
-  const changesById = Object.fromEntries(
-    projections.map((projection) => [projection.documentId, projection.documentBody]),
-  );
-  return elRawUpdateByQuery({
-    index: READ_RELATIONSHIPS_INDICES,
-    refresh: true,
-    conflicts: 'proceed',
-    slices: 'auto', // improve performance by slicing the request
-    wait_for_completion: false, // async (query can update a lot of elements)
-    body: {
-      script: { source, params: { changesById } },
-      query: {
-        nested: {
-          path: 'connections',
-          query: {
-            terms: { 'connections.internal_id.keyword': documentIds },
-          },
-        },
-      },
-    },
-  }).catch((err) => {
-    throw DatabaseError('Error updating connections', { cause: err, documentIds, changesById });
-  });
-};
-
 const getOrCreateBufferedConnectionProjectionState = (): BufferedConnectionProjectionState | undefined => {
   let state = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY);
   if (!state) {
-    state = { projections: new Map(), sideEffectRegistered: false };
+    state = { projections: new Map() };
     setBatchExecutionMetadata(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY, state);
   }
   return state;
@@ -7217,16 +7289,6 @@ const bufferUpdateConnectionsOfElement = async (documentId: string, documentBody
     return true;
   }
   state.projections.set(documentId, { documentBody: { ...documentBody }, documentId });
-  if (state.sideEffectRegistered) {
-    return true;
-  }
-  state.sideEffectRegistered = true;
-  await registerBatchSideEffect({
-    kind: BatchSideEffectKind.CompatibilityProjection,
-    execute: async () => {
-      await elUpdateConnectionsOfElements(Array.from(state.projections.values()));
-    },
-  });
   return true;
 };
 
