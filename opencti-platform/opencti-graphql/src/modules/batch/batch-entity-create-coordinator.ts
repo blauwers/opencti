@@ -88,6 +88,10 @@ export class BatchEntityCreateCoordinator {
     this.groupOrder.forEach((groupId) => this.groupStates.set(groupId, 'collecting'));
   }
 
+  getHeldParticipantIds(draftId?: string): string[] {
+    return Array.from(this.heldParticipantIdsByDraft.get(draftId ?? '') ?? []);
+  }
+
   registerLookup(groupId: number, input: BatchEntityCreateLookupInput): Promise<BatchEntityCreateLookupResolution> {
     if (this.closed) {
       return Promise.reject(new Error('Batch entity create coordinator is closed'));
@@ -295,4 +299,9 @@ export const resolveBatchEntityCreateLookup = (
 ): Promise<BatchEntityCreateLookupResolution> | undefined => {
   const scope = batchEntityCreateCoordinatorStorage.getStore();
   return scope?.coordinator.registerLookup(scope.groupId, input);
+};
+
+export const getBatchEntityCreateCoordinatorHeldParticipantIds = (draftId?: string): string[] => {
+  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  return scope?.coordinator.getHeldParticipantIds(draftId) ?? [];
 };

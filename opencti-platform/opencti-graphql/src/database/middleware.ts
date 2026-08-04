@@ -194,7 +194,7 @@ import {
   registerBatchSideEffect,
   setBatchExecutionMetadata,
 } from '../modules/batch/batch-executor';
-import { resolveBatchEntityCreateLookup } from '../modules/batch/batch-entity-create-coordinator';
+import { getBatchEntityCreateCoordinatorHeldParticipantIds, resolveBatchEntityCreateLookup } from '../modules/batch/batch-entity-create-coordinator';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
@@ -306,6 +306,13 @@ const MAX_EXPLANATIONS_PER_RULE = nconf.get('rule_engine:max_explanations_per_ru
 const BATCH_DELETION_GUARD_METADATA_KEY = 'middleware.deletion-guards';
 
 type BatchDeletionGuardState = Map<string, Set<string>>;
+
+const getAlreadyHeldBatchLockIds = (context: AuthContext, user: AuthUser, locks: string[]): Set<string> => {
+  return new Set([
+    ...locks,
+    ...getBatchEntityCreateCoordinatorHeldParticipantIds(getDraftContext(context, user)),
+  ]);
+};
 
 const addRecentDeletions = async (context: AuthContext, user: AuthUser, internalIds: string[]) => {
   const draftId = getDraftContext(context, user);
@@ -2015,7 +2022,8 @@ const mergeEntitiesInWriteBoundary = async (
   }
   // We need to lock all elements not locked yet.
   const { locks = [] } = opts;
-  const participantIds = mergedIds.filter((e) => !locks.includes(e));
+  const alreadyHeldLockIds = getAlreadyHeldBatchLockIds(context, user, locks);
+  const participantIds = mergedIds.filter((e) => !alreadyHeldLockIds.has(e));
   let lock;
   try {
     // Lock the participants that will be merged
@@ -2650,7 +2658,8 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
   }
   // --- take lock, ensure no one currently create or update this element
   let lock;
-  const participantIds = R.uniq(locksIds.filter((e) => !locks.includes(e)));
+  const alreadyHeldLockIds = getAlreadyHeldBatchLockIds(context, user, locks);
+  const participantIds = R.uniq(locksIds.filter((e) => !alreadyHeldLockIds.has(e)));
   try {
     // Try to get the lock in redis
     lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });
@@ -3518,7 +3527,8 @@ export const createRelationRaw = async (
   const inputIds = getInputIds(relationshipType, resolvedInput, fromRule);
   if (isImpactedTypeAndSide(relationshipType, from.entity_type, to.entity_type, ROLE_FROM)) inputIds.push(from.internal_id);
   if (isImpactedTypeAndSide(relationshipType, from.entity_type, to.entity_type, ROLE_TO)) inputIds.push(to.internal_id);
-  const participantIds = inputIds.filter((e) => !locks.includes(e));
+  const alreadyHeldLockIds = getAlreadyHeldBatchLockIds(context, user, locks);
+  const participantIds = inputIds.filter((e) => !alreadyHeldLockIds.has(e));
   try {
     // Try to get the lock in redis
     lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });

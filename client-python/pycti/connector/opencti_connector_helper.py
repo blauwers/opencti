@@ -3746,7 +3746,17 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         if bundle_send_to_queue:
             if entities_types is None:
                 entities_types = []
-            if self.queue_protocol == "amqp":
+            if not split_bundles:
+                self.api.send_bundle_to_api(
+                    connector_id=self.connector_id,
+                    bundle=bundle,
+                    work_id=work_id,
+                    split_bundles=False,
+                    cleanup_inconsistent_bundle=cleanup_inconsistent_bundle,
+                    wait_until=batch_wait_until if wait_until_requested else None,
+                )
+                self.metric.inc("bundle_send")
+            elif self.queue_protocol == "amqp":
                 if work_id:
                     self.api.work.add_expectations(work_id, expectations_number)
                 pika_credentials = pika.PlainCredentials(

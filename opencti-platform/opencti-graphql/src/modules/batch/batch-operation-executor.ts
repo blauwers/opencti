@@ -679,29 +679,28 @@ const buildDeclaredOperationGroups = (
   return groups;
 };
 
-const collectBundleOperationReferencePhases = (
+const collectBundleOperationReferenceObjectIds = (
   value: unknown,
   objectId: string,
   phasesByObjectId: Map<string, number>,
-  referencedPhases: Set<number> = new Set(),
-): Set<number> => {
+  referencedObjectIds: Set<string> = new Set(),
+): Set<string> => {
   if (typeof value === 'string') {
     if (value !== objectId) {
-      const referencedPhase = phasesByObjectId.get(value);
-      if (referencedPhase !== undefined) {
-        referencedPhases.add(referencedPhase);
+      if (phasesByObjectId.has(value)) {
+        referencedObjectIds.add(value);
       }
     }
-    return referencedPhases;
+    return referencedObjectIds;
   }
   if (Array.isArray(value)) {
-    value.forEach((item) => collectBundleOperationReferencePhases(item, objectId, phasesByObjectId, referencedPhases));
-    return referencedPhases;
+    value.forEach((item) => collectBundleOperationReferenceObjectIds(item, objectId, phasesByObjectId, referencedObjectIds));
+    return referencedObjectIds;
   }
   if (value !== null && typeof value === 'object') {
-    Object.values(value).forEach((item) => collectBundleOperationReferencePhases(item, objectId, phasesByObjectId, referencedPhases));
+    Object.values(value).forEach((item) => collectBundleOperationReferenceObjectIds(item, objectId, phasesByObjectId, referencedObjectIds));
   }
-  return referencedPhases;
+  return referencedObjectIds;
 };
 
 const buildBundlePlannedOperationGroups = (
@@ -741,7 +740,10 @@ const buildBundlePlannedOperationGroups = (
       });
     }
 
-    const referencedPhases = collectBundleOperationReferencePhases(operation.variables, operation.objectId, phasesByObjectId);
+    const referencedObjectIds = collectBundleOperationReferenceObjectIds(operation.variables, operation.objectId, phasesByObjectId);
+    const referencedPhases = Array.from(referencedObjectIds).map((referencedObjectId) => {
+      return latestPhaseByObjectId.get(referencedObjectId) ?? phasesByObjectId.get(referencedObjectId) ?? 0;
+    });
     const dependencyPhase = Array.from(referencedPhases).reduce((phase, referencedPhase) => Math.max(phase, referencedPhase + 1), executionPhase);
     const effectivePhase = Math.max(dependencyPhase, latestPhaseByObjectId.get(operation.objectId) ?? executionPhase);
     if (!currentGroup || currentObjectId !== operation.objectId || currentGroup.declaredPhase !== effectivePhase) {
@@ -757,6 +759,12 @@ const buildBundlePlannedOperationGroups = (
       latestGroupIdByObjectId.set(operation.objectId, nextGroupId);
       nextGroupId += 1;
     }
+    referencedObjectIds.forEach((referencedObjectId) => {
+      const dependencyGroupId = latestGroupIdByObjectId.get(referencedObjectId);
+      if (dependencyGroupId !== undefined && dependencyGroupId !== currentGroup?.groupId) {
+        currentGroup?.dependencyGroupIds.add(dependencyGroupId);
+      }
+    });
     currentGroup.operations.push({
       ...operation,
       executionGroup: currentGroup.groupId,
@@ -863,8 +871,8 @@ const isCoordinatedEntityCreateOperation = (operation: PreparedBatchGraphqlOpera
     && !fieldName.endsWith('RelationsAdd');
 };
 
-const canCoordinateEntityCreatePhase = (groups: PreparedBatchGraphqlOperationGroup[]): boolean => {
-  return groups.length > 1 && groups.every((group) => group.operations.every(isCoordinatedEntityCreateOperation));
+const containsCoordinatedEntityCreateOperation = (group: PreparedBatchGraphqlOperationGroup): boolean => {
+  return group.operations.some(isCoordinatedEntityCreateOperation);
 };
 
 const executeOperationGroupsWithEntityCreateCoordinator = async (
@@ -931,10 +939,15 @@ const executeOperationGroups = async (
         runnableGroups.push(group);
       }
     });
-    if (canCoordinateEntityCreatePhase(runnableGroups)) {
-      await executeOperationGroupsWithEntityCreateCoordinator(schema, context, runnableGroups, resultBindings, results, state);
-    } else {
-      await executeOperationGroupsWithConcurrency(schema, context, runnableGroups, resultBindings, results, state);
+    const coordinatedGroups = runnableGroups.filter(containsCoordinatedEntityCreateOperation);
+    const remainingGroups = runnableGroups.filter((group) => !containsCoordinatedEntityCreateOperation(group));
+    if (coordinatedGroups.length > 1) {
+      await executeOperationGroupsWithEntityCreateCoordinator(schema, context, coordinatedGroups, resultBindings, results, state);
+    } else if (coordinatedGroups.length === 1) {
+      await executeOperationGroup(schema, context, coordinatedGroups[0], resultBindings, results, state);
+    }
+    if (remainingGroups.length > 0) {
+      await executeOperationGroupsWithConcurrency(schema, context, remainingGroups, resultBindings, results, state);
     }
   }
   return {

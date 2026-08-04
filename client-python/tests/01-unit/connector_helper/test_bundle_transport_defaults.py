@@ -23,6 +23,9 @@ class TestBundleTransportDefaults(TestCase):
         helper.enrichment_shared_organizations = None
         helper.playbook = None
         helper.connect_validate_before_import = False
+        helper.connector_id = "connector--11111111-1111-4111-8111-111111111111"
+        helper.queue_protocol = "amqp"
+        helper.api = MagicMock()
         helper.connector_logger = MagicMock()
         helper.metric = MagicMock()
         return helper
@@ -98,3 +101,19 @@ class TestBundleTransportDefaults(TestCase):
             self._helper().send_stix2_bundle(
                 self._bundle(), send_to_queue=False, wait_until="LATER"
             )
+
+    def test_unsplit_amqp_uses_backend_admission_before_queueing(self):
+        helper = self._helper()
+
+        bundles = helper.send_stix2_bundle(self._bundle(), send_to_queue=True)
+
+        self.assertEqual(len(bundles), 1)
+        helper.api.send_bundle_to_api.assert_called_once_with(
+            connector_id=helper.connector_id,
+            bundle=bundles[0],
+            work_id=None,
+            split_bundles=False,
+            cleanup_inconsistent_bundle=False,
+            wait_until=None,
+        )
+        helper.api.work.add_expectations.assert_not_called()

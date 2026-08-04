@@ -30,6 +30,7 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
 
     type Mutation {
       record(value: String!): String!
+      recordAdd(value: String!): String!
       createRecord(value: String!): RecordPayload!
       recordEdit(id: String!): RecordEditPayload!
       echo(value: String!): String!
@@ -60,6 +61,11 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
             calls.push(`side-effect:${value}:${isBatchWriteBoundaryOpen()}`);
           },
         });
+        return value;
+      },
+      recordAdd: async (_: unknown, { value }: { value: string }) => {
+        calls.push(`add:${value}:${isBatchWriteBoundaryOpen()}`);
+        await beforeRecord?.(value);
         return value;
       },
       createRecord: (_: unknown, { value }: { value: string }) => {
@@ -426,6 +432,75 @@ describe('batch GraphQL operation executor', () => {
     ]);
   });
 
+  it('coordinates create-containing groups before relation-only groups in the same phase', async () => {
+    const calls: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let markSecondStarted: (() => void) | undefined;
+    let relationOnlyStarted = false;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'first') {
+        await firstGate;
+      }
+      if (value === 'second') {
+        markSecondStarted?.();
+      }
+      if (value === 'relation-only') {
+        relationOnlyStarted = true;
+      }
+    });
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'first' }),
+        objectId: 'identity--first',
+        executionGroup: 0,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'mixed' }),
+        objectId: 'identity--first',
+        executionGroup: 0,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'second' }),
+        objectId: 'identity--second',
+        executionGroup: 1,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'relation-only' }),
+        objectId: 'relationship--only',
+        executionGroup: 2,
+        executionPhase: 1,
+      },
+    ]);
+
+    await secondStarted;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(relationOnlyStarted).toBe(false);
+
+    releaseFirst?.();
+    const execution = await executionPromise;
+    expect(calls.indexOf('write:relation-only:true')).toBeGreaterThan(calls.indexOf('write:mixed:true'));
+    expect(execution.results).toEqual([
+      { recordAdd: 'first' },
+      { record: 'mixed' },
+      { recordAdd: 'second' },
+      { record: 'relation-only' },
+    ]);
+  });
+
   it('rebuilds operation groups from backend bundle object phases', async () => {
     const calls: string[] = [];
     let releaseSource: (() => void) | undefined;
@@ -555,6 +630,73 @@ describe('batch GraphQL operation executor', () => {
       { record: 'relationship--1' },
       { record: 'identity--1' },
       { record: 'independent' },
+    ]);
+  });
+
+  it('delays consumers until the referenced object final generated group completes', async () => {
+    const calls: string[] = [];
+    let releaseSourceFinal: (() => void) | undefined;
+    let markSourceFinalStarted: (() => void) | undefined;
+    let consumerStarted = false;
+    const sourceFinalGate = new Promise<void>((resolve) => {
+      releaseSourceFinal = resolve;
+    });
+    const sourceFinalStarted = new Promise<void>((resolve) => {
+      markSourceFinalStarted = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'source-final') {
+        markSourceFinalStarted?.();
+        await sourceFinalGate;
+      }
+      if (value === 'identity--source') {
+        consumerStarted = true;
+      }
+    });
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'identity--dependency' }),
+        objectId: 'identity--dependency',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'identity--dependency' }),
+        objectId: 'identity--source',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'source-final' }),
+        objectId: 'identity--source',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'identity--source' }),
+        objectId: 'relationship--1',
+      },
+    ], {
+      bundlePlan: {
+        version: 1,
+        executionPhases: [
+          { phase: 0, objectIds: ['identity--dependency', 'identity--source'] },
+          { phase: 1, objectIds: ['relationship--1'] },
+        ],
+      },
+    });
+
+    await sourceFinalStarted;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(consumerStarted).toBe(false);
+
+    releaseSourceFinal?.();
+    const execution = await executionPromise;
+    expect(calls.indexOf('write:identity--source:true')).toBeGreaterThan(calls.indexOf('write:source-final:true'));
+    expect(execution.results).toEqual([
+      { record: 'identity--dependency' },
+      { record: 'identity--dependency' },
+      { record: 'source-final' },
+      { record: 'identity--source' },
     ]);
   });
 
