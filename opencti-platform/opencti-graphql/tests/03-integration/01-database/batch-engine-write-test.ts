@@ -910,6 +910,31 @@ describe('batch engine writes', () => {
     expect(committedSource[relationKey]).not.toContain(originalTarget.internal_id);
     expect(committedSource[RELATION_RELATED_TO]).toContain(replacementTarget.internal_id);
     expect(committedSource[RELATION_RELATED_TO]).not.toContain(originalTarget.internal_id);
+
+    const projectionExecution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: source._id,
+            _index: source._index,
+            entity_type: source.entity_type,
+            internal_id: source.internal_id,
+            name: `${source.name} changed`,
+          } as any);
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: source._id,
+            _index: source._index,
+            entity_type: source.entity_type,
+            internal_id: source.internal_id,
+            name: source.name,
+          } as any);
+          return null;
+        },
+      },
+    ]);
+
+    expect(projectionExecution.sideEffectKinds.filter((kind) => kind === BatchSideEffectKind.CompatibilityProjection)).toHaveLength(1);
   });
 
   it('buffers relation cleanup updates before deleting linked elements', async () => {

@@ -239,6 +239,7 @@ export const BULK_TIMEOUT = '1h';
 const ES_MAX_MAPPINGS = 3000;
 const MAX_AGGREGATION_SIZE = 100;
 const BATCH_ENGINE_WRITES_METADATA_KEY = 'engine.writes';
+const BATCH_CONNECTION_PROJECTIONS_METADATA_KEY = 'engine.connection-projections';
 
 type BufferedIndexWrite = {
   kind: 'index';
@@ -305,6 +306,15 @@ type BufferedEngineWrite = BufferedIndexWrite | BufferedRawIndexWrite | Buffered
 type BufferedEngineState = {
   nextSequence: number;
   writes: BufferedEngineWrite[];
+};
+
+type BufferedConnectionProjection = {
+  documentBody: Record<string, any>;
+  documentId: string;
+};
+
+type BufferedConnectionProjectionState = {
+  projections: Map<string, BufferedConnectionProjection>;
 };
 
 type BufferedEngineBulkMetric = {
@@ -7032,6 +7042,42 @@ const elUpdateConnectionsOfElement = async (documentId: string, documentBody: an
     throw DatabaseError('Error updating connections', { cause: err, documentId, body: documentBody });
   });
 };
+
+const getOrCreateBufferedConnectionProjectionState = (): BufferedConnectionProjectionState | undefined => {
+  let state = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY);
+  if (!state) {
+    state = { projections: new Map() };
+    setBatchExecutionMetadata(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY, state);
+  }
+  return state;
+};
+
+const bufferUpdateConnectionsOfElement = async (documentId: string, documentBody: Record<string, any>): Promise<boolean> => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return false;
+  }
+  const state = getOrCreateBufferedConnectionProjectionState();
+  if (!state) {
+    return false;
+  }
+  const projection = state.projections.get(documentId);
+  if (projection) {
+    projection.documentBody = { ...projection.documentBody, ...documentBody };
+    return true;
+  }
+  state.projections.set(documentId, { documentBody: { ...documentBody }, documentId });
+  await registerBatchSideEffect({
+    kind: BatchSideEffectKind.CompatibilityProjection,
+    execute: async () => {
+      const projectionToMaterialize = state.projections.get(documentId);
+      if (projectionToMaterialize) {
+        await elUpdateConnectionsOfElement(projectionToMaterialize.documentId, projectionToMaterialize.documentBody);
+      }
+    },
+  });
+  return true;
+};
+
 const createDeleteOperationElement = async (
   context: AuthContext,
   user: AuthUser,
@@ -7153,18 +7199,16 @@ export const elUpdateElement = async (context: AuthContext, user: AuthUser, inst
   validateDataBeforeIndexing(esData);
   const dataToReplace = R.pipe(R.dissoc('representative'), R.dissoc('_id'))(esData);
   const shouldUpdateConnections = esData.name && isStixObject(instanceToUse.entity_type);
+  const connectionUpdate = shouldUpdateConnections ? { name: extractEntityRepresentativeName(esData) } : undefined;
   const updateConnections = () => {
-    if (shouldUpdateConnections) {
-      return elUpdateConnectionsOfElement(instance.internal_id, { name: extractEntityRepresentativeName(esData) });
+    if (connectionUpdate) {
+      return elUpdateConnectionsOfElement(instance.internal_id, connectionUpdate);
     }
     return Promise.resolve();
   };
   if (bufferUpdateElement(context, user, instanceToUse, dataToReplace)) {
-    if (shouldUpdateConnections) {
-      await registerBatchSideEffect({
-        kind: BatchSideEffectKind.CompatibilityProjection,
-        execute: updateConnections,
-      });
+    if (connectionUpdate && !(await bufferUpdateConnectionsOfElement(instance.internal_id, connectionUpdate))) {
+      await registerBatchSideEffect({ kind: BatchSideEffectKind.CompatibilityProjection, execute: updateConnections });
     }
     return [];
   }
