@@ -315,6 +315,7 @@ type BufferedConnectionProjection = {
 
 type BufferedConnectionProjectionState = {
   projections: Map<string, BufferedConnectionProjection>;
+  sideEffectRegistered: boolean;
 };
 
 type BufferedEngineBulkMetric = {
@@ -7065,10 +7066,65 @@ const elUpdateConnectionsOfElement = async (documentId: string, documentBody: an
   });
 };
 
+const buildBufferedConnectionProjectionScript = () => `
+  if (ctx._source.connections == null) {
+    ctx.op = 'noop';
+  } else {
+    boolean changed = false;
+    for (conn in ctx._source.connections) {
+      def changes = params.changesById[conn.internal_id];
+      if (changes != null) {
+        for (change in changes.entrySet()) {
+          def key = change.getKey();
+          def value = change.getValue();
+          if (conn[key] != value) {
+            conn[key] = value;
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) {
+      ctx.op = 'noop';
+    }
+  }
+`;
+
+const elUpdateConnectionsOfElements = async (projections: BufferedConnectionProjection[]) => {
+  if (projections.length === 0) {
+    return;
+  }
+  const source = buildBufferedConnectionProjectionScript();
+  const documentIds = projections.map((projection) => projection.documentId);
+  const changesById = Object.fromEntries(
+    projections.map((projection) => [projection.documentId, projection.documentBody]),
+  );
+  return elRawUpdateByQuery({
+    index: READ_RELATIONSHIPS_INDICES,
+    refresh: true,
+    conflicts: 'proceed',
+    slices: 'auto', // improve performance by slicing the request
+    wait_for_completion: false, // async (query can update a lot of elements)
+    body: {
+      script: { source, params: { changesById } },
+      query: {
+        nested: {
+          path: 'connections',
+          query: {
+            terms: { 'connections.internal_id.keyword': documentIds },
+          },
+        },
+      },
+    },
+  }).catch((err) => {
+    throw DatabaseError('Error updating connections', { cause: err, documentIds, changesById });
+  });
+};
+
 const getOrCreateBufferedConnectionProjectionState = (): BufferedConnectionProjectionState | undefined => {
   let state = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY);
   if (!state) {
-    state = { projections: new Map() };
+    state = { projections: new Map(), sideEffectRegistered: false };
     setBatchExecutionMetadata(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY, state);
   }
   return state;
@@ -7088,13 +7144,14 @@ const bufferUpdateConnectionsOfElement = async (documentId: string, documentBody
     return true;
   }
   state.projections.set(documentId, { documentBody: { ...documentBody }, documentId });
+  if (state.sideEffectRegistered) {
+    return true;
+  }
+  state.sideEffectRegistered = true;
   await registerBatchSideEffect({
     kind: BatchSideEffectKind.CompatibilityProjection,
     execute: async () => {
-      const projectionToMaterialize = state.projections.get(documentId);
-      if (projectionToMaterialize) {
-        await elUpdateConnectionsOfElement(projectionToMaterialize.documentId, projectionToMaterialize.documentBody);
-      }
+      await elUpdateConnectionsOfElements(Array.from(state.projections.values()));
     },
   });
   return true;

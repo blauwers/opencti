@@ -141,6 +141,17 @@ describe('batch engine writes', () => {
     return data.hits.hits[0]?._source;
   };
 
+  const waitForDocumentSource = async (entity: any, predicate: (source: any) => boolean) => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const source = await loadDocumentSource(entity);
+      if (predicate(source)) {
+        return source;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return loadDocumentSource(entity);
+  };
+
   afterAll(async () => {
     if (malware) {
       await deleteElementById(testContext, ADMIN_USER, malware.internal_id, ENTITY_TYPE_MALWARE, { forceDelete: true });
@@ -910,6 +921,16 @@ describe('batch engine writes', () => {
     expect(committedSource[relationKey]).not.toContain(originalTarget.internal_id);
     expect(committedSource[RELATION_RELATED_TO]).toContain(replacementTarget.internal_id);
     expect(committedSource[RELATION_RELATED_TO]).not.toContain(originalTarget.internal_id);
+    const relationBeforeProjection = await loadDocumentSource(relation);
+    await elReplace(testContext, relation._index, relation._id ?? relation.internal_id, {
+      doc: {
+        connections: relationBeforeProjection.connections.map((connection: any) => ({
+          ...connection,
+          name: `${connection.name} stale`,
+        })),
+      },
+    });
+    const projectionVersionBefore = await loadDocumentVersion(relation);
 
     const projectionExecution = await executeBatchMutations([
       {
@@ -929,12 +950,34 @@ describe('batch engine writes', () => {
             internal_id: source.internal_id,
             name: source.name,
           } as any);
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: replacementTarget._id,
+            _index: replacementTarget._index,
+            entity_type: replacementTarget.entity_type,
+            internal_id: replacementTarget.internal_id,
+            name: `${replacementTarget.name} changed`,
+          } as any);
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: replacementTarget._id,
+            _index: replacementTarget._index,
+            entity_type: replacementTarget.entity_type,
+            internal_id: replacementTarget.internal_id,
+            name: replacementTarget.name,
+          } as any);
           return null;
         },
       },
     ]);
 
     expect(projectionExecution.sideEffectKinds.filter((kind) => kind === BatchSideEffectKind.CompatibilityProjection)).toHaveLength(1);
+    const projectedRelation = await waitForDocumentSource(relation, (document) => {
+      const sourceConnection = document.connections.find((connection: any) => connection.internal_id === source.internal_id);
+      const targetConnection = document.connections.find((connection: any) => connection.internal_id === replacementTarget.internal_id);
+      return sourceConnection?.name === source.name && targetConnection?.name === replacementTarget.name;
+    });
+    expect(projectedRelation.connections.find((connection: any) => connection.internal_id === source.internal_id)?.name).toBe(source.name);
+    expect(projectedRelation.connections.find((connection: any) => connection.internal_id === replacementTarget.internal_id)?.name).toBe(replacementTarget.name);
+    expect(await loadDocumentVersion(relation)).toBe(projectionVersionBefore + 1);
   });
 
   it('skips direct relation connection rewrites when the projected connection is unchanged', async () => {
