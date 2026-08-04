@@ -937,6 +937,34 @@ describe('batch engine writes', () => {
     expect(projectionExecution.sideEffectKinds.filter((kind) => kind === BatchSideEffectKind.CompatibilityProjection)).toHaveLength(1);
   });
 
+  it('skips direct relation connection rewrites when the projected connection is unchanged', async () => {
+    const source = await addMalware(testContext, ADMIN_USER, { name: `Batch projection source ${uuidv4()}` });
+    const target = await addMalware(testContext, ADMIN_USER, { name: `Batch projection target ${uuidv4()}` });
+    cleanupMalwares.push(source, target);
+    const relation = await addStixCoreRelationship(testContext, ADMIN_USER, {
+      relationship_type: RELATION_RELATED_TO,
+      fromId: source.id,
+      toId: target.id,
+    });
+    const rawRelation = await loadDocumentSource(relation);
+    const sourceConnection = rawRelation.connections.find((connection: any) => connection.internal_id === source.internal_id);
+    expect(sourceConnection).toBeDefined();
+    const versionBefore = await loadDocumentVersion(relation);
+
+    await elUpdateRelationConnections(testContext, [{
+      _index: relation._index,
+      id: relation.internal_id,
+      toReplace: sourceConnection.internal_id,
+      data: {
+        internal_id: sourceConnection.internal_id,
+        name: sourceConnection.name,
+      },
+    }]);
+
+    const versionAfter = await loadDocumentVersion(relation);
+    expect(versionAfter).toBe(versionBefore);
+  });
+
   it('buffers relation cleanup updates before deleting linked elements', async () => {
     const source = await addMalware(testContext, ADMIN_USER, { name: `Batch cleanup source ${uuidv4()}` });
     const target = await addMalware(testContext, ADMIN_USER, { name: `Batch cleanup target ${uuidv4()}` });

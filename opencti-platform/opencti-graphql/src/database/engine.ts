@@ -6920,9 +6920,32 @@ export const elIndexElements = async (
   return elIndexElementsNow(context, user, indexingType, elements);
 };
 
+const buildConnectionProjectionScript = () => `
+  if (ctx._source.connections == null) {
+    ctx.op = 'noop';
+  } else {
+    def conn = ctx._source.connections.find(c -> c.internal_id == params.id);
+    if (conn == null) {
+      ctx.op = 'noop';
+    } else {
+      boolean changed = false;
+      for (change in params.changes.entrySet()) {
+        def key = change.getKey();
+        def value = change.getValue();
+        if (conn[key] != value) {
+          conn[key] = value;
+          changed = true;
+        }
+      }
+      if (!changed) {
+        ctx.op = 'noop';
+      }
+    }
+  }
+`;
+
 const buildUpdateRelationConnectionOperations = (elements: any[]): BufferedBulkUpdateOperation[] => {
-  const source = 'def conn = ctx._source.connections.find(c -> c.internal_id == params.id); '
-    + 'for (change in params.changes.entrySet()) { conn[change.getKey()] = change.getValue() }';
+  const source = buildConnectionProjectionScript();
   return elements.map((doc) => ({
     internalId: doc.id,
     index: doc._index,
@@ -7017,8 +7040,7 @@ export const elUpdateEntityConnections = async (context: AuthContext, elements: 
 };
 
 const elUpdateConnectionsOfElement = async (documentId: string, documentBody: any) => {
-  const source = 'def conn = ctx._source.connections.find(c -> c.internal_id == params.id); '
-    + 'for (change in params.changes.entrySet()) { conn[change.getKey()] = change.getValue() }';
+  const source = buildConnectionProjectionScript();
   return elRawUpdateByQuery({
     index: READ_RELATIONSHIPS_INDICES,
     refresh: true,
