@@ -172,8 +172,21 @@ const mergeUpdateRelatedRestrictions = (
   return markings ? { markings } : undefined;
 };
 
+const omitBufferedStreamFreshnessFields = (stix: StixCoreObject): StixCoreObject => {
+  const semanticStix = structuredClone(stix) as Record<string, any>;
+  delete semanticStix.modified;
+  const octiExtension = semanticStix.extensions?.[STIX_EXT_OCTI];
+  if (octiExtension && typeof octiExtension === 'object') {
+    delete octiExtension.updated_at;
+  }
+  return semanticStix as StixCoreObject;
+};
+
 const rebuildCombinedUpdateEvent = (left: UpdateEvent, right: UpdateEvent): UpdateEvent | undefined => {
   const previousStix = jsonpatch.applyPatch(structuredClone(left.data), left.context.reverse_patch).newDocument as StixCoreObject;
+  if (jsonpatch.compare(omitBufferedStreamFreshnessFields(previousStix), omitBufferedStreamFreshnessFields(right.data)).length === 0) {
+    return undefined;
+  }
   const patch = jsonpatch.compare(previousStix, right.data);
   const reversePatch = jsonpatch.compare(right.data, previousStix);
   if (patch.length === 0 || reversePatch.length === 0) {

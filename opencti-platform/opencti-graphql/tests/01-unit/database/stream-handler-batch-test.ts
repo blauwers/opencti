@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as jsonpatch from 'fast-json-patch';
 import { BatchMutationKind, BatchSideEffectKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
+import { STIX_EXT_OCTI } from '../../../src/types/stix-2-1-extensions';
 
 const { mockRawPushToStream } = vi.hoisted(() => ({
   mockRawPushToStream: vi.fn(),
@@ -138,6 +139,82 @@ describe('stream handler batch publication', () => {
         reverse_patch: jsonpatch.compare(original, changed),
       },
       data: original,
+      message: 'Update 1 elements',
+      origin: {},
+      scope: 'external',
+      type: 'update',
+      version: '4',
+    } as any;
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await publishStixToStream(context, user, firstUpdate);
+          await publishStixToStream(context, user, secondUpdate);
+          return null;
+        },
+      },
+    ]);
+
+    expect(mockRawPushToStream).not.toHaveBeenCalled();
+  });
+
+  it('drops buffered updates that only leave freshness fields changed', async () => {
+    const original = {
+      extensions: {
+        [STIX_EXT_OCTI]: {
+          modified_at: '2026-08-01T00:00:00.000Z',
+          updated_at: '2026-08-01T00:00:00.000Z',
+        },
+      },
+      id: 'indicator--1',
+      modified: '2026-08-01T00:00:00.000Z',
+      name: 'original',
+    };
+    const changed = {
+      ...original,
+      extensions: {
+        [STIX_EXT_OCTI]: {
+          ...original.extensions[STIX_EXT_OCTI],
+          updated_at: '2026-08-02T00:00:00.000Z',
+        },
+      },
+      modified: '2026-08-02T00:00:00.000Z',
+      name: 'changed',
+    };
+    const restored = {
+      ...original,
+      extensions: {
+        [STIX_EXT_OCTI]: {
+          ...original.extensions[STIX_EXT_OCTI],
+          updated_at: '2026-08-03T00:00:00.000Z',
+        },
+      },
+      modified: '2026-08-03T00:00:00.000Z',
+    };
+    const firstUpdate = {
+      commit: undefined,
+      context: {
+        changes: [{ field: 'name' }],
+        patch: jsonpatch.compare(original, changed),
+        reverse_patch: jsonpatch.compare(changed, original),
+      },
+      data: changed,
+      message: 'Update 1 elements',
+      origin: {},
+      scope: 'external',
+      type: 'update',
+      version: '4',
+    } as any;
+    const secondUpdate = {
+      commit: undefined,
+      context: {
+        changes: [{ field: 'name' }],
+        patch: jsonpatch.compare(changed, restored),
+        reverse_patch: jsonpatch.compare(restored, changed),
+      },
+      data: restored,
       message: 'Update 1 elements',
       origin: {},
       scope: 'external',

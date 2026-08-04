@@ -737,6 +737,98 @@ describe('materializeBufferedEngineBulkActions testing', () => {
     })).toEqual([]);
   });
 
+  it('drops update-only materialized writes when only freshness fields change', () => {
+    const actions = [
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: (existing) => ({
+          ...existing,
+          modified: '2026-08-03T00:00:00.000Z',
+          name: 'changed',
+          refreshed_at: '2026-08-03T00:00:00.000Z',
+          updated_at: '2026-08-03T00:00:00.000Z',
+        }),
+        body: [
+          { update: { _index: 'test_index', _id: 'indicator--1' } },
+          { doc: { name: 'changed' } },
+        ],
+      },
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: (existing) => ({
+          ...existing,
+          modified: '2026-08-03T00:00:01.000Z',
+          name: 'original',
+          refreshed_at: '2026-08-03T00:00:01.000Z',
+          updated_at: '2026-08-03T00:00:01.000Z',
+        }),
+        body: [
+          { update: { _index: 'test_index', _id: 'indicator--1' } },
+          { doc: { name: 'original' } },
+        ],
+      },
+    ];
+
+    expect(materializeBufferedEngineBulkActions(actions, {
+      documents: new Map([['test_index:indicator--1', {
+        internal_id: 'indicator--1',
+        modified: '2026-08-02T00:00:00.000Z',
+        name: 'original',
+        refreshed_at: '2026-08-02T00:00:00.000Z',
+        updated_at: '2026-08-02T00:00:00.000Z',
+      }]]),
+      loadedKeys: new Set(['test_index:indicator--1']),
+      versions: new Map(),
+    })).toEqual([]);
+  });
+
+  it('keeps update-only materialized writes when attribute provenance changes', () => {
+    const actions = [
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: (existing) => ({
+          ...existing,
+          name: 'changed',
+        }),
+        body: [
+          { update: { _index: 'test_index', _id: 'indicator--1' } },
+          { doc: { name: 'changed' } },
+        ],
+      },
+      {
+        context: {},
+        refresh: true,
+        applyToDocument: (existing) => ({
+          ...existing,
+          i_attributes: [{ confidence: 90, name: 'name', updated_at: '2026-08-03T00:00:01.000Z', user_id: 'user--2' }],
+          name: 'original',
+        }),
+        body: [
+          { update: { _index: 'test_index', _id: 'indicator--1' } },
+          { doc: { name: 'original' } },
+        ],
+      },
+    ];
+
+    const materialized = materializeBufferedEngineBulkActions(actions, {
+      documents: new Map([['test_index:indicator--1', {
+        i_attributes: [{ confidence: 80, name: 'name', updated_at: '2026-08-02T00:00:00.000Z', user_id: 'user--1' }],
+        internal_id: 'indicator--1',
+        name: 'original',
+      }]]),
+      loadedKeys: new Set(['test_index:indicator--1']),
+      versions: new Map(),
+    });
+
+    expect(materialized).toHaveLength(1);
+    expect(materialized[0].body[1].i_attributes).toEqual([
+      { confidence: 90, name: 'name', updated_at: '2026-08-03T00:00:01.000Z', user_id: 'user--2' },
+    ]);
+  });
+
   it('drops a create followed by a delete when the document did not exist before the batch', () => {
     const actions = [
       {

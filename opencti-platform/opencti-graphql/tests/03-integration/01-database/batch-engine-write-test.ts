@@ -230,6 +230,56 @@ describe('batch engine writes', () => {
     expect(committed?.confidence).toBe(88);
   });
 
+  it('skips a final write when buffered updates only leave freshness fields changed', async () => {
+    const target = await addMalware(testContext, ADMIN_USER, {
+      description: 'batch semantic original',
+      name: `Batch semantic noop ${uuidv4()}`,
+    });
+    cleanupMalwares.push(target);
+    const versionBefore = await loadDocumentVersion(target);
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: target._id,
+            _index: target._index,
+            description: 'batch semantic changed',
+            entity_type: target.entity_type,
+            internal_id: target.internal_id,
+            modified: '2026-08-03T00:00:00.000Z',
+            refreshed_at: '2026-08-03T00:00:00.000Z',
+            updated_at: '2026-08-03T00:00:00.000Z',
+          } as any);
+          return null;
+        },
+      },
+      {
+        kind: BatchMutationKind.UpdateAttribute,
+        executeWrite: async () => {
+          await elUpdateElement(testContext, ADMIN_USER, {
+            _id: target._id,
+            _index: target._index,
+            description: target.description,
+            entity_type: target.entity_type,
+            internal_id: target.internal_id,
+            modified: '2026-08-03T00:00:01.000Z',
+            refreshed_at: '2026-08-03T00:00:01.000Z',
+            updated_at: '2026-08-03T00:00:01.000Z',
+          } as any);
+          return null;
+        },
+      },
+    ]);
+
+    const versionAfter = await loadDocumentVersion(target);
+    const committed = await internalLoadById(testContext, ADMIN_USER, target.internal_id) as any;
+    expect(versionAfter).toBe(versionBefore);
+    expect(committed.description).toBe(target.description);
+    expect(committed.updated_at).toEqual(target.updated_at);
+  });
+
   it('buffers deletes and hides deleted documents from later mutations in the same batch', async () => {
     deletedMalware = await addMalware(testContext, ADMIN_USER, { name: `Batch delete ${uuidv4()}` });
 

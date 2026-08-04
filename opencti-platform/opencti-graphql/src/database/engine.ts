@@ -6388,11 +6388,11 @@ const getBufferedEngineGroupFinalEntry = (group: BufferedEngineBulkActionGroup):
   return group.entries[group.entries.length - 1];
 };
 
-const isBufferedEngineRelationImpactOnlyGroup = (group: BufferedEngineBulkActionGroup): boolean => {
-  return group.entries.every((entry) => entry.descriptor.kind === 'update' && entry.action.finalStateMutation?.kind === 'indexed-relation-impact');
+const isBufferedEngineUpdateOnlyGroup = (group: BufferedEngineBulkActionGroup): boolean => {
+  return group.entries.every((entry) => entry.descriptor.kind === 'update');
 };
 
-const omitBufferedEngineRelationImpactTimestamps = (document: Record<string, any>): Record<string, any> => {
+const omitBufferedEngineFreshnessFields = (document: Record<string, any>): Record<string, any> => {
   const {
     modified: _modified,
     refreshed_at: _refreshedAt,
@@ -6402,17 +6402,17 @@ const omitBufferedEngineRelationImpactTimestamps = (document: Record<string, any
   return semanticDocument;
 };
 
-const isBufferedEngineRelationImpactNoop = (
+const isBufferedEngineMaterializedNoop = (
   group: BufferedEngineBulkActionGroup,
   originalDocument: Record<string, any> | undefined,
   finalDocument: Record<string, any>,
 ): boolean => {
-  if (!originalDocument || !isBufferedEngineRelationImpactOnlyGroup(group)) {
+  if (!originalDocument || !isBufferedEngineUpdateOnlyGroup(group)) {
     return false;
   }
   return R.equals(
-    omitBufferedEngineRelationImpactTimestamps(originalDocument),
-    omitBufferedEngineRelationImpactTimestamps(finalDocument),
+    omitBufferedEngineFreshnessFields(originalDocument),
+    omitBufferedEngineFreshnessFields(finalDocument),
   );
 };
 
@@ -6535,7 +6535,7 @@ const materializeBufferedEngineBulkActionGroup = (
   }
   flushPendingRelationImpacts();
   if (documentExists && document) {
-    if (isBufferedEngineRelationImpactNoop(group, originalDocument, document)) {
+    if (isBufferedEngineMaterializedNoop(group, originalDocument, document)) {
       return [];
     }
     return [buildBufferedEngineFinalDocumentAction(group, document, originalDocuments)];
