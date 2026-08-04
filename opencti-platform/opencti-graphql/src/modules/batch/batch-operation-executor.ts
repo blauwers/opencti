@@ -628,13 +628,45 @@ const buildDeclaredOperationGroups = (
   return groups;
 };
 
+const collectBundleOperationReferencePhases = (
+  value: unknown,
+  objectId: string,
+  phasesByObjectId: Map<string, number>,
+  referencedPhases: Set<number> = new Set(),
+): Set<number> => {
+  if (typeof value === 'string') {
+    if (value !== objectId) {
+      const referencedPhase = phasesByObjectId.get(value);
+      if (referencedPhase !== undefined) {
+        referencedPhases.add(referencedPhase);
+      }
+    }
+    return referencedPhases;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectBundleOperationReferencePhases(item, objectId, phasesByObjectId, referencedPhases));
+    return referencedPhases;
+  }
+  if (value !== null && typeof value === 'object') {
+    Object.values(value).forEach((item) => collectBundleOperationReferencePhases(item, objectId, phasesByObjectId, referencedPhases));
+  }
+  return referencedPhases;
+};
+
 const buildBundlePlannedOperationGroups = (
   operations: PreparedBatchGraphqlOperation[],
   phasesByObjectId: Map<string, number>,
 ): PreparedBatchGraphqlOperationGroup[] => {
-  const groupIdsByObjectId = new Map<string, number>();
+  const groups: PreparedBatchGraphqlOperationGroup[] = [];
+  const latestGroupIdByObjectId = new Map<string, number>();
+  const latestPhaseByObjectId = new Map<string, number>();
+  const operationGroupIds = new Map<number, number>();
+  const completedObjectIds = new Set<string>();
   let nextGroupId = 0;
-  const operationsWithBackendPlan = operations.map((operation) => {
+  let currentGroup: PreparedBatchGraphqlOperationGroup | undefined;
+  let currentObjectId: string | undefined;
+
+  operations.forEach((operation) => {
     if (!operation.objectId) {
       throw FunctionalError('Batch GraphQL bundle plan requires object ids for every operation', {
         operation_index: operation.operationIndex,
@@ -647,19 +679,62 @@ const buildBundlePlannedOperationGroups = (
         object_id: operation.objectId,
       });
     }
-    let executionGroup = groupIdsByObjectId.get(operation.objectId);
-    if (executionGroup === undefined) {
-      executionGroup = nextGroupId;
-      groupIdsByObjectId.set(operation.objectId, executionGroup);
+
+    if (currentObjectId !== undefined && currentObjectId !== operation.objectId) {
+      completedObjectIds.add(currentObjectId);
+    }
+    if (completedObjectIds.has(operation.objectId)) {
+      throw FunctionalError('Batch GraphQL bundle object operations must be contiguous', {
+        operation_index: operation.operationIndex,
+        object_id: operation.objectId,
+      });
+    }
+
+    const referencedPhases = collectBundleOperationReferencePhases(operation.variables, operation.objectId, phasesByObjectId);
+    const dependencyPhase = Array.from(referencedPhases).reduce((phase, referencedPhase) => Math.max(phase, referencedPhase + 1), executionPhase);
+    const effectivePhase = Math.max(dependencyPhase, latestPhaseByObjectId.get(operation.objectId) ?? executionPhase);
+    if (!currentGroup || currentObjectId !== operation.objectId || currentGroup.declaredPhase !== effectivePhase) {
+      const previousGroupId = latestGroupIdByObjectId.get(operation.objectId);
+      currentGroup = {
+        declaredPhase: effectivePhase,
+        dependencyGroupIds: previousGroupId === undefined ? new Set() : new Set([previousGroupId]),
+        executionPhase: effectivePhase,
+        groupId: nextGroupId,
+        operations: [],
+      };
+      groups.push(currentGroup);
+      latestGroupIdByObjectId.set(operation.objectId, nextGroupId);
       nextGroupId += 1;
     }
-    return {
+    currentGroup.operations.push({
       ...operation,
-      executionGroup,
-      executionPhase,
-    };
+      executionGroup: currentGroup.groupId,
+      executionPhase: effectivePhase,
+    });
+    operationGroupIds.set(operation.operationIndex, currentGroup.groupId);
+    latestPhaseByObjectId.set(operation.objectId, effectivePhase);
+    currentObjectId = operation.objectId;
   });
-  return buildDeclaredOperationGroups(operationsWithBackendPlan);
+
+  const groupsById = new Map(groups.map((group) => [group.groupId, group]));
+  groups.forEach((group) => {
+    group.operations.forEach((operation) => {
+      operation.dependencyOperationIndexes.forEach((dependencyOperationIndex) => {
+        const dependencyGroupId = operationGroupIds.get(dependencyOperationIndex);
+        if (dependencyGroupId !== undefined && dependencyGroupId !== group.groupId) {
+          group.dependencyGroupIds.add(dependencyGroupId);
+        }
+      });
+    });
+    group.dependencyGroupIds.forEach((dependencyGroupId) => {
+      const dependencyGroup = groupsById.get(dependencyGroupId);
+      if (dependencyGroup) {
+        group.executionPhase = Math.max(group.executionPhase, dependencyGroup.executionPhase + 1);
+      }
+    });
+  });
+
+  return groups;
 };
 
 const buildOperationGroups = (
@@ -712,15 +787,17 @@ const executeOperationGroupsWithConcurrency = async (
   }));
 };
 
+const isCoordinatedEntityCreateOperation = (operation: PreparedBatchGraphqlOperation): boolean => {
+  const fieldName = getTopLevelMutationFieldName(operation);
+  return operation.objectId !== undefined
+    && fieldName !== undefined
+    && fieldName.endsWith('Add')
+    && !fieldName.includes('Relationship')
+    && !fieldName.endsWith('RelationsAdd');
+};
+
 const canCoordinateEntityCreatePhase = (groups: PreparedBatchGraphqlOperationGroup[]): boolean => {
-  return groups.length > 1 && groups.every((group) => {
-    const fieldName = getTopLevelMutationFieldName(group.operations[0]);
-    return group.operations[0].objectId !== undefined
-      && fieldName !== undefined
-      && fieldName.endsWith('Add')
-      && !fieldName.includes('Relationship')
-      && !fieldName.endsWith('RelationsAdd');
-  });
+  return groups.length > 1 && groups.every((group) => group.operations.every(isCoordinatedEntityCreateOperation));
 };
 
 const executeOperationGroupsWithEntityCreateCoordinator = async (

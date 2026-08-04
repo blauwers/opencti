@@ -446,6 +446,71 @@ describe('batch GraphQL operation executor', () => {
     ]);
   });
 
+  it('delays generated bundle operations that reference another admitted object', async () => {
+    const calls: string[] = [];
+    let releaseSource: (() => void) | undefined;
+    let markIndependentStarted: (() => void) | undefined;
+    const sourceGate = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    const independentStarted = new Promise<void>((resolve) => {
+      markIndependentStarted = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'source') {
+        await sourceGate;
+      }
+      if (value === 'independent') {
+        markIndependentStarted?.();
+      }
+    });
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'source' }),
+        objectId: 'identity--1',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'relationship--1' }),
+        objectId: 'relationship--1',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'identity--1' }),
+        objectId: 'relationship--1',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'independent' }),
+        objectId: 'malware--1',
+      },
+    ], {
+      bundlePlan: {
+        version: 1,
+        executionPhases: [{ phase: 0, objectIds: ['identity--1', 'relationship--1', 'malware--1'] }],
+      },
+    });
+
+    await independentStarted;
+    expect(calls).toEqual([
+      'write:source:true',
+      'write:relationship--1:true',
+      'write:independent:true',
+    ]);
+
+    releaseSource?.();
+    const execution = await executionPromise;
+    expect(calls).toContain('write:identity--1:true');
+    expect(execution.results).toEqual([
+      { record: 'source' },
+      { record: 'relationship--1' },
+      { record: 'identity--1' },
+      { record: 'independent' },
+    ]);
+  });
+
   it('rejects bundle-planned operations without an admitted object id', async () => {
     const schema = buildSchema([]);
 
