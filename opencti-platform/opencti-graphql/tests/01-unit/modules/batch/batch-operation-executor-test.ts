@@ -425,7 +425,7 @@ describe('batch GraphQL operation executor', () => {
     ]);
   });
 
-  it('does not bypass coordinator participation for same-phase add operations', async () => {
+  it('coalesces same-phase add operations while preserving coordinator participation', async () => {
     const calls: string[] = [];
     const schema = buildSchema(calls);
 
@@ -449,7 +449,6 @@ describe('batch GraphQL operation executor', () => {
     });
 
     expect(calls).toEqual([
-      'add:shared:true',
       'add:shared:true',
     ]);
   });

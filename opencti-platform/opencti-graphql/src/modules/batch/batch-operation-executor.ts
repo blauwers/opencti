@@ -17,7 +17,12 @@ import jsonCanonicalize from 'canonicalize';
 import conf from '../../config/conf';
 import { FunctionalError, MISSING_REF_ERROR } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
-import { BatchEntityCreateCoordinator, getBatchEntityCreateCoordinatorGroupId, runWithBatchEntityCreateCoordinator } from './batch-entity-create-coordinator';
+import {
+  BatchEntityCreateCoordinator,
+  getBatchEntityCreateCoordinatorGroupId,
+  runWithBatchEntityCreateCoordinator,
+  waitForBatchEntityCreateCoordinatorPromise,
+} from './batch-entity-create-coordinator';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
 import { BatchExecutionMode, type BatchGraphqlExecutionPlanInput, type BatchGraphqlFileInput, type BatchGraphqlOperationInput } from './batch-types';
 
@@ -68,7 +73,10 @@ type BatchGraphqlExecutionResult = BatchExecutionResult<BatchGraphqlOperationRes
 };
 type BatchGraphqlOperationExecutionState = {
   allowPartialFailures: boolean;
-  coalescedOperationResults: Map<string, Promise<BatchGraphqlOperationResult>>;
+  coalescedOperationResults: Map<string, {
+    coordinatorGroupId?: number;
+    promise: Promise<BatchGraphqlOperationResult>;
+  }>;
   failedGroupIds: Set<number>;
   operationErrors: BatchGraphqlOperationError[];
 };
@@ -521,14 +529,20 @@ const executeOperation = async (
   if (!cacheKey) {
     resultPromise = executeResolvedOperation();
   } else {
+    const coordinatorGroupId = getBatchEntityCreateCoordinatorGroupId();
     const existing = state.coalescedOperationResults.get(cacheKey);
     if (existing) {
-      resultPromise = existing;
+      if (coordinatorGroupId !== undefined && existing.coordinatorGroupId !== coordinatorGroupId) {
+        resultPromise = waitForBatchEntityCreateCoordinatorPromise(existing.promise) ?? existing.promise;
+      } else {
+        resultPromise = existing.promise;
+      }
     } else {
       resultPromise = executeResolvedOperation();
-      state.coalescedOperationResults.set(cacheKey, resultPromise);
+      const entry = { coordinatorGroupId, promise: resultPromise };
+      state.coalescedOperationResults.set(cacheKey, entry);
       void resultPromise.catch(() => {
-        if (state.coalescedOperationResults.get(cacheKey) === resultPromise) {
+        if (state.coalescedOperationResults.get(cacheKey) === entry) {
           state.coalescedOperationResults.delete(cacheKey);
         }
       });
@@ -903,7 +917,7 @@ const buildCoalescedOperationKey = (
   operation: PreparedBatchGraphqlOperation,
   resolvedVariables: Record<string, unknown>,
 ): string | undefined => {
-  if (!operation.coalesceCompletedAdd || getBatchEntityCreateCoordinatorGroupId() !== undefined) {
+  if (!operation.coalesceCompletedAdd) {
     return undefined;
   }
   try {
