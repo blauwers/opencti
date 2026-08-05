@@ -458,17 +458,22 @@ export class BatchEntityCreateCoordinator {
       return this.buildNoopLock();
     }
 
-    while (true) {
-      const reservationChangePromise = this.reservationChangePromise;
-      const conflictingGroupIds = this.getActiveConflictGroupIds(groupId, input.draftId, additionalParticipantIds);
-      if (conflictingGroupIds.length === 0) {
-        break;
+    const conflictingGroupIds = this.getActiveConflictGroupIds(groupId, input.draftId, additionalParticipantIds);
+    this.addGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
+    if (conflictingGroupIds.length > 0) {
+      // A group that keeps its current reservations while waiting for another
+      // active group can deadlock with a crossed follow-on lock request.
+      this.parkGroup(groupId);
+      try {
+        await this.resumeParkedGroup(groupId);
+      } catch (cause) {
+        this.removeGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
+        throw cause;
       }
-      await reservationChangePromise;
+    } else {
+      this.reserveGroupParticipantIds(groupId);
     }
 
-    this.addGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
-    this.reserveGroupParticipantIds(groupId);
     const scopedLocksByGroup = new Map<number, BatchEntityCreateLock[]>();
     try {
       await this.acquireScopedParticipantLocks([{

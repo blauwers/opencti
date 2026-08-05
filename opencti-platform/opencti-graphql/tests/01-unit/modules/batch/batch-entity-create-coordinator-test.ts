@@ -676,6 +676,53 @@ describe('batch entity create coordinator', () => {
     expect(lockResources).toHaveBeenNthCalledWith(3, ['relationship--internal-one'], { draftId: undefined });
   });
 
+  it('parks crossed follow-on participant waits so one active group can finish', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
+    let releaseFollowOn: (() => void) | undefined;
+    const followOnGate = new Promise<void>((resolve) => {
+      releaseFollowOn = resolve;
+    });
+    let initialLookupCount = 0;
+    let followOnLockCount = 0;
+    const runGroup = async (ownedId: string, followOnId: string) => {
+      await resolveBatchEntityCreateLookup({
+        finderIds: [ownedId],
+        participantIds: [ownedId],
+        type: 'Indicator',
+      });
+      initialLookupCount += 1;
+      await followOnGate;
+      const followOnLock = await resolveBatchParticipantLock({
+        participantIds: [followOnId],
+      }) as any;
+      followOnLockCount += 1;
+      await followOnLock.unlock();
+    };
+
+    const executionPromise = Promise.all([
+      runWithBatchEntityCreateCoordinator(coordinator, 0, async () => runGroup('indicator--one', 'indicator--two')),
+      runWithBatchEntityCreateCoordinator(coordinator, 1, async () => runGroup('indicator--two', 'indicator--one')),
+    ]);
+
+    for (let tick = 0; tick < 10 && initialLookupCount < 2; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(initialLookupCount).toBe(2);
+
+    releaseFollowOn?.();
+    await Promise.race([
+      executionPromise,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('crossed follow-on participant wait deadlocked')), 1000);
+      }),
+    ]);
+    await coordinator.close();
+
+    expect(followOnLockCount).toBe(2);
+  });
+
   it('releases lock-only reservations between operations to avoid crossed follow-on waits', async () => {
     vi.mocked(internalFindByIds).mockResolvedValue([] as any);
 
