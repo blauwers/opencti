@@ -6,7 +6,7 @@ import { getInstanceIds } from '../../schema/identifier';
 import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
-import { getBatchAwareLockOptions, retainBatchLockUntilCommit } from './batch-lock-retention';
+import { getBatchAwareLockOptions, getBatchRetainedLockIds, retainBatchLockUntilCommit } from './batch-lock-retention';
 import { hasBatchCreatedEntityParticipant } from './batch-relation-lookup';
 
 type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'parked' | 'completed';
@@ -570,7 +570,10 @@ export class BatchEntityCreateCoordinator {
     lookups.forEach((lookup) => {
       const draftKey = lookup.input.draftId ?? '';
       const draftIds = idsByDraft.get(draftKey) ?? new Set<string>();
-      const heldIds = this.heldParticipantIdsByDraft.get(draftKey) ?? new Set<string>();
+      const heldIds = new Set([
+        ...Array.from(this.heldParticipantIdsByDraft.get(draftKey) ?? []),
+        ...getBatchRetainedLockIds(lookup.input.draftId),
+      ]);
       lookup.input.participantIds.forEach((id) => {
         if (!heldIds.has(id)) {
           draftIds.add(id);
@@ -593,7 +596,10 @@ export class BatchEntityCreateCoordinator {
   ): Promise<void> {
     for (const lookup of lookups) {
       const draftKey = lookup.input.draftId ?? '';
-      const heldIds = this.heldParticipantIdsByDraft.get(draftKey) ?? new Set<string>();
+      const heldIds = new Set([
+        ...Array.from(this.heldParticipantIdsByDraft.get(draftKey) ?? []),
+        ...getBatchRetainedLockIds(lookup.input.draftId),
+      ]);
       const participantIds = lookup.input.participantIds.filter((id) => !heldIds.has(id));
       if (participantIds.length === 0) {
         continue;

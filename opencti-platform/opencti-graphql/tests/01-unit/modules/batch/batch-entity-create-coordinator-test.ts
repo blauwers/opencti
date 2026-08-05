@@ -475,6 +475,49 @@ describe('batch entity create coordinator', () => {
     acquiredLocks.forEach((lock) => expect(lock.unlock).toHaveBeenCalledTimes(1));
   });
 
+  it('reuses outer-batch retained participant ids in later coordinator phases', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+    const acquiredLock = buildLock();
+    vi.mocked(lockResources).mockResolvedValue(acquiredLock as any);
+
+    await executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        const firstCoordinator = new BatchEntityCreateCoordinator(context, [0]);
+        await runWithBatchEntityCreateCoordinator(firstCoordinator, 0, async () => {
+          await resolveBatchEntityCreateLookup({
+            finderIds: ['identity--one'],
+            participantIds: ['identity--one'],
+            type: 'Identity',
+          });
+          registerBatchCreatedEntity({
+            internal_id: 'identity--internal-one',
+            standard_id: 'identity--one',
+            entity_type: 'Identity',
+          } as any);
+        });
+        await firstCoordinator.close();
+
+        const secondCoordinator = new BatchEntityCreateCoordinator(context, [1]);
+        await runWithBatchEntityCreateCoordinator(secondCoordinator, 1, async () => {
+          await resolveBatchEntityCreateLookup({
+            finderIds: ['identity--one'],
+            participantIds: ['identity--one'],
+            type: 'Identity',
+          });
+          expect(getBatchEntityCreateCoordinatorHeldParticipantIds()).toEqual(['identity--one']);
+        });
+        await secondCoordinator.close();
+
+        expect(lockResources).toHaveBeenCalledTimes(1);
+        expect(acquiredLock.unlock).not.toHaveBeenCalled();
+        return null;
+      },
+    }]);
+
+    expect(acquiredLock.unlock).toHaveBeenCalledTimes(1);
+  });
+
   it('coordinates lock-only relation participants without issuing an entity lookup', async () => {
     vi.mocked(internalFindByIds).mockResolvedValue([] as any);
     const acquiredLocks: ReturnType<typeof buildLock>[] = [];
