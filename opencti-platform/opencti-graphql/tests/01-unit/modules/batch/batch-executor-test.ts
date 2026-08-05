@@ -7,6 +7,7 @@ import {
   getBatchExecutionMetadata,
   isBatchWriteBoundaryOpen,
   registerBatchCommitter,
+  registerBatchFinalizer,
   registerBatchSideEffect,
   setBatchExecutionMetadata,
   waitForPendingBatchMaterializations,
@@ -207,6 +208,55 @@ describe('batch executor', () => {
     });
 
     expect(boundaryStates).toEqual([true, false, false]);
+  });
+
+  it('runs finalizers after committers and before side effects', async () => {
+    const calls: string[] = [];
+
+    await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        calls.push('write');
+        registerBatchCommitter({
+          key: 'commit',
+          execute: async () => {
+            calls.push('commit');
+          },
+        });
+        registerBatchFinalizer({
+          key: 'finalizer',
+          execute: async () => {
+            calls.push('finalizer');
+          },
+        });
+        return 'result';
+      },
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.CompatibilityProjection,
+        execute: async () => {
+          calls.push('side-effect');
+        },
+      }],
+    });
+
+    expect(calls).toEqual(['write', 'commit', 'finalizer', 'side-effect']);
+  });
+
+  it('runs finalizers when a buffered write fails before commit', async () => {
+    const finalizer = vi.fn().mockResolvedValue(undefined);
+
+    await expect(executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        registerBatchFinalizer({
+          key: 'finalizer',
+          execute: finalizer,
+        });
+        throw new Error('failed write');
+      },
+    })).rejects.toThrow('failed write');
+
+    expect(finalizer).toHaveBeenCalledTimes(1);
   });
 
   it('defers side effects registered inside raw write helpers', async () => {

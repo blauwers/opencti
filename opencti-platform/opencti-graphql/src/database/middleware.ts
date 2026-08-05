@@ -196,6 +196,7 @@ import {
 } from '../modules/batch/batch-executor';
 import { getBatchEntityCreateCoordinatorHeldParticipantIds, resolveBatchEntityCreateLookup, resolveBatchParticipantLock } from '../modules/batch/batch-entity-create-coordinator';
 import { executeBatchCoalescedEntityCreate } from '../modules/batch/batch-entity-create-cache';
+import { getBatchRetainedLockIds, retainBatchLockUntilCommit } from '../modules/batch/batch-lock-retention';
 import { hasBatchCreatedRelationEndpoint, registerBatchCreatedEntity } from '../modules/batch/batch-relation-lookup';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
@@ -313,6 +314,7 @@ const getAlreadyHeldBatchLockIds = (context: AuthContext, user: AuthUser, locks:
   return new Set([
     ...locks,
     ...getBatchEntityCreateCoordinatorHeldParticipantIds(getDraftContext(context, user)),
+    ...getBatchRetainedLockIds(getDraftContext(context, user)),
   ]);
 };
 
@@ -3479,6 +3481,7 @@ export const createRelationRaw = async (
 ) => {
   let lock;
   let isBatchCoordinatedLock: boolean;
+  let isBatchRetainedLock = false;
   const { fromRule, locks = [] } = opts;
   const { fromId, toId, relationship_type: relationshipType } = rawInput;
 
@@ -3554,6 +3557,9 @@ export const createRelationRaw = async (
     lock = coordinatedLock
       ? await coordinatedLock
       : await lockResources(participantIds, { draftId: getDraftContext(context, user) });
+    if (!isBatchCoordinatedLock) {
+      isBatchRetainedLock = retainBatchLockUntilCommit(lock, participantIds, getDraftContext(context, user));
+    }
     // region check existing relationship
     const existingRelationships = await getExistingRelations(context, user, resolvedInput, opts);
     let existingRelationship = null;
@@ -3692,7 +3698,7 @@ export const createRelationRaw = async (
     }
     throw err;
   } finally {
-    if (lock) await lock.unlock();
+    if (lock && !isBatchRetainedLock) await lock.unlock();
   }
 };
 export const createRelation = async (
@@ -3875,6 +3881,7 @@ const internalCreateEntityRaw = async (
   const participantIds = getInputIds(type, resolvedInput, fromRule);
   // Create the element
   let lock;
+  let isBatchRetainedLock = false;
   try {
     // Check if the entity exists, must be done with SYSTEM USER to really find it.
     const existingEntities: BasicStoreObject[] = [];
@@ -3894,6 +3901,7 @@ const internalCreateEntityRaw = async (
     } else {
       // Try to get the lock in redis
       lock = await lockResources(participantIds, { draftId });
+      isBatchRetainedLock = retainBatchLockUntilCommit(lock, participantIds, draftId);
       existingByIdsPromise = findExistingEntitiesByIds(context, finderIds, type) as Promise<BasicStoreObject[]>;
     }
     // Generate the internal id if needed
@@ -4160,7 +4168,7 @@ const internalCreateEntityRaw = async (
     }
     throw err;
   } finally {
-    if (lock) await lock.unlock();
+    if (lock && !isBatchRetainedLock) await lock.unlock();
   }
 };
 

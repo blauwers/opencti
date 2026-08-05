@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
 import { lockResources } from '../../../../src/lock/master-lock';
 import { executeBatchCoalescedEntityCreate } from '../../../../src/modules/batch/batch-entity-create-cache';
+import { getBatchRetainedLockIds } from '../../../../src/modules/batch/batch-lock-retention';
 import {
   BatchEntityCreateCoordinator,
   getBatchEntityCreateCoordinatorHeldParticipantIds,
@@ -398,6 +399,33 @@ describe('batch entity create coordinator', () => {
 
     expect(heldAfterFirstLookup).toEqual(['external-reference--one']);
     expect(heldAfterSecondLookup).toEqual(['course-of-action--one', 'external-reference--one']);
+  });
+
+  it('keeps group-owned locks until the enclosing batch commit finishes', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+    const acquiredLock = buildLock();
+    vi.mocked(lockResources).mockResolvedValue(acquiredLock as any);
+
+    await executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        const coordinator = new BatchEntityCreateCoordinator(context, [0]);
+        await runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+          await resolveBatchEntityCreateLookup({
+            finderIds: ['identity--one'],
+            participantIds: ['identity--one'],
+            type: 'Identity',
+          });
+        });
+        await coordinator.close();
+
+        expect(acquiredLock.unlock).not.toHaveBeenCalled();
+        expect(getBatchRetainedLockIds()).toEqual(['identity--one']);
+        return null;
+      },
+    }]);
+
+    expect(acquiredLock.unlock).toHaveBeenCalledTimes(1);
   });
 
   it('coordinates lock-only relation participants without issuing an entity lookup', async () => {

@@ -30,6 +30,11 @@ export interface BatchCommitter {
   execute: () => Promise<void>;
 }
 
+export interface BatchFinalizer {
+  key: string;
+  execute: () => Promise<void>;
+}
+
 export interface BatchMutation<T> {
   kind: BatchMutationKind;
   executeWrite: () => Promise<T>;
@@ -56,6 +61,8 @@ export interface BatchExecutionResult<T> {
 
 interface BatchExecutionState {
   committers: Map<string, BatchCommitter>;
+  finalizers: Map<string, BatchFinalizer>;
+  finalizersRun: boolean;
   metadata: Map<string, unknown>;
   sideEffects: BatchSideEffect[];
   writeBoundaryOpen: boolean;
@@ -98,6 +105,24 @@ const commitWrites = async (state: BatchExecutionState) => {
   }
 };
 
+const runFinalizers = async (state: BatchExecutionState) => {
+  if (state.finalizersRun) {
+    return;
+  }
+  state.finalizersRun = true;
+  let firstError: unknown;
+  for (const finalizer of state.finalizers.values()) {
+    try {
+      await finalizer.execute();
+    } catch (cause) {
+      firstError ??= cause;
+    }
+  }
+  if (firstError) {
+    throw firstError;
+  }
+};
+
 export const hasActiveBatchExecution = (): boolean => {
   return batchExecutionStorage.getStore() !== undefined;
 };
@@ -127,6 +152,15 @@ export const registerBatchCommitter = (committer: BatchCommitter): boolean => {
     return false;
   }
   state.committers.set(committer.key, committer);
+  return true;
+};
+
+export const registerBatchFinalizer = (finalizer: BatchFinalizer): boolean => {
+  const state = batchExecutionStorage.getStore();
+  if (!state) {
+    return false;
+  }
+  state.finalizers.set(finalizer.key, finalizer);
   return true;
 };
 
@@ -168,27 +202,35 @@ export const executeBatchMutations = async <T>(
 
   const state: BatchExecutionState = {
     committers: new Map(),
+    finalizers: new Map(),
+    finalizersRun: false,
     metadata: new Map(),
     sideEffects: [],
     writeBoundaryOpen: true,
   };
   return batchExecutionStorage.run(state, async () => {
-    const results = await executeWrites(mutations, state);
-    state.writeBoundaryOpen = false;
-    await commitWrites(state);
-    const materialization = materializeSideEffects(state);
-    const hasSideEffects = state.sideEffects.length > 0;
-    if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
-      await materialization;
-    } else {
-      trackPendingMaterialization(materialization);
+    try {
+      const results = await executeWrites(mutations, state);
+      state.writeBoundaryOpen = false;
+      await commitWrites(state);
+      await runFinalizers(state);
+      const materialization = materializeSideEffects(state);
+      const hasSideEffects = state.sideEffects.length > 0;
+      if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
+        await materialization;
+      } else {
+        trackPendingMaterialization(materialization);
+      }
+      return {
+        ...normalizedOptions,
+        results,
+        sideEffectKinds: state.sideEffects.map((sideEffect) => sideEffect.kind),
+        materialized: normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects,
+      };
+    } finally {
+      state.writeBoundaryOpen = false;
+      await runFinalizers(state);
     }
-    return {
-      ...normalizedOptions,
-      results,
-      sideEffectKinds: state.sideEffects.map((sideEffect) => sideEffect.kind),
-      materialized: normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects,
-    };
   });
 };
 

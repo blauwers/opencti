@@ -22,6 +22,7 @@ import { addVocabulary, deleteVocabulary, editVocabulary } from '../../../src/mo
 import { ENTITY_TYPE_VOCABULARY } from '../../../src/modules/vocabulary/vocabulary-types';
 import { addIndicator } from '../../../src/modules/indicator/indicator-domain';
 import { ENTITY_TYPE_INDICATOR } from '../../../src/modules/indicator/indicator-types';
+import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../../../src/modules/organization/organization-types';
 import { FilterMode, FilterOperator, VocabularyCategory } from '../../../src/generated/graphql';
 import { buildRefRelationKey } from '../../../src/schema/general';
 import { RELATION_RELATED_TO } from '../../../src/schema/stixCoreRelationship';
@@ -43,6 +44,7 @@ describe('batch engine writes', () => {
   const cleanupObservables: any[] = [];
   const cleanupIndicators: any[] = [];
   const cleanupLabels: any[] = [];
+  const cleanupOrganizations: any[] = [];
   const cleanupSoftDeletedMalwareIds: string[] = [];
   const streamDeletedMalwares: any[] = [];
   const cleanupVocabularies: any[] = [];
@@ -188,6 +190,13 @@ describe('batch engine writes', () => {
       const existing = await internalLoadById(testContext, ADMIN_USER, cleanupLabel.internal_id);
       if (existing) {
         await deleteElementById(testContext, ADMIN_USER, cleanupLabel.internal_id, ENTITY_TYPE_LABEL, { forceDelete: true });
+      }
+    }
+    for (let index = 0; index < cleanupOrganizations.length; index += 1) {
+      const cleanupOrganization = cleanupOrganizations[index];
+      const existing = await internalLoadById(testContext, ADMIN_USER, cleanupOrganization.internal_id);
+      if (existing) {
+        await deleteElementById(testContext, ADMIN_USER, cleanupOrganization.internal_id, ENTITY_TYPE_IDENTITY_ORGANIZATION, { forceDelete: true });
       }
     }
     for (let index = 0; index < cleanupSoftDeletedMalwareIds.length; index += 1) {
@@ -659,6 +668,96 @@ describe('batch engine writes', () => {
     };
 
     await Promise.all(Array.from({ length: 3 }, (_, index) => runBatch(index)));
+  });
+
+  it('holds coordinated create locks until concurrent outer batches commit', async () => {
+    const schema = createSchema();
+    const creatorStixId = `identity--${uuidv4()}`;
+    const organizationName = `Batch committed creator ${uuidv4()}`;
+    let releaseFirstCommit: (() => void) | undefined;
+    const firstCommitGate = new Promise<void>((resolve) => {
+      releaseFirstCommit = resolve;
+    });
+    let firstReachedCommitGateResolve: (() => void) | undefined;
+    const firstReachedCommitGate = new Promise<void>((resolve) => {
+      firstReachedCommitGateResolve = resolve;
+    });
+
+    const runBatch = async (batchIndex: number, holdBeforeCommit = false) => {
+      const workerUser = { ...ADMIN_USER, origin: { ...ADMIN_USER.origin, call_retry_number: 1 } };
+      const batchContext = executionContext(`batch-graphql-committed-created-by-resolution-${batchIndex}`, workerUser);
+      batchContext.batch = computeLoaders(batchContext, workerUser);
+      const labelObjectId = `label--${uuidv4()}`;
+      const operations = [
+        {
+          query: 'mutation OrganizationAdd($input: OrganizationAddInput!) { organizationAdd(input: $input) { id standard_id } }',
+          variables: JSON.stringify({
+            input: {
+              name: organizationName,
+              stix_id: creatorStixId,
+              update: true,
+            },
+          }),
+          objectId: creatorStixId,
+          executionGroup: 0,
+          executionPhase: 0,
+        },
+        {
+          query: 'mutation LabelAdd($input: LabelAddInput!) { labelAdd(input: $input) { id } }',
+          variables: JSON.stringify({
+            input: {
+              value: `Batch committed label ${batchIndex} ${uuidv4()}`,
+            },
+          }),
+          objectId: labelObjectId,
+          executionGroup: 1,
+          executionPhase: 0,
+        },
+      ];
+
+      const execution = await executeBatchMutations([{
+        kind: BatchMutationKind.GraphqlOperation,
+        executeWrite: async () => {
+          const batchExecution = await executeBatchGraphqlOperations(schema, batchContext, operations, {
+            bundlePlan: {
+              version: 1,
+              executionPhases: [{ phase: 0, objectIds: [creatorStixId, labelObjectId] }],
+            },
+          });
+          const organizationId = (batchExecution.results[0] as any).organizationAdd.id;
+          const labelId = (batchExecution.results[1] as any).labelAdd.id;
+          cleanupOrganizations.push({ internal_id: organizationId });
+          cleanupLabels.push({ internal_id: labelId });
+          if (holdBeforeCommit) {
+            firstReachedCommitGateResolve?.();
+            await firstCommitGate;
+          }
+          return organizationId;
+        },
+      }]);
+      return execution.results[0];
+    };
+
+    const firstBatch = runBatch(0, true);
+    await firstReachedCommitGate;
+
+    let secondBatchSettled = false;
+    const secondBatch = runBatch(1).then((result) => {
+      secondBatchSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(secondBatchSettled).toBe(false);
+
+    releaseFirstCommit?.();
+    const [firstOrganizationId, secondOrganizationId] = await Promise.all([firstBatch, secondBatch]);
+    const persistedOrganizations = await elFindByIds<any>(testContext, ADMIN_USER, [creatorStixId], {
+      type: ENTITY_TYPE_IDENTITY_ORGANIZATION,
+    }) as any[];
+
+    expect(secondOrganizationId).toBe(firstOrganizationId);
+    expect(persistedOrganizations).toHaveLength(1);
+    expect(persistedOrganizations[0].internal_id).toBe(firstOrganizationId);
   });
 
   it('buffers direct document and replace updates inside the batch boundary', async () => {

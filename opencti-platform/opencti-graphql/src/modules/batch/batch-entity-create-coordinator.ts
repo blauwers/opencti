@@ -6,11 +6,14 @@ import { getInstanceIds } from '../../schema/identifier';
 import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
+import { retainBatchLockUntilCommit } from './batch-lock-retention';
 
 type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'parked' | 'completed';
 type BatchEntityCreateLookupRetention = 'group' | 'lock';
 
 type BatchEntityCreateLock = {
+  draftId?: string;
+  participantIds?: string[];
   signal: AbortSignal;
   unlock: () => Promise<void>;
 };
@@ -201,9 +204,12 @@ export class BatchEntityCreateCoordinator {
     pending.forEach((lookup) => lookup.reject(new Error('Batch entity create phase ended before lookup resolution')));
     const ready = this.readyActivations.splice(0);
     ready.forEach(({ reject }) => reject(new Error('Batch entity create phase ended before lookup resolution')));
+    const retainedLocks = this.heldLocks.filter((lock) => {
+      return retainBatchLockUntilCommit(lock, lock.participantIds ?? [], lock.draftId);
+    });
     await this.releasePhysicalLocks([
       ...Array.from(this.scopedLocks),
-      ...this.heldLocks.reverse(),
+      ...this.heldLocks.filter((lock) => !retainedLocks.includes(lock)).reverse(),
     ]);
   }
 
@@ -612,6 +618,8 @@ export class BatchEntityCreateCoordinator {
     this.addHeldParticipantIds(draftKey, normalizedParticipantIds);
     let unlocked = false;
     const trackedLock: BatchEntityCreateLock = {
+      draftId,
+      participantIds: normalizedParticipantIds,
       signal: lock.signal,
       unlock: async () => {
         if (unlocked) {
