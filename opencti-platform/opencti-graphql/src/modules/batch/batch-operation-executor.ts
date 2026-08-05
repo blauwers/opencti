@@ -86,7 +86,7 @@ type BatchGraphqlOperationExecutionState = {
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
-const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 2;
+const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 4;
 const configuredBatchGraphqlMaxActiveExecutions = Number(conf.get('app:concurrency:batch_max_active_executions'));
 const BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS = Number.isInteger(configuredBatchGraphqlMaxActiveExecutions) && configuredBatchGraphqlMaxActiveExecutions > 0
   ? configuredBatchGraphqlMaxActiveExecutions
