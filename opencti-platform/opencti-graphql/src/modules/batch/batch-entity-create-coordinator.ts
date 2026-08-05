@@ -652,6 +652,19 @@ export const resolveBatchParticipantLock = (
   return scope?.coordinator.acquireParticipantLock(scope.groupId, input);
 };
 
+export const getBatchEntityCreateCoordinatorGroupId = (): number | undefined => {
+  return batchEntityCreateCoordinatorStorage.getStore()?.groupId;
+};
+
+export const waitForBatchEntityCreateCoordinatorTurn = (): Promise<void> | undefined => {
+  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  return scope?.coordinator.registerLookup(scope.groupId, {
+    finderIds: [],
+    participantIds: [],
+    type: '',
+  }).then(() => undefined);
+};
+
 export const getBatchEntityCreateCoordinatorHeldParticipantIds = (draftId?: string): string[] => {
   const scope = batchEntityCreateCoordinatorStorage.getStore();
   return scope?.coordinator.getHeldParticipantIds(scope.groupId, draftId) ?? [];

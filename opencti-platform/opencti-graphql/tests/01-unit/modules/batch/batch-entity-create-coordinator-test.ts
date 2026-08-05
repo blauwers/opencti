@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
 import { lockResources } from '../../../../src/lock/master-lock';
+import { executeBatchCoalescedEntityCreate } from '../../../../src/modules/batch/batch-entity-create-cache';
 import {
   BatchEntityCreateCoordinator,
   getBatchEntityCreateCoordinatorHeldParticipantIds,
@@ -8,6 +9,7 @@ import {
   resolveBatchParticipantLock,
   runWithBatchEntityCreateCoordinator,
 } from '../../../../src/modules/batch/batch-entity-create-coordinator';
+import { BatchMutationKind, executeBatchMutations } from '../../../../src/modules/batch/batch-executor';
 
 vi.mock('../../../../src/database/middleware-loader', () => ({
   internalFindByIds: vi.fn(),
@@ -79,6 +81,40 @@ describe('batch entity create coordinator', () => {
       ['indicator--internal-one', 'indicator--one'],
       ['indicator--internal-two', 'indicator--two'],
     ]);
+  });
+
+  it('lets cross-group coalesced creates join the coordinator lookup wave', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
+    const input = { external_id: 'T1174', source_name: 'mitre-attack' };
+    const execute = vi.fn(async () => {
+      await resolveBatchEntityCreateLookup({
+        finderIds: ['external-reference--one'],
+        participantIds: ['external-reference--one'],
+        type: 'External-Reference',
+      });
+      return { element: { internal_id: 'external-reference--one' } };
+    });
+
+    try {
+      const execution = await executeBatchMutations([{
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => Promise.all([
+          runWithBatchEntityCreateCoordinator(coordinator, 0, async () => executeBatchCoalescedEntityCreate('External-Reference', input, {}, execute)),
+          runWithBatchEntityCreateCoordinator(coordinator, 1, async () => executeBatchCoalescedEntityCreate('External-Reference', input, {}, execute)),
+        ]),
+      }]);
+
+      expect(execution.results).toEqual([[
+        { element: { internal_id: 'external-reference--one' } },
+        { element: { internal_id: 'external-reference--one' } },
+      ]]);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(internalFindByIds).toHaveBeenCalledTimes(1);
+    } finally {
+      await coordinator.close();
+    }
   });
 
   it('keeps post-lookup group execution bounded after resolving one disjoint wave', async () => {

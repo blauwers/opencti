@@ -425,6 +425,35 @@ describe('batch GraphQL operation executor', () => {
     ]);
   });
 
+  it('does not bypass coordinator participation for same-phase add operations', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'shared' }),
+        objectId: 'external-reference--one',
+        executionGroup: 0,
+        executionPhase: 0,
+      },
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'shared' }),
+        objectId: 'external-reference--two',
+        executionGroup: 1,
+        executionPhase: 0,
+      },
+    ], {
+      pruneUnusedResultFields: true,
+    });
+
+    expect(calls).toEqual([
+      'add:shared:true',
+      'add:shared:true',
+    ]);
+  });
+
   it('does not retain completed add results for non-pruned batch execution', async () => {
     const calls: string[] = [];
     const schema = buildSchema(calls);

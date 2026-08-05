@@ -17,7 +17,7 @@ import jsonCanonicalize from 'canonicalize';
 import conf from '../../config/conf';
 import { FunctionalError, MISSING_REF_ERROR } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
-import { BatchEntityCreateCoordinator, runWithBatchEntityCreateCoordinator } from './batch-entity-create-coordinator';
+import { BatchEntityCreateCoordinator, getBatchEntityCreateCoordinatorGroupId, runWithBatchEntityCreateCoordinator } from './batch-entity-create-coordinator';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
 import { BatchExecutionMode, type BatchGraphqlExecutionPlanInput, type BatchGraphqlFileInput, type BatchGraphqlOperationInput } from './batch-types';
 
@@ -903,7 +903,7 @@ const buildCoalescedOperationKey = (
   operation: PreparedBatchGraphqlOperation,
   resolvedVariables: Record<string, unknown>,
 ): string | undefined => {
-  if (!operation.coalesceCompletedAdd) {
+  if (!operation.coalesceCompletedAdd || getBatchEntityCreateCoordinatorGroupId() !== undefined) {
     return undefined;
   }
   try {

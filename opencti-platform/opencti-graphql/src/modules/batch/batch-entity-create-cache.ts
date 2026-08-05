@@ -1,9 +1,14 @@
 import jsonCanonicalize from 'canonicalize';
 import { getBatchExecutionMetadata, isBatchWriteBoundaryOpen, setBatchExecutionMetadata } from './batch-executor';
+import { getBatchEntityCreateCoordinatorGroupId, waitForBatchEntityCreateCoordinatorTurn } from './batch-entity-create-coordinator';
 
 const BATCH_ENTITY_CREATE_PROMISES_METADATA_KEY = 'batch.entity-create.promises';
 
-type BatchEntityCreatePromiseCache = Map<string, Promise<unknown>>;
+type BatchEntityCreatePromiseEntry = {
+  coordinatorGroupId?: number;
+  promise: Promise<unknown>;
+};
+type BatchEntityCreatePromiseCache = Map<string, BatchEntityCreatePromiseEntry>;
 
 const isPlainObject = (value: object): boolean => {
   const prototype = Object.getPrototypeOf(value);
@@ -64,17 +69,25 @@ export const executeBatchCoalescedEntityCreate = <T>(
   }
   let cache = getBatchExecutionMetadata<BatchEntityCreatePromiseCache>(BATCH_ENTITY_CREATE_PROMISES_METADATA_KEY);
   if (!cache) {
-    cache = new Map<string, Promise<unknown>>();
+    cache = new Map<string, BatchEntityCreatePromiseEntry>();
     setBatchExecutionMetadata(BATCH_ENTITY_CREATE_PROMISES_METADATA_KEY, cache);
   }
-  const existing = cache.get(cacheKey) as Promise<T> | undefined;
+  const coordinatorGroupId = getBatchEntityCreateCoordinatorGroupId();
+  const existing = cache.get(cacheKey) as BatchEntityCreatePromiseEntry | undefined;
   if (existing) {
-    return existing;
+    if (coordinatorGroupId !== undefined && existing.coordinatorGroupId !== coordinatorGroupId) {
+      const coordinatorTurn = waitForBatchEntityCreateCoordinatorTurn();
+      if (coordinatorTurn) {
+        return coordinatorTurn.then(() => existing.promise as Promise<T>);
+      }
+    }
+    return existing.promise as Promise<T>;
   }
   const created = execute();
-  cache.set(cacheKey, created);
+  const entry = { coordinatorGroupId, promise: created };
+  cache.set(cacheKey, entry);
   const release = () => {
-    if (cache?.get(cacheKey) === created) {
+    if (cache?.get(cacheKey) === entry) {
       cache.delete(cacheKey);
     }
   };
