@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { logApp } from '../../config/conf';
+import { booleanConf, logApp } from '../../config/conf';
 import { BatchExecutionMode, BatchWaitUntil } from './batch-types';
 
 export enum BatchMutationKind {
@@ -43,6 +43,7 @@ export interface BatchMutation<T> {
 
 export interface BatchExecutionOptions {
   executionMode?: BatchExecutionMode;
+  performanceTraceId?: string;
   waitUntil?: BatchWaitUntil | string;
 }
 
@@ -70,6 +71,9 @@ interface BatchExecutionState {
 
 const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionState>();
 const pendingMaterializations = new Set<Promise<void>>();
+const BATCH_EXECUTION_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
+const BATCH_EXECUTION_LOG_MESSAGE = '[BATCH] Execution phase';
+const BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY = 'batch.performance-trace-id';
 
 const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
   executionMode: options.executionMode ?? BatchExecutionMode.Bulk,
@@ -146,6 +150,31 @@ export const setBatchExecutionMetadata = <T>(key: string, value: T): void => {
   }
 };
 
+export const getBatchExecutionPerformanceTraceId = (): string | undefined => {
+  return getBatchExecutionMetadata<string>(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY);
+};
+
+const logBatchExecutionPhase = (
+  state: BatchExecutionState,
+  phase: string,
+  durationMs: number,
+  extra: Record<string, unknown> = {},
+) => {
+  if (!BATCH_EXECUTION_PERFORMANCE_LOG) {
+    return;
+  }
+  logApp.info(BATCH_EXECUTION_LOG_MESSAGE, {
+    event: 'completed',
+    execution_id: state.metadata.get(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY),
+    phase,
+    duration_ms: durationMs,
+    committer_count: state.committers.size,
+    finalizer_count: state.finalizers.size,
+    side_effect_count: state.sideEffects.length,
+    ...extra,
+  });
+};
+
 export const registerBatchCommitter = (committer: BatchCommitter): boolean => {
   const state = batchExecutionStorage.getStore();
   if (!state) {
@@ -208,13 +237,27 @@ export const executeBatchMutations = async <T>(
     sideEffects: [],
     writeBoundaryOpen: true,
   };
+  if (options.performanceTraceId) {
+    state.metadata.set(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY, options.performanceTraceId);
+  }
   return batchExecutionStorage.run(state, async () => {
+    const executionStartedAt = Date.now();
     try {
+      const writesStartedAt = Date.now();
       const results = await executeWrites(mutations, state);
+      logBatchExecutionPhase(state, 'execute_writes', Date.now() - writesStartedAt, {
+        mutation_count: mutations.length,
+      });
       state.writeBoundaryOpen = false;
+      const commitStartedAt = Date.now();
       await commitWrites(state);
+      logBatchExecutionPhase(state, 'commit_writes', Date.now() - commitStartedAt);
+      const finalizersStartedAt = Date.now();
       await runFinalizers(state);
-      const materialization = materializeSideEffects(state);
+      logBatchExecutionPhase(state, 'run_finalizers', Date.now() - finalizersStartedAt);
+      const materializationStartedAt = Date.now();
+      const materialization = materializeSideEffects(state)
+        .finally(() => logBatchExecutionPhase(state, 'materialize_side_effects', Date.now() - materializationStartedAt));
       const hasSideEffects = state.sideEffects.length > 0;
       if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
         await materialization;
@@ -229,7 +272,12 @@ export const executeBatchMutations = async <T>(
       };
     } finally {
       state.writeBoundaryOpen = false;
+      const finalizersStartedAt = Date.now();
       await runFinalizers(state);
+      logBatchExecutionPhase(state, 'finalize_cleanup', Date.now() - finalizersStartedAt);
+      logBatchExecutionPhase(state, 'total', Date.now() - executionStartedAt, {
+        mutation_count: mutations.length,
+      });
     }
   });
 };

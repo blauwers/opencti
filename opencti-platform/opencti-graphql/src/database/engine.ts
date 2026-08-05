@@ -200,6 +200,7 @@ import { AbortError } from 'node-fetch';
 import {
   BatchSideEffectKind,
   getBatchExecutionMetadata,
+  getBatchExecutionPerformanceTraceId,
   isBatchWriteBoundaryOpen,
   registerBatchCommitter,
   registerBatchSideEffect,
@@ -240,6 +241,8 @@ const ES_MAX_MAPPINGS = 3000;
 const MAX_AGGREGATION_SIZE = 100;
 const BATCH_ENGINE_WRITES_METADATA_KEY = 'engine.writes';
 const BATCH_CONNECTION_PROJECTIONS_METADATA_KEY = 'engine.connection-projections';
+const BATCH_ENGINE_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
+const BATCH_ENGINE_FLUSH_LOG_MESSAGE = '[BATCH] Engine flush';
 
 type BufferedIndexWrite = {
   kind: 'index';
@@ -322,6 +325,23 @@ type BufferedConnectionProjection = {
 
 type BufferedConnectionProjectionState = {
   projections: Map<string, BufferedConnectionProjection>;
+};
+
+const logBufferedEngineFlushPhase = (
+  phase: string,
+  durationMs: number,
+  extra: Record<string, unknown> = {},
+) => {
+  if (!BATCH_ENGINE_PERFORMANCE_LOG) {
+    return;
+  }
+  logApp.info(BATCH_ENGINE_FLUSH_LOG_MESSAGE, {
+    event: 'completed',
+    execution_id: getBatchExecutionPerformanceTraceId(),
+    phase,
+    duration_ms: durationMs,
+    ...extra,
+  });
 };
 
 const applyBufferedConnectionProjections = (
@@ -6900,24 +6920,74 @@ const loadBufferedConnectionProjectionRelations = async (
 };
 
 const finalizeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]): Promise<BufferedEngineBulkAction[]> => {
+  const finalizeStartedAt = Date.now();
   const connectionProjections = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY)?.projections;
+  const inputActionCount = actions.length;
+  const projectionCount = connectionProjections?.size ?? 0;
   let projectionRelations: BasicStoreRelation[] = [];
   let projectionActions: BufferedEngineBulkAction[] = [];
   let finalActions = actions;
   let groups: BufferedEngineBulkActionGroup[] = [];
   let originalDocuments: BufferedEngineOriginalDocuments | undefined;
+  let outputActionCount = 0;
+  let originalDocumentCount = 0;
+  let loadedDocumentKeyCount = 0;
   try {
+    const projectionRelationsStartedAt = Date.now();
     projectionRelations = connectionProjections && actions.length > 0
       ? await loadBufferedConnectionProjectionRelations(actions[0].context, connectionProjections)
       : [];
+    logBufferedEngineFlushPhase('load_connection_projection_relations', Date.now() - projectionRelationsStartedAt, {
+      input_action_count: inputActionCount,
+      projection_count: projectionCount,
+      projection_relation_count: projectionRelations.length,
+    });
+    const projectionActionsStartedAt = Date.now();
     projectionActions = connectionProjections && actions.length > 0
       ? buildBufferedConnectionProjectionActions(actions[0].context, actions, projectionRelations, connectionProjections)
       : [];
+    logBufferedEngineFlushPhase('build_connection_projection_actions', Date.now() - projectionActionsStartedAt, {
+      input_action_count: inputActionCount,
+      projection_count: projectionCount,
+      projection_relation_count: projectionRelations.length,
+      projection_action_count: projectionActions.length,
+    });
     finalActions = projectionActions.length > 0 ? [...actions, ...projectionActions] : actions;
+    const buildGroupsStartedAt = Date.now();
     ({ groups } = buildBufferedEngineBulkActionGroups(finalActions));
+    logBufferedEngineFlushPhase('build_action_groups', Date.now() - buildGroupsStartedAt, {
+      input_action_count: finalActions.length,
+      group_count: groups.length,
+    });
+    const originalDocumentsStartedAt = Date.now();
     originalDocuments = await loadBufferedEngineOriginalDocuments(groups, connectionProjections);
-    return materializeBufferedEngineBulkActions(finalActions, originalDocuments, connectionProjections);
+    originalDocumentCount = originalDocuments.documents.size;
+    loadedDocumentKeyCount = originalDocuments.loadedKeys.size;
+    logBufferedEngineFlushPhase('load_original_documents', Date.now() - originalDocumentsStartedAt, {
+      group_count: groups.length,
+      original_document_count: originalDocumentCount,
+      loaded_document_key_count: loadedDocumentKeyCount,
+    });
+    const materializeStartedAt = Date.now();
+    const materializedActions = materializeBufferedEngineBulkActions(finalActions, originalDocuments, connectionProjections);
+    outputActionCount = materializedActions.length;
+    logBufferedEngineFlushPhase('materialize_actions', Date.now() - materializeStartedAt, {
+      input_action_count: finalActions.length,
+      group_count: groups.length,
+      output_action_count: outputActionCount,
+    });
+    return materializedActions;
   } finally {
+    logBufferedEngineFlushPhase('finalize_total', Date.now() - finalizeStartedAt, {
+      input_action_count: inputActionCount,
+      projection_count: projectionCount,
+      projection_relation_count: projectionRelations.length,
+      projection_action_count: projectionActions.length,
+      group_count: groups.length,
+      original_document_count: originalDocumentCount,
+      loaded_document_key_count: loadedDocumentKeyCount,
+      output_action_count: outputActionCount,
+    });
     projectionRelations.length = 0;
     projectionActions.length = 0;
     groups.length = 0;
@@ -7141,9 +7211,14 @@ const buildBufferedBulkUpdateActions = (writes: BufferedBulkUpdateWrite[]): Buff
 };
 
 const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
+  const flushStartedAt = Date.now();
   const orderedWrites = takeOrderedBufferedEngineWritesForFlush(state);
+  const orderedWriteCount = orderedWrites.length;
   let segment: BufferedEngineWrite[] = [];
   let actions: BufferedEngineBulkAction[] = [];
+  let builtActionCount = 0;
+  let finalizedActionCount = 0;
+  let coalescedActionCount = 0;
   const appendSegmentActions = async () => {
     if (segment.length === 0) {
       return;
@@ -7163,6 +7238,7 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
     }
   };
   try {
+    const buildActionsStartedAt = Date.now();
     for (let index = 0; index <= orderedWrites.length; index += 1) {
       const write = orderedWrites[index];
       const kindChanged = segment.length > 0 && (!write || write.kind !== segment[0].kind);
@@ -7175,10 +7251,37 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
         orderedWrites[index] = undefined;
       }
     }
+    builtActionCount = actions.length;
+    logBufferedEngineFlushPhase('build_actions', Date.now() - buildActionsStartedAt, {
+      ordered_write_count: orderedWriteCount,
+      action_count: builtActionCount,
+    });
+    const finalizeActionsStartedAt = Date.now();
     actions = await finalizeBufferedEngineBulkActions(actions);
+    finalizedActionCount = actions.length;
+    logBufferedEngineFlushPhase('finalize_actions', Date.now() - finalizeActionsStartedAt, {
+      input_action_count: builtActionCount,
+      action_count: finalizedActionCount,
+    });
+    const coalesceActionsStartedAt = Date.now();
     actions = coalesceBufferedEngineBulkActions(actions);
+    coalescedActionCount = actions.length;
+    logBufferedEngineFlushPhase('coalesce_actions', Date.now() - coalesceActionsStartedAt, {
+      input_action_count: finalizedActionCount,
+      action_count: coalescedActionCount,
+    });
+    const commitActionsStartedAt = Date.now();
     await executeBufferedEngineCommitActions(actions);
+    logBufferedEngineFlushPhase('commit_actions', Date.now() - commitActionsStartedAt, {
+      action_count: coalescedActionCount,
+    });
   } finally {
+    logBufferedEngineFlushPhase('total', Date.now() - flushStartedAt, {
+      ordered_write_count: orderedWriteCount,
+      built_action_count: builtActionCount,
+      finalized_action_count: finalizedActionCount,
+      coalesced_action_count: coalescedActionCount,
+    });
     state.writes = [];
     state.writeLookupsById.clear();
     orderedWrites.length = 0;

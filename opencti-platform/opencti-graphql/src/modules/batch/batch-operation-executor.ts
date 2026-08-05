@@ -95,12 +95,14 @@ const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 4;
 const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 2000;
 const BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT = 5 * 1024 * 1024;
 const BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE = '[BATCH] GraphQL execution admission';
+const BATCH_GRAPHQL_PHASE_LOG_MESSAGE = '[BATCH] GraphQL operation phase';
 const BATCH_GRAPHQL_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
 const configuredBatchGraphqlMaxActiveExecutions = Number(conf.get('app:concurrency:batch_max_active_executions'));
 const BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS = Number.isInteger(configuredBatchGraphqlMaxActiveExecutions) && configuredBatchGraphqlMaxActiveExecutions > 0
   ? configuredBatchGraphqlMaxActiveExecutions
   : BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS;
 const batchGraphqlExecutionAdmissionGate = createBatchExecutionAdmissionGate(BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS);
+let batchGraphqlExecutionSequence = 0;
 const BATCH_DEPENDENCY_FAILED_CODE = 'BATCH_DEPENDENCY_FAILED';
 const BATCH_OPERATION_FAILED_CODE = 'BATCH_OPERATION_FAILED';
 const BATCH_LOCK_ERROR_CODE = 'LOCK_ERROR';
@@ -1040,7 +1042,9 @@ const executeOperationGroups = async (
   resultBindings: BatchGraphqlResultBindings,
   bundlePlan: BatchGraphqlExecutionPlanInput | undefined,
   allowPartialFailures: boolean,
+  executionId?: string,
 ): Promise<BatchGraphqlOperationExecution> => {
+  const executionStartedAt = Date.now();
   const groups = buildOperationGroups(operations, bundlePlan);
   const groupsByPhase = new Map<number, PreparedBatchGraphqlOperationGroup[]>();
   groups.forEach((group) => {
@@ -1058,6 +1062,7 @@ const executeOperationGroups = async (
   };
   const phases = Array.from(groupsByPhase.keys()).sort((left, right) => left - right);
   for (const phase of phases) {
+    const phaseStartedAt = Date.now();
     const phaseGroups = groupsByPhase.get(phase) ?? [];
     const runnableGroups: PreparedBatchGraphqlOperationGroup[] = [];
     phaseGroups.forEach((group) => {
@@ -1084,6 +1089,31 @@ const executeOperationGroups = async (
     if (remainingGroups.length > 0) {
       await executeOperationGroupsWithConcurrency(schema, context, remainingGroups, resultBindings, results, state);
     }
+    if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+      logApp.info(BATCH_GRAPHQL_PHASE_LOG_MESSAGE, {
+        event: 'completed',
+        execution_id: executionId,
+        phase,
+        duration_ms: Date.now() - phaseStartedAt,
+        phase_group_count: phaseGroups.length,
+        runnable_group_count: runnableGroups.length,
+        coordinated_group_count: coordinatedGroups.length,
+        remaining_group_count: remainingGroups.length,
+        operation_count: phaseGroups.reduce((total, group) => total + group.operations.length, 0),
+        operation_error_count: state.operationErrors.length,
+      });
+    }
+  }
+  if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+    logApp.info(BATCH_GRAPHQL_PHASE_LOG_MESSAGE, {
+      event: 'completed',
+      execution_id: executionId,
+      phase: 'total',
+      duration_ms: Date.now() - executionStartedAt,
+      group_count: groups.length,
+      operation_count: operations.length,
+      operation_error_count: state.operationErrors.length,
+    });
   }
   return {
     operationErrors: state.operationErrors.sort((left, right) => left.operationIndex - right.operationIndex),
@@ -1100,12 +1130,20 @@ export const executeBatchGraphqlOperations = async (
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
+  batchGraphqlExecutionSequence += 1;
+  const executionId = `batch-graphql-${batchGraphqlExecutionSequence}`;
   const admissionStats = getBatchGraphqlExecutionAdmissionStats(operations);
   const admissionRequestedAt = Date.now();
   const admissionSnapshotBefore = BATCH_GRAPHQL_PERFORMANCE_LOG ? batchGraphqlExecutionAdmissionGate.snapshot() : undefined;
+  const admissionMetadata = BATCH_GRAPHQL_PERFORMANCE_LOG ? {
+    execution_id: executionId,
+    sample_object_ids: operations.flatMap((operation) => (operation.objectId ? [operation.objectId] : [])).slice(0, 3),
+    bundle_phase_count: options.bundlePlan?.executionPhases.length ?? 0,
+  } : {};
   if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
     logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
       event: 'requested',
+      ...admissionMetadata,
       operation_count: admissionStats.operationCount,
       encoded_bytes: admissionStats.encodedBytes,
       admission_weight: admissionStats.weight,
@@ -1117,6 +1155,7 @@ export const executeBatchGraphqlOperations = async (
   if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
     logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
       event: 'admitted',
+      ...admissionMetadata,
       operation_count: admissionStats.operationCount,
       encoded_bytes: admissionStats.encodedBytes,
       admission_weight: admissionStats.weight,
@@ -1137,8 +1176,12 @@ export const executeBatchGraphqlOperations = async (
         resultBindings,
         options.bundlePlan,
         options.executionMode !== BatchExecutionMode.Atomic,
+        executionId,
       ),
-    }], options);
+    }], {
+      ...options,
+      performanceTraceId: executionId,
+    });
     return {
       ...execution,
       operationErrors: execution.results[0].operationErrors,
@@ -1150,6 +1193,7 @@ export const executeBatchGraphqlOperations = async (
     if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
       logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
         event: 'released',
+        ...admissionMetadata,
         operation_count: admissionStats.operationCount,
         encoded_bytes: admissionStats.encodedBytes,
         admission_weight: admissionStats.weight,
