@@ -8,7 +8,11 @@ import {
   registerBatchCommitter,
   registerBatchSideEffect,
 } from '../../../../src/modules/batch/batch-executor';
-import { buildBatchGraphqlResultToken, executeBatchGraphqlOperations } from '../../../../src/modules/batch/batch-operation-executor';
+import {
+  buildBatchGraphqlResultToken,
+  executeBatchGraphqlOperations,
+  getBatchGraphqlExecutionAdmissionWeight,
+} from '../../../../src/modules/batch/batch-operation-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
 const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<void>) => makeExecutableSchema({
@@ -121,6 +125,18 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
 });
 
 describe('batch GraphQL operation executor', () => {
+  it('weights admission by both operation count and encoded payload bytes', () => {
+    expect(getBatchGraphqlExecutionAdmissionWeight(Array.from({ length: 1001 }, () => ({ query: 'mutation { record(value: "x") }' })), 4)).toBe(2);
+    expect(getBatchGraphqlExecutionAdmissionWeight([{
+      query: 'mutation { record(value: "x") }',
+      variables: 'x'.repeat(11 * 1024 * 1024),
+    }], 4)).toBe(3);
+    expect(getBatchGraphqlExecutionAdmissionWeight([{
+      query: 'mutation { record(value: "x") }',
+      variables: 'x'.repeat(30 * 1024 * 1024),
+    }], 4)).toBe(4);
+  });
+
   it('executes mutation documents under one write boundary and preserves batch metadata', async () => {
     const calls: string[] = [];
     const schema = buildSchema(calls);

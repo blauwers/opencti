@@ -18,8 +18,11 @@ describe('batch execution admission gate', () => {
 
     expect(gate.snapshot()).toEqual({
       activeExecutions: 2,
+      activeWeight: 2,
       maxActiveExecutions: 2,
+      maxActiveWeight: 2,
       waitingExecutions: 2,
+      waitingWeight: 2,
     });
 
     releaseFirst();
@@ -27,8 +30,11 @@ describe('batch execution admission gate', () => {
     expect(admitted).toEqual(['third']);
     expect(gate.snapshot()).toEqual({
       activeExecutions: 2,
+      activeWeight: 2,
       maxActiveExecutions: 2,
+      maxActiveWeight: 2,
       waitingExecutions: 1,
+      waitingWeight: 1,
     });
 
     releaseSecond();
@@ -36,16 +42,22 @@ describe('batch execution admission gate', () => {
     expect(admitted).toEqual(['third', 'fourth']);
     expect(gate.snapshot()).toEqual({
       activeExecutions: 2,
+      activeWeight: 2,
       maxActiveExecutions: 2,
+      maxActiveWeight: 2,
       waitingExecutions: 0,
+      waitingWeight: 0,
     });
 
     releaseThird();
     releaseFourth();
     expect(gate.snapshot()).toEqual({
       activeExecutions: 0,
+      activeWeight: 0,
       maxActiveExecutions: 2,
+      maxActiveWeight: 2,
       waitingExecutions: 0,
+      waitingWeight: 0,
     });
   });
 
@@ -58,8 +70,58 @@ describe('batch execution admission gate', () => {
 
     expect(gate.snapshot()).toEqual({
       activeExecutions: 0,
+      activeWeight: 0,
       maxActiveExecutions: 1,
+      maxActiveWeight: 1,
       waitingExecutions: 0,
+      waitingWeight: 0,
     });
+  });
+
+  it('preserves waiter order while admitting weighted executions', async () => {
+    const gate = createBatchExecutionAdmissionGate(4);
+    const releaseFirst = await gate.acquire(3);
+    const admitted: string[] = [];
+    const secondReleasePromise = gate.acquire(2).then((release) => {
+      admitted.push('second');
+      return release;
+    });
+    const thirdReleasePromise = gate.acquire(1).then((release) => {
+      admitted.push('third');
+      return release;
+    });
+
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 1,
+      activeWeight: 3,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 2,
+      waitingWeight: 3,
+    });
+
+    releaseFirst();
+    const releaseSecond = await secondReleasePromise;
+    const releaseThird = await thirdReleasePromise;
+
+    expect(admitted).toEqual(['second', 'third']);
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 2,
+      activeWeight: 3,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 0,
+      waitingWeight: 0,
+    });
+
+    releaseSecond();
+    releaseThird();
+  });
+
+  it('rejects weights that can never fit in the gate', async () => {
+    const gate = createBatchExecutionAdmissionGate(2);
+
+    await expect(gate.acquire(0)).rejects.toThrow('Batch execution admission weight must be a positive integer within the admission limit');
+    await expect(gate.acquire(3)).rejects.toThrow('Batch execution admission weight must be a positive integer within the admission limit');
   });
 });

@@ -87,6 +87,8 @@ const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
 const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 4;
+const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 1000;
+const BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT = 5 * 1024 * 1024;
 const configuredBatchGraphqlMaxActiveExecutions = Number(conf.get('app:concurrency:batch_max_active_executions'));
 const BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS = Number.isInteger(configuredBatchGraphqlMaxActiveExecutions) && configuredBatchGraphqlMaxActiveExecutions > 0
   ? configuredBatchGraphqlMaxActiveExecutions
@@ -97,6 +99,34 @@ const BATCH_OPERATION_FAILED_CODE = 'BATCH_OPERATION_FAILED';
 const BATCH_LOCK_ERROR_CODE = 'LOCK_ERROR';
 const RETRYABLE_PARTIAL_OPERATION_ERROR_CODES = new Set([MISSING_REF_ERROR, BATCH_LOCK_ERROR_CODE]);
 const NON_RETRYABLE_PARTIAL_OPERATION_ERROR_CODES = new Set([FUNCTIONAL_ERROR, VALIDATION_ERROR]);
+
+const getStringByteLength = (value: string | null | undefined): number => {
+  return value ? Buffer.byteLength(value, 'utf8') : 0;
+};
+
+export const getBatchGraphqlExecutionAdmissionWeight = (
+  operations: BatchGraphqlOperationInput[],
+  maxActiveWeight = BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS,
+): number => {
+  const encodedBytes = operations.reduce((total, operation) => {
+    const fileBytes = operation.files?.reduce((filesTotal, file) => {
+      return filesTotal
+        + getStringByteLength(file.path)
+        + getStringByteLength(file.name)
+        + getStringByteLength(file.mimeType)
+        + getStringByteLength(file.data);
+    }, 0) ?? 0;
+    return total
+      + getStringByteLength(operation.query)
+      + getStringByteLength(operation.variables)
+      + getStringByteLength(operation.operationName)
+      + getStringByteLength(operation.objectId)
+      + fileBytes;
+  }, 0);
+  const operationWeight = Math.ceil(operations.length / BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT);
+  const byteWeight = Math.ceil(encodedBytes / BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT);
+  return Math.min(maxActiveWeight, Math.max(1, operationWeight, byteWeight));
+};
 
 export const buildBatchGraphqlResultToken = (operationIndex: number, path: string[]): string => {
   return `${BATCH_RESULT_TOKEN_PREFIX}:${operationIndex}:${path.join('.')}`;
@@ -1052,7 +1082,7 @@ export const executeBatchGraphqlOperations = async (
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
-  const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire();
+  const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(getBatchGraphqlExecutionAdmissionWeight(operations));
   try {
     const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
     const resultBindings: BatchGraphqlResultBindings = new Map();
