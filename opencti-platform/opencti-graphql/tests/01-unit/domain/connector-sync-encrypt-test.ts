@@ -4,6 +4,7 @@ vi.mock('../../../src/database/middleware', () => ({
   updateAttribute: vi.fn(),
   createEntity: vi.fn(),
   patchAttribute: vi.fn(),
+  patchAttributeFromLoadedWithRefsInBatch: vi.fn(),
   deleteElementById: vi.fn(),
   internalDeleteElementById: vi.fn(),
 }));
@@ -34,7 +35,7 @@ vi.mock('../../../src/database/repository', async (importOriginal) => {
   };
 });
 vi.mock('../../../src/database/middleware-loader', () => ({
-  storeLoadById: vi.fn(), fullEntitiesList: vi.fn(), internalLoadById: vi.fn(), pageEntitiesConnection: vi.fn(),
+  storeLoadById: vi.fn(), fullEntitiesList: vi.fn(), internalFindByIds: vi.fn(), internalLoadById: vi.fn(), pageEntitiesConnection: vi.fn(),
 }));
 vi.mock('../../../src/listener/UserActionListener', () => ({
   publishUserAction: vi.fn(), completeContextDataForEntity: vi.fn(),
@@ -73,8 +74,8 @@ vi.mock('../../../src/config/conf', async () => {
 
 import { encryptSynchronizerCredential } from '../../../src/domain/connector-sync-crypto';
 import { testSync } from '../../../src/domain/connector-utils';
-import { updateAttribute, createEntity, patchAttribute } from '../../../src/database/middleware';
-import { storeLoadById } from '../../../src/database/middleware-loader';
+import { updateAttribute, createEntity, patchAttribute, patchAttributeFromLoadedWithRefsInBatch } from '../../../src/database/middleware';
+import { internalFindByIds, storeLoadById } from '../../../src/database/middleware-loader';
 import { notify } from '../../../src/database/redis';
 import { registerConnectorQueues } from '../../../src/database/rabbitmq';
 import { completeConnector } from '../../../src/database/repository';
@@ -335,14 +336,14 @@ describe('connector.ts — fetchRemoteStreams deny-list coverage', () => {
 describe('connector ping refresh behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(storeLoadById).mockResolvedValue({
+    vi.mocked(internalFindByIds).mockResolvedValue([{
       id: 'connector--1',
       name: 'Example Connector',
       connector_type: 'EXTERNAL_IMPORT',
       connector_scope: 'indicator,malware',
-    } as never);
+    }] as never);
     vi.mocked(registerConnectorQueues).mockResolvedValue(undefined as never);
-    vi.mocked(patchAttribute).mockResolvedValue({
+    vi.mocked(patchAttributeFromLoadedWithRefsInBatch).mockResolvedValue({
       element: {
         id: 'connector--1',
         name: 'Example Connector',
@@ -361,15 +362,15 @@ describe('connector ping refresh behavior', () => {
     } as never);
 
     expect(registerConnectorQueues).toHaveBeenCalledWith('connector--1', 'Example Connector', 'EXTERNAL_IMPORT', ['indicator', 'malware']);
-    expect(patchAttribute).toHaveBeenCalledWith(
+    expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledWith(
       fakeContext,
       fakeUser,
-      'connector--1',
-      'Connector',
+      expect.objectContaining({ id: 'connector--1' }),
       expect.objectContaining({ connector_state: '{"last_run":1}' }),
       { forceRefresh: false },
     );
-    expect(storeLoadById).toHaveBeenCalledTimes(1);
+    expect(internalFindByIds).toHaveBeenCalledWith(fakeContext, fakeUser, ['connector--1'], { type: 'Connector' });
+    expect(storeLoadById).not.toHaveBeenCalled();
     expect(completeConnector).toHaveBeenCalledWith(expect.objectContaining({ connector_state: '{"last_run":1}' }));
     expect(result).toMatchObject({ connector_state: '{"last_run":1}' });
   });

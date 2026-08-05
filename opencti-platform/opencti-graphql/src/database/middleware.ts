@@ -3042,21 +3042,22 @@ const triggerEntityUpdateAutoEnrichment = async (context: AuthContext, user: Aut
   await updateEntityAutoEnrichment(context, user, element, element.entity_type, loaders);
 };
 type UpdateAttributeOpts = LoadByIdsWithDependeciesOpts & UpdateAttributeMetaResolvedOpts;
-export const updateAttribute = async <T extends StoreObject>(
+type UpdateAttributeExecutionOpts = { noEnrich?: boolean } & UpdateAttributeOpts;
+const executeUpdateAttributeMutation = async <T extends StoreObject>(
   context: AuthContext,
   user: AuthUser,
-  id: string,
-  type: string,
+  loadInitial: () => Promise<T | null | undefined>,
+  missingDetails: Record<string, unknown>,
   inputs: EditInput[],
-  opts: { noEnrich?: boolean } & UpdateAttributeOpts = {},
+  opts: UpdateAttributeExecutionOpts = {},
 ) => {
   const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
   return executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
     executeWrite: async () => {
-      const initial = await storeLoadByIdWithRefs<T>(context, user, id, { ...opts, type });
+      const initial = await loadInitial();
       if (!initial) {
-        throw FunctionalError('Cant find element to update', { id, type });
+        throw FunctionalError('Cant find element to update', missingDetails);
       }
       // Validate input attributes
       const entitySetting = await getEntitySettingFromCache(context, initial.entity_type);
@@ -3070,6 +3071,35 @@ export const updateAttribute = async <T extends StoreObject>(
     }] : []),
   }, { waitUntil });
 };
+export const updateAttributeFromLoadedWithRefsInBatch = async <T extends StoreObject>(
+  context: AuthContext,
+  user: AuthUser,
+  initial: T | null | undefined,
+  inputs: EditInput[],
+  opts: UpdateAttributeExecutionOpts = {},
+) => executeUpdateAttributeMutation(
+  context,
+  user,
+  async () => initial,
+  { id: initial?.internal_id, type: initial?.entity_type },
+  inputs,
+  opts,
+);
+export const updateAttribute = async <T extends StoreObject>(
+  context: AuthContext,
+  user: AuthUser,
+  id: string,
+  type: string,
+  inputs: EditInput[],
+  opts: UpdateAttributeExecutionOpts = {},
+) => executeUpdateAttributeMutation(
+  context,
+  user,
+  () => storeLoadByIdWithRefs<T>(context, user, id, { ...opts, type }),
+  { id, type },
+  inputs,
+  opts,
+);
 type PatchAttributeOpts = UpdateAttributeOpts & {
   operations?: Record<string, undefined | 'add' | 'remove' | 'replace'>;
 };
@@ -3094,6 +3124,16 @@ export const patchAttributeFromLoadedWithRefs = async <T extends StoreObject>(
 ) => {
   const inputs = transformPatchToInput(patch, opts.operations);
   return updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
+};
+export const patchAttributeFromLoadedWithRefsInBatch = async <T extends StoreObject>(
+  context: AuthContext,
+  user: AuthUser,
+  initial: T | undefined | null,
+  patch: Record<string, any>,
+  opts: PatchAttributeOpts = {},
+) => {
+  const inputs = transformPatchToInput(patch, opts.operations);
+  return updateAttributeFromLoadedWithRefsInBatch<T>(context, user, initial, inputs, opts);
 };
 // endregion
 

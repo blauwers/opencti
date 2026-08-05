@@ -1,5 +1,5 @@
 import { v5 as uuidv5 } from 'uuid';
-import { createEntity, deleteElementById, internalDeleteElementById, patchAttribute, updateAttribute } from '../database/middleware';
+import { createEntity, deleteElementById, internalDeleteElementById, patchAttribute, patchAttributeFromLoadedWithRefsInBatch, updateAttribute } from '../database/middleware';
 import { type GetHttpClient, getHttpClient } from '../utils/http-client';
 import { completeConnector, connector, connectors, connectorsFor } from '../database/repository';
 import { getConnectorQueueDetails, purgeConnectorQueues, registerConnectorQueues, unregisterConnector, unregisterExchanges } from '../database/rabbitmq';
@@ -22,7 +22,7 @@ import {
   redisSetConnectorLogs,
   setEditContext,
 } from '../database/redis';
-import { fullEntitiesList, internalLoadById, pageEntitiesConnection, storeLoadById } from '../database/middleware-loader';
+import { fullEntitiesList, internalFindByIds, internalLoadById, pageEntitiesConnection, storeLoadById } from '../database/middleware-loader';
 import { completeContextDataForEntity, publishUserAction, type UserImportActionContextData } from '../listener/UserActionListener';
 import type { AuthContext, AuthUser } from '../types/user';
 import type { BasicStoreEntityConnector, BasicStoreEntityConnectorManager, BasicStoreEntitySynchronizer, ConnectorInfo } from '../types/connector';
@@ -137,18 +137,18 @@ export const updateConnectorWithConnectorInfo = async (
 
     connectorPatch = { ...connectorPatch, connector_info: connectorInfoData };
   }
-  return patchAttribute<BasicStoreEntityConnector>(
+  return patchAttributeFromLoadedWithRefsInBatch<BasicStoreEntityConnector>(
     context,
     user,
-    connectorEntity.id,
-    ENTITY_TYPE_CONNECTOR,
+    connectorEntity,
     connectorPatch,
     { forceRefresh: false },
   );
 };
 
 export const pingConnector = async (context: AuthContext, user: AuthUser, id: string, state: string, connectorInfo: ConnectorInfo) => {
-  const connectorEntity = await storeLoadById(context, user, id, ENTITY_TYPE_CONNECTOR) as unknown as BasicStoreEntityConnector;
+  const connectorEntities = await internalFindByIds<BasicStoreEntityConnector>(context, user, [id], { type: ENTITY_TYPE_CONNECTOR }) as BasicStoreEntityConnector[];
+  const [connectorEntity] = connectorEntities;
   if (!connectorEntity) {
     throw FunctionalError('No connector found with the specified ID', { id });
   }
