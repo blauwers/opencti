@@ -117,6 +117,59 @@ describe('batch entity create coordinator', () => {
     }
   });
 
+  it('parks cross-group coalesced waiters while the producer enters a later lookup wave', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
+    const input = { external_id: 'T1174', source_name: 'mitre-attack' };
+    let waiterStartedResolve: (() => void) | undefined;
+    const waiterStarted = new Promise<void>((resolve) => {
+      waiterStartedResolve = resolve;
+    });
+    const execute = vi.fn(async () => {
+      await resolveBatchEntityCreateLookup({
+        finderIds: ['external-reference--one'],
+        participantIds: ['external-reference--one'],
+        type: 'External-Reference',
+      });
+      await waiterStarted;
+      await resolveBatchEntityCreateLookup({
+        finderIds: ['kill-chain-phase--one'],
+        participantIds: ['kill-chain-phase--one'],
+        type: 'Kill-Chain-Phase',
+      });
+      return { element: { internal_id: 'external-reference--one' } };
+    });
+
+    try {
+      const executionPromise = executeBatchMutations([{
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => Promise.all([
+          runWithBatchEntityCreateCoordinator(coordinator, 0, async () => executeBatchCoalescedEntityCreate('External-Reference', input, {}, execute)),
+          runWithBatchEntityCreateCoordinator(coordinator, 1, async () => {
+            waiterStartedResolve?.();
+            return executeBatchCoalescedEntityCreate('External-Reference', input, {}, execute);
+          }),
+        ]),
+      }]);
+      const execution = await Promise.race([
+        executionPromise,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('cross-group coalesced waiter deadlocked')), 1000);
+        }),
+      ]);
+
+      expect(execution.results).toEqual([[
+        { element: { internal_id: 'external-reference--one' } },
+        { element: { internal_id: 'external-reference--one' } },
+      ]]);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(internalFindByIds).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
   it('keeps post-lookup group execution bounded after resolving one disjoint wave', async () => {
     vi.mocked(internalFindByIds).mockResolvedValue([] as any);
 

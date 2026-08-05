@@ -1,6 +1,6 @@
 import jsonCanonicalize from 'canonicalize';
 import { getBatchExecutionMetadata, isBatchWriteBoundaryOpen, setBatchExecutionMetadata } from './batch-executor';
-import { getBatchEntityCreateCoordinatorGroupId, waitForBatchEntityCreateCoordinatorTurn } from './batch-entity-create-coordinator';
+import { getBatchEntityCreateCoordinatorGroupId, waitForBatchEntityCreateCoordinatorPromise } from './batch-entity-create-coordinator';
 
 const BATCH_ENTITY_CREATE_PROMISES_METADATA_KEY = 'batch.entity-create.promises';
 
@@ -76,9 +76,9 @@ export const executeBatchCoalescedEntityCreate = <T>(
   const existing = cache.get(cacheKey) as BatchEntityCreatePromiseEntry | undefined;
   if (existing) {
     if (coordinatorGroupId !== undefined && existing.coordinatorGroupId !== coordinatorGroupId) {
-      const coordinatorTurn = waitForBatchEntityCreateCoordinatorTurn();
-      if (coordinatorTurn) {
-        return coordinatorTurn.then(() => existing.promise as Promise<T>);
+      const coordinatedPromise = waitForBatchEntityCreateCoordinatorPromise(existing.promise as Promise<T>);
+      if (coordinatedPromise) {
+        return coordinatedPromise;
       }
     }
     return existing.promise as Promise<T>;

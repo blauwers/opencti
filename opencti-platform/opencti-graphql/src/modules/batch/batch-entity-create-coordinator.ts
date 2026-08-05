@@ -7,7 +7,7 @@ import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
 
-type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'completed';
+type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'parked' | 'completed';
 type BatchEntityCreateLookupRetention = 'group' | 'lock';
 
 type BatchEntityCreateLock = {
@@ -40,10 +40,11 @@ type PendingBatchEntityCreateLookup = {
   resolve: (resolution: BatchEntityCreateLookupResolution) => void;
 };
 
-type ReadyBatchEntityCreateLookup = {
-  lookup: PendingBatchEntityCreateLookup;
+type ReadyBatchEntityCreateActivation = {
+  groupId: number;
   participantIds: string[];
-  resolution: BatchEntityCreateLookupResolution;
+  reject: (cause: unknown) => void;
+  resolve: () => void;
 };
 
 type BatchEntityCreateCoordinatorScope = {
@@ -87,7 +88,7 @@ export class BatchEntityCreateCoordinator {
 
   private readonly pendingLookups = new Map<number, PendingBatchEntityCreateLookup>();
 
-  private readonly readyLookups: ReadyBatchEntityCreateLookup[] = [];
+  private readonly readyActivations: ReadyBatchEntityCreateActivation[] = [];
 
   private readonly sharedAbortController = new AbortController();
 
@@ -146,7 +147,7 @@ export class BatchEntityCreateCoordinator {
         resolve,
       });
       this.groupStates.set(groupId, 'waiting');
-      this.releaseReadyLookups();
+      this.releaseReadyActivations();
       this.scheduleFlushIfReady();
     });
   }
@@ -160,7 +161,7 @@ export class BatchEntityCreateCoordinator {
     this.scopedParticipantIdCountsByGroup.delete(groupId);
     this.reservedParticipantIdsByGroup.delete(groupId);
     this.notifyReservationChange();
-    this.releaseReadyLookups();
+    this.releaseReadyActivations();
     this.scheduleFlushIfReady();
   }
 
@@ -175,14 +176,31 @@ export class BatchEntityCreateCoordinator {
     return this.acquireAdditionalParticipantLock(groupId, input);
   }
 
+  waitForPromise<T>(groupId: number, promise: Promise<T>): Promise<T> {
+    if (this.closed) {
+      return Promise.reject(new Error('Batch entity create coordinator is closed'));
+    }
+    this.parkGroup(groupId);
+    return promise.then(
+      async (value) => {
+        await this.resumeParkedGroup(groupId);
+        return value;
+      },
+      async (cause) => {
+        await this.resumeParkedGroup(groupId);
+        throw cause;
+      },
+    );
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     await this.flushPromise?.catch(() => undefined);
     const pending = Array.from(this.pendingLookups.values());
     this.pendingLookups.clear();
     pending.forEach((lookup) => lookup.reject(new Error('Batch entity create phase ended before lookup resolution')));
-    const ready = this.readyLookups.splice(0);
-    ready.forEach(({ lookup }) => lookup.reject(new Error('Batch entity create phase ended before lookup resolution')));
+    const ready = this.readyActivations.splice(0);
+    ready.forEach(({ reject }) => reject(new Error('Batch entity create phase ended before lookup resolution')));
     await this.releasePhysicalLocks([
       ...Array.from(this.scopedLocks),
       ...this.heldLocks.reverse(),
@@ -203,7 +221,7 @@ export class BatchEntityCreateCoordinator {
   private isReadyToFlush(): boolean {
     return this.groupOrder.every((groupId) => {
       const state = this.groupStates.get(groupId);
-      return state === 'waiting' || state === 'completed';
+      return state === 'waiting' || state === 'parked' || state === 'completed';
     });
   }
 
@@ -276,9 +294,14 @@ export class BatchEntityCreateCoordinator {
         }
         this.reserveGroupParticipantIds(lookup.groupId);
         this.groupStates.set(lookup.groupId, 'ready');
-        this.readyLookups.push(readyLookup);
+        this.readyActivations.push({
+          groupId: lookup.groupId,
+          participantIds,
+          reject: lookup.reject,
+          resolve: () => lookup.resolve(readyLookup.resolution),
+        });
       });
-      this.releaseReadyLookups();
+      this.releaseReadyActivations();
     } catch (cause) {
       await this.releasePhysicalLocks(Array.from(scopedLocksByGroup.values()).flat());
       selectedLookups.forEach((lookup) => {
@@ -288,20 +311,54 @@ export class BatchEntityCreateCoordinator {
     }
   }
 
-  private releaseReadyLookups(): void {
+  private releaseReadyActivations(): void {
     if (this.closed) {
       return;
     }
-    while (this.activeGroupCount < this.maxActiveGroups && this.readyLookups.length > 0) {
-      const readyIndex = this.readyLookups.findIndex((readyLookup) => !this.hasReservedParticipantConflict(readyLookup.lookup.groupId));
+    while (this.activeGroupCount < this.maxActiveGroups && this.readyActivations.length > 0) {
+      const readyIndex = this.readyActivations.findIndex((readyActivation) => !this.hasReservedParticipantConflict(readyActivation.groupId));
       if (readyIndex === -1) {
         return;
       }
-      const [ready] = this.readyLookups.splice(readyIndex, 1);
-      this.groupStates.set(ready.lookup.groupId, 'active');
+      const [ready] = this.readyActivations.splice(readyIndex, 1);
+      this.groupStates.set(ready.groupId, 'active');
       this.activeGroupCount += 1;
-      ready.lookup.resolve(ready.resolution);
+      ready.resolve();
     }
+  }
+
+  private parkGroup(groupId: number): void {
+    const state = this.groupStates.get(groupId);
+    if (state === 'active') {
+      this.activeGroupCount -= 1;
+      this.reservedParticipantIdsByGroup.delete(groupId);
+      this.notifyReservationChange();
+    } else if (state !== 'collecting') {
+      throw new Error(`Batch entity create group ${groupId} cannot be parked from state ${state}`);
+    }
+    this.groupStates.set(groupId, 'parked');
+    this.releaseReadyActivations();
+    this.scheduleFlushIfReady();
+  }
+
+  private resumeParkedGroup(groupId: number): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error('Batch entity create coordinator is closed'));
+    }
+    if (this.groupStates.get(groupId) !== 'parked') {
+      return Promise.reject(new Error(`Batch entity create group ${groupId} is not parked`));
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.reserveGroupParticipantIds(groupId);
+      this.groupStates.set(groupId, 'ready');
+      this.readyActivations.push({
+        groupId,
+        participantIds: this.getHeldParticipantIds(groupId),
+        reject,
+        resolve,
+      });
+      this.releaseReadyActivations();
+    });
   }
 
   private addGroupOwnedParticipantIds(groupId: number, draftId: string | undefined, participantIds: string[]): void {
@@ -344,7 +401,7 @@ export class BatchEntityCreateCoordinator {
       this.scopedParticipantIdCountsByGroup.delete(groupId);
     }
     this.reserveGroupParticipantIds(groupId);
-    this.releaseReadyLookups();
+    this.releaseReadyActivations();
   }
 
   private reserveGroupParticipantIds(groupId: number): void {
@@ -656,13 +713,9 @@ export const getBatchEntityCreateCoordinatorGroupId = (): number | undefined => 
   return batchEntityCreateCoordinatorStorage.getStore()?.groupId;
 };
 
-export const waitForBatchEntityCreateCoordinatorTurn = (): Promise<void> | undefined => {
+export const waitForBatchEntityCreateCoordinatorPromise = <T>(promise: Promise<T>): Promise<T> | undefined => {
   const scope = batchEntityCreateCoordinatorStorage.getStore();
-  return scope?.coordinator.registerLookup(scope.groupId, {
-    finderIds: [],
-    participantIds: [],
-    type: '',
-  }).then(() => undefined);
+  return scope?.coordinator.waitForPromise(scope.groupId, promise);
 };
 
 export const getBatchEntityCreateCoordinatorHeldParticipantIds = (draftId?: string): string[] => {
