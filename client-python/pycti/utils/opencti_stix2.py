@@ -60,6 +60,7 @@ SPEC_VERSION = "2.1"
 ERROR_TYPE_LOCK = "LOCK_ERROR"
 ERROR_TYPE_MISSING_REFERENCE = "MISSING_REFERENCE_ERROR"
 BATCH_RETRYABLE_REJECTION_REASON = "MISSING_REFERENCE"
+BATCH_OPERATION_REJECTION_REASON = "BATCH_OPERATION_ERROR"
 ERROR_TYPE_BAD_GATEWAY = "Bad Gateway"
 ERROR_TYPE_DRAFT_LOCK = "DRAFT_LOCKED"
 ERROR_TYPE_WORK_NOT_ALIVE = "WORK_NOT_ALIVE"
@@ -547,46 +548,66 @@ class OpenCTIStix2:
         execution_result = self.opencti.execute_batch_mutation_plan(
             plan, **execute_kwargs
         )
-        failed_object_ids = self._batch_retryable_object_ids(execution_result)
-        if len(failed_object_ids) == 0:
+        failed_operations = self._batch_operation_failures(execution_result)
+        if len(failed_operations) == 0:
             return imported, rejected
 
         successful_imports = [
-            item for item in imported if item.get("id") not in failed_object_ids
+            item for item in imported if item.get("id") not in failed_operations
         ]
         rejected_ids = {item.get("id") for item in rejected if isinstance(item, dict)}
         failed_items = []
         for item in data.get("objects", []):
+            operation_error = failed_operations.get(item.get("id"))
             if (
                 isinstance(item, dict)
-                and item.get("id") in failed_object_ids
+                and operation_error is not None
                 and item.get("id") not in rejected_ids
             ):
                 failed_item = deepcopy(item)
-                failed_item["rejection_info"] = {
-                    "reject_reason": BATCH_RETRYABLE_REJECTION_REASON,
-                    "retryable": True,
+                retryable = operation_error.get("retryable") is True
+                operation_error_code = operation_error.get("code")
+                rejection_info = {
+                    "reject_reason": (
+                        BATCH_RETRYABLE_REJECTION_REASON
+                        if retryable
+                        and operation_error_code
+                        in (None, ERROR_TYPE_MISSING_REFERENCE)
+                        else operation_error_code
+                        or BATCH_OPERATION_REJECTION_REASON
+                    ),
+                    "retryable": retryable,
                 }
+                if isinstance(operation_error.get("message"), str):
+                    rejection_info["last_error_msg"] = operation_error["message"]
+                failed_item["rejection_info"] = rejection_info
                 failed_items.append(failed_item)
         return successful_imports, [*rejected, *failed_items]
 
     @staticmethod
-    def _batch_retryable_object_ids(execution_result: Any) -> set[str]:
+    def _batch_operation_failures(execution_result: Any) -> Dict[str, Dict[str, Any]]:
         if not isinstance(execution_result, dict):
-            return set()
+            return {}
         execution = execution_result.get("data", {}).get("batchMutationsExecute", {})
         if not isinstance(execution, dict):
-            return set()
+            return {}
         operation_errors = execution.get("operation_errors", [])
         if not isinstance(operation_errors, list):
-            return set()
-        return {
-            operation_error["object_id"]
-            for operation_error in operation_errors
-            if isinstance(operation_error, dict)
-            and operation_error.get("retryable") is True
-            and isinstance(operation_error.get("object_id"), str)
-        }
+            return {}
+        failed_operations = {}
+        for operation_error in operation_errors:
+            if not isinstance(operation_error, dict):
+                continue
+            object_id = operation_error.get("object_id")
+            if not isinstance(object_id, str):
+                continue
+            current = failed_operations.get(object_id)
+            if current is None or (
+                current.get("retryable") is True
+                and operation_error.get("retryable") is not True
+            ):
+                failed_operations[object_id] = operation_error
+        return failed_operations
 
     def resolve_author(self, title: str) -> Optional[Identity]:
         """Resolve an author identity from a title string.

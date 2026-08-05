@@ -15,7 +15,7 @@ import {
 import Upload from 'graphql-upload/Upload.mjs';
 import jsonCanonicalize from 'canonicalize';
 import conf from '../../config/conf';
-import { FunctionalError, MISSING_REF_ERROR } from '../../config/errors';
+import { FUNCTIONAL_ERROR, FunctionalError, MISSING_REF_ERROR, VALIDATION_ERROR } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
 import {
   BatchEntityCreateCoordinator,
@@ -78,6 +78,7 @@ type BatchGraphqlOperationExecutionState = {
     promise: Promise<BatchGraphqlOperationResult>;
   }>;
   failedGroupIds: Set<number>;
+  failedGroupRetryableById: Map<number, boolean>;
   operationErrors: BatchGraphqlOperationError[];
 };
 
@@ -85,6 +86,10 @@ const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
 const BATCH_DEPENDENCY_FAILED_CODE = 'BATCH_DEPENDENCY_FAILED';
+const BATCH_OPERATION_FAILED_CODE = 'BATCH_OPERATION_FAILED';
+const BATCH_LOCK_ERROR_CODE = 'LOCK_ERROR';
+const RETRYABLE_PARTIAL_OPERATION_ERROR_CODES = new Set([MISSING_REF_ERROR, BATCH_LOCK_ERROR_CODE]);
+const NON_RETRYABLE_PARTIAL_OPERATION_ERROR_CODES = new Set([FUNCTIONAL_ERROR, VALIDATION_ERROR]);
 
 export const buildBatchGraphqlResultToken = (operationIndex: number, path: string[]): string => {
   return `${BATCH_RESULT_TOKEN_PREFIX}:${operationIndex}:${path.join('.')}`;
@@ -553,35 +558,41 @@ const executeOperation = async (
   return data;
 };
 
-const buildRetryableOperationError = (
+const buildPartialOperationError = (
   operation: PreparedBatchGraphqlOperation,
   error: any,
 ): BatchGraphqlOperationError | undefined => {
   const operationErrors = error?.extensions?.data?.operation_errors;
-  if (!Array.isArray(operationErrors) || operationErrors.length === 0) {
+  if (!operation.objectId || !Array.isArray(operationErrors) || operationErrors.length === 0) {
     return undefined;
   }
   const errorCodes = operationErrors.map((operationError) => operationError?.extensions?.code);
-  if (errorCodes.some((code) => code !== MISSING_REF_ERROR)) {
+  const supportedErrorCodes = new Set([
+    ...RETRYABLE_PARTIAL_OPERATION_ERROR_CODES,
+    ...NON_RETRYABLE_PARTIAL_OPERATION_ERROR_CODES,
+  ]);
+  if (errorCodes.some((code) => typeof code !== 'string' || !supportedErrorCodes.has(code))) {
     return undefined;
   }
+  const distinctErrorCodes = Array.from(new Set(errorCodes));
   return {
-    code: MISSING_REF_ERROR,
+    code: distinctErrorCodes.length === 1 ? distinctErrorCodes[0] : BATCH_OPERATION_FAILED_CODE,
     message: error.message,
     objectId: operation.objectId,
     operationIndex: operation.operationIndex,
-    retryable: true,
+    retryable: errorCodes.every((code) => RETRYABLE_PARTIAL_OPERATION_ERROR_CODES.has(code)),
   };
 };
 
 const buildDependencyFailedOperationError = (
   group: PreparedBatchGraphqlOperationGroup,
+  retryable: boolean,
 ): BatchGraphqlOperationError => ({
   code: BATCH_DEPENDENCY_FAILED_CODE,
   message: 'Batch GraphQL operation dependency failed',
   objectId: group.operations[0]?.objectId,
   operationIndex: group.operations[0]?.operationIndex ?? 0,
-  retryable: true,
+  retryable,
 });
 
 const prepareBatchGraphqlOperations = (
@@ -871,11 +882,12 @@ const executeOperationGroup = async (
     try {
       results[operation.operationIndex] = await executeOperation(schema, context, operation, resultBindings, state);
     } catch (error) {
-      const operationError = state.allowPartialFailures ? buildRetryableOperationError(operation, error) : undefined;
+      const operationError = state.allowPartialFailures ? buildPartialOperationError(operation, error) : undefined;
       if (!operationError) {
         throw error;
       }
       state.failedGroupIds.add(group.groupId);
+      state.failedGroupRetryableById.set(group.groupId, operationError.retryable);
       state.operationErrors.push(operationError);
       group.operations.slice(index).forEach((remainingOperation) => {
         results[remainingOperation.operationIndex] = null;
@@ -986,6 +998,7 @@ const executeOperationGroups = async (
     allowPartialFailures,
     coalescedOperationResults: new Map(),
     failedGroupIds: new Set(),
+    failedGroupRetryableById: new Map(),
     operationErrors: [],
   };
   const phases = Array.from(groupsByPhase.keys()).sort((left, right) => left - right);
@@ -993,10 +1006,12 @@ const executeOperationGroups = async (
     const phaseGroups = groupsByPhase.get(phase) ?? [];
     const runnableGroups: PreparedBatchGraphqlOperationGroup[] = [];
     phaseGroups.forEach((group) => {
-      const hasFailedDependency = Array.from(group.dependencyGroupIds).some((dependencyGroupId) => state.failedGroupIds.has(dependencyGroupId));
-      if (hasFailedDependency) {
+      const failedDependencyGroupIds = Array.from(group.dependencyGroupIds).filter((dependencyGroupId) => state.failedGroupIds.has(dependencyGroupId));
+      if (failedDependencyGroupIds.length > 0) {
+        const retryable = failedDependencyGroupIds.every((dependencyGroupId) => state.failedGroupRetryableById.get(dependencyGroupId) === true);
         state.failedGroupIds.add(group.groupId);
-        state.operationErrors.push(buildDependencyFailedOperationError(group));
+        state.failedGroupRetryableById.set(group.groupId, retryable);
+        state.operationErrors.push(buildDependencyFailedOperationError(group, retryable));
         group.operations.forEach((operation) => {
           results[operation.operationIndex] = null;
         });

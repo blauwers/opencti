@@ -13,7 +13,6 @@ from pycti import OpenCTIApiClient, OpenCTIStix2Splitter, __version__
 
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
 BATCH_REPLAY_LIMIT = 4
-BATCH_RETRYABLE_REJECTION_REASON = "MISSING_REFERENCE"
 
 
 def should_split_bundles(data: Dict[str, Any], content: Dict[str, Any]) -> bool:
@@ -49,18 +48,12 @@ def build_batch_expectation_error(
 
 def should_dead_letter_rejected_item(item: Dict[str, Any]) -> bool:
     rejection_info = item.get("rejection_info")
-    return isinstance(rejection_info, dict) and not (
-        rejection_info.get("reject_reason") == BATCH_RETRYABLE_REJECTION_REASON
-        and rejection_info.get("retryable") is True
-    )
+    return isinstance(rejection_info, dict) and rejection_info.get("retryable") is not True
 
 
 def should_replay_rejected_item(item: Dict[str, Any]) -> bool:
     rejection_info = item.get("rejection_info")
-    return isinstance(rejection_info, dict) and (
-        rejection_info.get("reject_reason") == BATCH_RETRYABLE_REJECTION_REASON
-        and rejection_info.get("retryable") is True
-    )
+    return isinstance(rejection_info, dict) and rejection_info.get("retryable") is True
 
 
 def batch_replay_count(data: Dict[str, Any]) -> int:
@@ -231,7 +224,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     if should_replay_intact_bundle(data, too_large_items_bundles):
                         next_replay_count = replay_count + 1
                         self.logger.warning(
-                            "Deferring intact bundle replay for missing references",
+                            "Deferring intact bundle replay for retryable batch failures",
                             {
                                 "bundle_id": content.get("id"),
                                 "count": sum(
@@ -290,7 +283,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                         self.connector_id
                                     )
                                     self.logger.warning(
-                                        "Detected a bundle too large, sending it to dead letter queue...",
+                                        "Detected a rejected batch item, sending it to dead letter queue...",
                                         {
                                             "bundle_id": too_large_item_bundle["id"],
                                             "connector_id": self.connector_id,

@@ -1,7 +1,7 @@
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import GraphQLUpload from 'graphql-upload/GraphQLUpload.mjs';
 import { describe, expect, it } from 'vitest';
-import { MissingReferenceError } from '../../../../src/config/errors';
+import { FUNCTIONAL_ERROR, FunctionalError, MissingReferenceError } from '../../../../src/config/errors';
 import {
   BatchSideEffectKind,
   isBatchWriteBoundaryOpen,
@@ -36,6 +36,7 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
       echo(value: String!): String!
       upload(file: Upload!): String!
       fail: String!
+      functionalFailure: String!
       missingReference: String!
       batchMutationsExecute: String!
     }
@@ -95,6 +96,9 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
       },
       fail: () => {
         throw new Error('resolver failed');
+      },
+      functionalFailure: () => {
+        throw FunctionalError('invalid record');
       },
       missingReference: () => {
         throw MissingReferenceError({ unresolvedIds: ['identity--missing'] });
@@ -236,6 +240,48 @@ describe('batch GraphQL operation executor', () => {
       objectId: 'relationship--1',
       operationIndex: 1,
       retryable: true,
+    }]);
+  });
+
+  it('returns nonretryable functional failures without aborting bulk commits', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'first' }),
+        objectId: 'indicator--1',
+      },
+      {
+        query: 'mutation FunctionalFailure { functionalFailure }',
+        objectId: 'external-reference--1',
+      },
+      {
+        query: 'mutation Record($value: String!) { record(value: $value) }',
+        variables: JSON.stringify({ value: 'later' }),
+        objectId: 'indicator--2',
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'write:first:true',
+      'write:later:true',
+      'commit:false',
+      'side-effect:first:false',
+      'side-effect:later:false',
+    ]);
+    expect(execution.results).toEqual([
+      { record: 'first' },
+      null,
+      { record: 'later' },
+    ]);
+    expect(execution.operationErrors).toEqual([{
+      code: FUNCTIONAL_ERROR,
+      message: 'Batch GraphQL operation failed',
+      objectId: 'external-reference--1',
+      operationIndex: 1,
+      retryable: false,
     }]);
   });
 

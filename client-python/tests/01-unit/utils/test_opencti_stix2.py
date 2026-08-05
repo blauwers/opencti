@@ -406,6 +406,62 @@ def test_import_bundle_batch_returns_retryable_missing_reference_items(
     )
 
 
+def test_import_bundle_batch_returns_nonretryable_operation_failures(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    plan = BatchMutationPlan()
+
+    @contextmanager
+    def batch_mutation_plan():
+        yield plan
+
+    def fake_import_bundle(*args, **kwargs):
+        batch_plan = kwargs["batch_plan"]
+        with batch_plan.execution_group(0, "indicator--1"):
+            batch_plan.capture(
+                "mutation Record($value: String!) { record(value: $value) }",
+                {"value": "indicator--1"},
+                [],
+            )
+        return ([{"id": "indicator--1", "type": "indicator"}], [])
+
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    opencti.execute_batch_mutation_plan.return_value = {
+        "data": {
+            "batchMutationsExecute": {
+                "operation_errors": [
+                    {
+                        "object_id": "indicator--1",
+                        "code": "FUNCTIONAL_ERROR",
+                        "message": "Batch GraphQL operation failed",
+                        "retryable": False,
+                    }
+                ]
+            }
+        }
+    }
+    monkeypatch.setattr(opencti_stix2, "import_bundle", fake_import_bundle)
+    imported, rejected = opencti_stix2.import_bundle_from_json_batch(
+        '{"type":"bundle","id":"bundle--1","objects":[{"type":"indicator","id":"indicator--1"}]}',
+        execution_mode="BULK",
+    )
+
+    assert imported == []
+    assert rejected == [
+        {
+            "type": "indicator",
+            "id": "indicator--1",
+            "rejection_info": {
+                "reject_reason": "FUNCTIONAL_ERROR",
+                "retryable": False,
+                "last_error_msg": "Batch GraphQL operation failed",
+            },
+        }
+    ]
+
+
 def test_import_bundle_batch_does_not_reuse_synthetic_cache_entries_between_plans(
     monkeypatch,
 ) -> None:

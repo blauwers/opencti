@@ -120,6 +120,15 @@ def test_new_unsplit_messages_report_one_batch_expectation():
     }
     assert should_replay_rejected_item(retryable_item) is True
     assert should_dead_letter_rejected_item(retryable_item) is False
+    retryable_lock_item = {
+        "id": "relationship--2",
+        "rejection_info": {
+            "reject_reason": "LOCK_ERROR",
+            "retryable": True,
+        },
+    }
+    assert should_replay_rejected_item(retryable_lock_item) is True
+    assert should_dead_letter_rejected_item(retryable_lock_item) is False
     assert batch_replay_count({"batch_replay_count": 2}) == 2
     assert batch_replay_count({"batch_replay_count": "2"}) == 0
     assert should_replay_intact_bundle({}, [retryable_item]) is True
@@ -257,6 +266,54 @@ def test_handler_reports_retryable_batch_failure_after_replay_budget(monkeypatch
         },
     )
     handler.api.set_retry_number.assert_any_call(4)
+
+
+def test_handler_dead_letters_nonretryable_batch_failures(monkeypatch):
+    handler = build_handler()
+    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [{"id": "indicator--2", "type": "indicator"}],
+        [
+            {
+                "id": "indicator--1",
+                "rejection_info": {
+                    "reject_reason": "FUNCTIONAL_ERROR",
+                    "retryable": False,
+                },
+            }
+        ],
+    )
+
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(split_bundles=False, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.api.work.report_expectation.assert_called_once_with(
+        "work--1",
+        {
+            "error": "1 element(s) failed during batch import",
+            "source": "Bundle bundle--11111111-1111-4111-8111-111111111111",
+        },
+    )
+    handler.send_bundle_to_specific_queue.assert_called_once()
+    dead_letter_call = handler.send_bundle_to_specific_queue.call_args.args
+    assert dead_letter_call[0] is channel
+    assert dead_letter_call[1] == "listen-exchange"
+    assert dead_letter_call[2] == "dead-letter-routing"
+    assert dead_letter_call[4]["id"] == "indicator--1"
+    assert (
+        dead_letter_call[4]["rejection_info"]["original_connector_id"]
+        == "connector--1"
+    )
 
 
 def test_handler_forwards_backend_batch_plan_to_batch_importer():
