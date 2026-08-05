@@ -14,6 +14,7 @@ import {
   getBatchGraphqlExecutionAdmissionStats,
   getBatchGraphqlExecutionAdmissionWeight,
 } from '../../../../src/modules/batch/batch-operation-executor';
+import { getBatchEntityCreateCoordinatorGroupId } from '../../../../src/modules/batch/batch-entity-create-coordinator';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
 const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<void>) => makeExecutableSchema({
@@ -531,6 +532,27 @@ describe('batch GraphQL operation executor', () => {
     expect(calls).toEqual([
       'add:shared:true',
     ]);
+  });
+
+  it('runs a single add group inside the entity-create coordinator scope', async () => {
+    const calls: string[] = [];
+    let coordinatorGroupId: number | undefined;
+    const schema = buildSchema(calls, async (value) => {
+      if (value === 'scoped') {
+        coordinatorGroupId = getBatchEntityCreateCoordinatorGroupId();
+      }
+    });
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [{
+      query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+      variables: JSON.stringify({ value: 'scoped' }),
+      objectId: 'identity--scoped',
+      executionGroup: 0,
+      executionPhase: 0,
+    }]);
+
+    expect(coordinatorGroupId).toBe(0);
+    expect(execution.results).toEqual([{ recordAdd: 'scoped' }]);
   });
 
   it('does not retain completed add results for non-pruned batch execution', async () => {

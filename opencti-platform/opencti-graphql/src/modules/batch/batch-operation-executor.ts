@@ -1081,10 +1081,10 @@ const executeOperationGroups = async (
     });
     const coordinatedGroups = runnableGroups.filter(containsCoordinatedAddOperation);
     const remainingGroups = runnableGroups.filter((group) => !containsCoordinatedAddOperation(group));
-    if (coordinatedGroups.length > 1) {
+    // A single add group still needs coordinator scope because its resolver can
+    // launch parallel nested creates that share participant ids.
+    if (coordinatedGroups.length > 0) {
       await executeOperationGroupsWithEntityCreateCoordinator(schema, context, coordinatedGroups, resultBindings, results, state);
-    } else if (coordinatedGroups.length === 1) {
-      await executeOperationGroup(schema, context, coordinatedGroups[0], resultBindings, results, state);
     }
     if (remainingGroups.length > 0) {
       await executeOperationGroupsWithConcurrency(schema, context, remainingGroups, resultBindings, results, state);
