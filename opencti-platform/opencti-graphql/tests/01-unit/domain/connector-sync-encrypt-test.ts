@@ -73,13 +73,15 @@ vi.mock('../../../src/config/conf', async () => {
 
 import { encryptSynchronizerCredential } from '../../../src/domain/connector-sync-crypto';
 import { testSync } from '../../../src/domain/connector-utils';
-import { updateAttribute, createEntity } from '../../../src/database/middleware';
+import { updateAttribute, createEntity, patchAttribute } from '../../../src/database/middleware';
 import { storeLoadById } from '../../../src/database/middleware-loader';
 import { notify } from '../../../src/database/redis';
+import { registerConnectorQueues } from '../../../src/database/rabbitmq';
+import { completeConnector } from '../../../src/database/repository';
 import { getHttpClient } from '../../../src/utils/http-client';
 import { createOnTheFlyUser } from '../../../src/modules/user/user-domain';
 import { verifyIngestionUri } from '../../../src/modules/ingestion/ingestion-common';
-import { syncEditField, registerSync, findSyncById, testSync as connectorTestSync, fetchRemoteStreams } from '../../../src/domain/connector';
+import { syncEditField, registerSync, findSyncById, testSync as connectorTestSync, fetchRemoteStreams, pingConnector } from '../../../src/domain/connector';
 import { publishUserAction } from '../../../src/listener/UserActionListener';
 
 const fakeContext = {} as any;
@@ -327,5 +329,48 @@ describe('connector.ts — fetchRemoteStreams deny-list coverage', () => {
     } as never)).rejects.toThrow('This URI is not allowed for ingestion.');
 
     expect(getHttpClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('connector ping refresh behavior', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(storeLoadById).mockResolvedValue({
+      id: 'connector--1',
+      name: 'Example Connector',
+      connector_type: 'EXTERNAL_IMPORT',
+      connector_scope: 'indicator,malware',
+    } as never);
+    vi.mocked(registerConnectorQueues).mockResolvedValue(undefined as never);
+    vi.mocked(patchAttribute).mockResolvedValue({
+      element: {
+        id: 'connector--1',
+        name: 'Example Connector',
+        connector_type: 'EXTERNAL_IMPORT',
+        connector_scope: 'indicator,malware',
+        connector_state: '{"last_run":1}',
+      },
+    } as never);
+    vi.mocked(completeConnector).mockImplementation((connector) => connector as never);
+  });
+
+  it('updates heartbeat state without forcing a refresh or reloading the connector', async () => {
+    const result = await pingConnector(fakeContext, fakeUser, 'connector--1', '{"last_run":1}', {
+      buffering: false,
+      queue_threshold: 500,
+    } as never);
+
+    expect(registerConnectorQueues).toHaveBeenCalledWith('connector--1', 'Example Connector', 'EXTERNAL_IMPORT', ['indicator', 'malware']);
+    expect(patchAttribute).toHaveBeenCalledWith(
+      fakeContext,
+      fakeUser,
+      'connector--1',
+      'Connector',
+      expect.objectContaining({ connector_state: '{"last_run":1}' }),
+      { forceRefresh: false },
+    );
+    expect(storeLoadById).toHaveBeenCalledTimes(1);
+    expect(completeConnector).toHaveBeenCalledWith(expect.objectContaining({ connector_state: '{"last_run":1}' }));
+    expect(result).toMatchObject({ connector_state: '{"last_run":1}' });
   });
 });

@@ -2531,6 +2531,7 @@ type UpdateAttributeMetaResolvedOpts = {
   commitMessage?: string;
   bypassIndividualUpdate?: boolean;
   bypassValidation?: boolean;
+  forceRefresh?: boolean;
   waitUntil?: BatchWaitUntil;
 };
 export const updateAttributeMetaResolved = async <T extends StoreObject>(
@@ -2866,7 +2867,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
         updateAsInstance._index = lastElementVersion._index;
         updateAsInstance._id = lastElementVersion._id;
         updateAsInstance.draft_change = getDraftChanges(lastElementVersion, updatedInputs);
-        await elUpdateElement(context, user, updateAsInstance);
+        await elUpdateElement(context, user, updateAsInstance, { forceRefresh: opts.forceRefresh });
         // If entity was outside of draft before update, we need to check draft index of the updated entity
         updatedInstance.draft_change = getDraftChanges(lastElementVersion, updatedInputs);
         if (!isDraftIndex(lastElementVersion._index)) {
@@ -2878,7 +2879,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       }
     } else if (impactedInputs.length > 0) {
       const updateAsInstance = partialInstanceWithInputs(updatedInstance, impactedInputs) as BasicStoreBase;
-      await elUpdateElement(context, user, updateAsInstance);
+      await elUpdateElement(context, user, updateAsInstance, { forceRefresh: opts.forceRefresh });
     }
     if (relationsToDelete.length > 0) {
       await elDeleteElements(context, user, relationsToDelete);

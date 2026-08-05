@@ -274,6 +274,7 @@ type BufferedUpdateWrite = {
   user: AuthUser;
   instance: BasicStoreBase;
   dataToReplace: Record<string, any>;
+  forceRefresh: boolean;
 };
 
 type BufferedDeleteWrite = {
@@ -4666,6 +4667,7 @@ const elUpdateNow = async (
   documentId: string,
   documentBody: any,
   retry = ES_RETRY_ON_CONFLICT,
+  forceRefresh = true,
 ) => {
   const updateOperation = async () => {
     const entityType = documentBody.entity_type ? documentBody.entity_type : '';
@@ -4674,7 +4676,7 @@ const elUpdateNow = async (
       index: indexName,
       retry_on_conflict: retry,
       timeout: BULK_TIMEOUT,
-      refresh: true,
+      refresh: forceRefresh,
       body: documentBody,
     };
     try {
@@ -4758,14 +4760,16 @@ export const elReplace = async (
   indexName: string,
   documentId: string,
   documentBody: any,
+  opts: { forceRefresh?: boolean } = {},
 ) => {
+  const forceRefresh = opts.forceRefresh ?? true;
   const patch = R.dissoc('_index', documentBody.doc);
   const replaceBody = buildReplaceScriptBody(documentBody);
   const operation = buildRawUpdateOperation(indexName, documentId, replaceBody, (existing) => applyBufferedUpdate(existing, patch));
-  if (bufferBulkUpdateOperations(context, [operation], true)) {
+  if (bufferBulkUpdateOperations(context, [operation], forceRefresh)) {
     return;
   }
-  return elUpdateNow(context, indexName, documentId, replaceBody);
+  return elUpdateNow(context, indexName, documentId, replaceBody, ES_RETRY_ON_CONFLICT, forceRefresh);
 };
 export const elDelete = (indexName: string, documentId: string) => {
   const deleteOperation = async () => {
@@ -6319,12 +6323,18 @@ const executeBufferedEngineBulkActions = async (actions: BufferedEngineBulkActio
   }
 };
 
+export const shouldRefreshBufferedEngineCommit = (actions: BufferedEngineBulkAction[]) => actions.some((action) => action.refresh);
+
 const executeBufferedEngineCommitActions = async (actions: BufferedEngineBulkAction[]) => {
   if (actions.length === 0) {
     return;
   }
+  const shouldRefresh = shouldRefreshBufferedEngineCommit(actions);
   const batchActions = actions.map((action) => ({ ...action, refresh: false }));
   await executeBufferedEngineBulkActions(batchActions);
+  if (!shouldRefresh) {
+    return;
+  }
   const affectedIndices = R.uniq(batchActions.flatMap((action) => {
     const descriptor = parseBufferedEngineBulkAction(action);
     return descriptor ? [descriptor.index] : [];
@@ -7067,7 +7077,7 @@ const buildBufferedUpdateActions = (writes: BufferedUpdateWrite[]): BufferedEngi
     const patch = R.dissoc('_index', write.dataToReplace);
     return {
       context: write.context,
-      refresh: true,
+      refresh: write.forceRefresh,
       applyToDocument: (existing) => applyBufferedUpdate(existing, patch),
       body: [
         {
@@ -7447,6 +7457,7 @@ const bufferUpdateElement = (
   user: AuthUser,
   instance: BasicStoreBase,
   dataToReplace: Record<string, any>,
+  forceRefresh: boolean,
 ): boolean => {
   const state = getOrCreateBufferedEngineState();
   if (!state) {
@@ -7459,12 +7470,19 @@ const bufferUpdateElement = (
     user,
     instance,
     dataToReplace,
+    forceRefresh,
   });
   invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds([instance]));
   return true;
 };
 
-export const elUpdateElement = async (context: AuthContext, user: AuthUser, instance: BasicStoreBase) => {
+export const elUpdateElement = async (
+  context: AuthContext,
+  user: AuthUser,
+  instance: BasicStoreBase,
+  opts: { forceRefresh?: boolean } = {},
+) => {
+  const forceRefresh = opts.forceRefresh ?? true;
   const instanceToUse = await getInstanceToUpdate(context, user, instance);
   const esData = await prepareElementForIndexing(instanceToUse);
   validateDataBeforeIndexing(esData);
@@ -7477,13 +7495,19 @@ export const elUpdateElement = async (context: AuthContext, user: AuthUser, inst
     }
     return Promise.resolve();
   };
-  if (bufferUpdateElement(context, user, instanceToUse, dataToReplace)) {
+  if (bufferUpdateElement(context, user, instanceToUse, dataToReplace, forceRefresh)) {
     if (connectionUpdate && !(await bufferUpdateConnectionsOfElement(instance.internal_id, connectionUpdate))) {
       await registerBatchSideEffect({ kind: BatchSideEffectKind.CompatibilityProjection, execute: updateConnections });
     }
     return [];
   }
-  const replacePromise = elReplace(context, instanceToUse._index, instanceToUse._id ?? instanceToUse.internal_id, { doc: dataToReplace });
+  const replacePromise = elReplace(
+    context,
+    instanceToUse._index,
+    instanceToUse._id ?? instanceToUse.internal_id,
+    { doc: dataToReplace },
+    { forceRefresh },
+  );
   return Promise.all([replacePromise, updateConnections()]);
 };
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildBufferedConnectionProjectionActions, buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, splitBufferedEngineBulkActions } from '../../../src/database/engine';
+import { buildBufferedConnectionProjectionActions, buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, shouldRefreshBufferedEngineCommit, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 import { INDEX_STIX_CORE_RELATIONSHIPS } from '../../../src/database/utils';
 
@@ -365,6 +365,25 @@ describe('executeWithBufferedEngineDocumentLanes testing', () => {
     releaseFirst();
     await Promise.all([first, second, third]);
     expect(order).toEqual(['first-start', 'third-start', 'first-end', 'second-start']);
+  });
+});
+
+describe('shouldRefreshBufferedEngineCommit testing', () => {
+  const buildAction = (refresh) => ({
+    context: {},
+    refresh,
+    body: [
+      { index: { _index: 'test_index', _id: 'entity--1' } },
+      { internal_id: 'entity--1' },
+    ],
+  });
+
+  it('skips the commit barrier when every buffered action opted out', () => {
+    expect(shouldRefreshBufferedEngineCommit([buildAction(false), buildAction(false)])).toBe(false);
+  });
+
+  it('keeps the commit barrier when any buffered action requires materialized visibility', () => {
+    expect(shouldRefreshBufferedEngineCommit([buildAction(false), buildAction(true)])).toBe(true);
   });
 });
 
