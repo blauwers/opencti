@@ -1,10 +1,11 @@
 import datetime
+import json
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
 
-from pycti.api.opencti_api_batch import BatchMutationPlan
+from pycti.api.opencti_api_batch import BatchMutationPlan, build_batch_result_token
 from pycti.utils.opencti_stix2 import OpenCTIStix2
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
@@ -350,7 +351,9 @@ def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
     )
 
 
-def test_import_bundle_batch_returns_retryable_missing_reference_items(monkeypatch) -> None:
+def test_import_bundle_batch_returns_retryable_missing_reference_items(
+    monkeypatch,
+) -> None:
     opencti = MagicMock()
     opencti_stix2 = OpenCTIStix2(opencti)
     plan = BatchMutationPlan()
@@ -401,6 +404,61 @@ def test_import_bundle_batch_returns_retryable_missing_reference_items(monkeypat
         execution_mode="BULK",
         wait_until=None,
     )
+
+
+def test_import_bundle_batch_does_not_reuse_synthetic_cache_entries_between_plans(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti.get_draft_id.return_value = ""
+    opencti_stix2 = OpenCTIStix2(opencti)
+    plans = []
+
+    @contextmanager
+    def batch_mutation_plan():
+        yield BatchMutationPlan()
+
+    def execute_batch_mutation_plan(plan, **kwargs):
+        plans.append(plan)
+        return {"data": {"batchMutationsExecute": {"operation_errors": []}}}
+
+    def fake_import_bundle(*args, **kwargs):
+        batch_plan = kwargs["batch_plan"]
+        label_data = opencti_stix2.get_in_cache("label_OSINT")
+        if label_data is None:
+            label_result = batch_plan.capture(
+                "mutation LabelAdd($input: LabelAddInput!) { labelAdd(input: $input) { id } }",
+                {"input": {"value": "OSINT"}},
+                [],
+            )
+            label_data = label_result["data"]["labelAdd"]
+            opencti_stix2.set_in_cache("label_OSINT", label_data)
+        batch_plan.capture(
+            "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+            {"input": {"objectLabel": [label_data["id"]]}},
+            [],
+        )
+        return ([{"id": "indicator--1", "type": "indicator"}], [])
+
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    opencti.execute_batch_mutation_plan.side_effect = execute_batch_mutation_plan
+    monkeypatch.setattr(opencti_stix2, "import_bundle", fake_import_bundle)
+
+    for _ in range(2):
+        imported, rejected = opencti_stix2.import_bundle_from_json_batch(
+            '{"type":"bundle","id":"bundle--1","objects":[{"type":"indicator","id":"indicator--1"}]}',
+            execution_mode="BULK",
+        )
+        assert imported == [{"id": "indicator--1", "type": "indicator"}]
+        assert rejected == []
+
+    assert [len(plan.operations) for plan in plans] == [2, 2]
+    assert json.loads(plans[1].operations[1]["variables"]) == {
+        "input": {
+            "objectLabel": [build_batch_result_token(0, ["labelAdd", "id"])],
+        }
+    }
+    assert opencti_stix2.get_in_cache("label_OSINT") is None
 
 
 def test_import_bundle_batch_tags_item_mutations_with_dependency_phases(

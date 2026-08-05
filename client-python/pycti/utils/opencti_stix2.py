@@ -8,7 +8,8 @@ import re
 import time
 import traceback
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urljoin, urlparse
@@ -21,7 +22,11 @@ from opentelemetry import metrics
 from requests import RequestException, Timeout
 from typing_extensions import deprecated
 
-from pycti.api.opencti_api_batch import BatchMutationPlan, BatchMutationPlanUnsupported
+from pycti.api.opencti_api_batch import (
+    BATCH_RESULT_TOKEN_PREFIX,
+    BatchMutationPlan,
+    BatchMutationPlanUnsupported,
+)
 from pycti.entities.opencti_identity import Identity
 from pycti.utils.constants import (
     IdentityTypes,
@@ -127,6 +132,61 @@ class OpenCTIStix2:
         self.stix2_update = OpenCTIStix2Update(opencti)
         self.mapping_cache = LRUCache(maxsize=50000)
         self.mapping_cache_permanent = {}
+        self._batch_mapping_cache = ContextVar(
+            f"opencti_stix2_batch_mapping_cache_{id(self)}", default=None
+        )
+        self._batch_mapping_cache_permanent = ContextVar(
+            f"opencti_stix2_batch_mapping_cache_permanent_{id(self)}",
+            default=None,
+        )
+
+    @staticmethod
+    def _contains_batch_result_token(value):
+        if isinstance(value, str):
+            return value.startswith(BATCH_RESULT_TOKEN_PREFIX)
+        if isinstance(value, list):
+            return any(
+                OpenCTIStix2._contains_batch_result_token(item) for item in value
+            )
+        if isinstance(value, dict):
+            return any(
+                OpenCTIStix2._contains_batch_result_token(item)
+                for item in value.values()
+            )
+        return False
+
+    def _get_mapping_cache_permanent(self):
+        batch_cache = self._batch_mapping_cache_permanent.get()
+        return batch_cache if batch_cache is not None else self.mapping_cache_permanent
+
+    @contextmanager
+    def batch_mapping_cache(self):
+        """Keep synthetic batch mutation results scoped to one captured bundle."""
+        if self._batch_mapping_cache.get() is not None:
+            raise ValueError("A batch mapping cache is already active")
+        batch_cache = LRUCache(maxsize=50000)
+        batch_permanent_cache = {}
+        vocabulary_fields = self.mapping_cache_permanent.get(
+            "vocabularies_definition_fields"
+        )
+        if vocabulary_fields is not None:
+            batch_permanent_cache["vocabularies_definition_fields"] = vocabulary_fields
+        cache_token = self._batch_mapping_cache.set(batch_cache)
+        permanent_cache_token = self._batch_mapping_cache_permanent.set(
+            batch_permanent_cache
+        )
+        try:
+            yield
+        finally:
+            if (
+                "vocabularies_definition_fields" not in self.mapping_cache_permanent
+                and "vocabularies_definition_fields" in batch_permanent_cache
+            ):
+                self.mapping_cache_permanent["vocabularies_definition_fields"] = (
+                    batch_permanent_cache["vocabularies_definition_fields"]
+                )
+            self._batch_mapping_cache.reset(cache_token)
+            self._batch_mapping_cache_permanent.reset(permanent_cache_token)
 
     def get_in_cache(self, data_id):
         """Get an item from the cache.
@@ -137,8 +197,14 @@ class OpenCTIStix2:
         :rtype: dict or None
         """
         api_draft_id = self.opencti.get_draft_id()
-        if data_id + api_draft_id in self.mapping_cache:
-            return self.mapping_cache[data_id + api_draft_id]
+        cache_key = data_id + api_draft_id
+        batch_cache = self._batch_mapping_cache.get()
+        if batch_cache is not None and cache_key in batch_cache:
+            return batch_cache[cache_key]
+        if cache_key in self.mapping_cache:
+            cached_value = self.mapping_cache[cache_key]
+            if not self._contains_batch_result_token(cached_value):
+                return cached_value
         return None
 
     def set_in_cache(self, data_id, data):
@@ -150,7 +216,12 @@ class OpenCTIStix2:
         :type data: dict
         """
         api_draft_id = self.opencti.get_draft_id()
-        self.mapping_cache[data_id + api_draft_id] = data
+        cache_key = data_id + api_draft_id
+        batch_cache = self._batch_mapping_cache.get()
+        if batch_cache is not None:
+            batch_cache[cache_key] = data
+        else:
+            self.mapping_cache[cache_key] = data
 
     ######### UTILS
     # region utils
@@ -454,18 +525,19 @@ class OpenCTIStix2:
     ) -> Tuple[list, list]:
         """Import a STIX2 bundle through one backend mutation-plan request."""
         data = json.loads(json_data)
-        with self.opencti.batch_mutation_plan() as plan:
-            imported, rejected = self.import_bundle(
-                data,
-                update,
-                types,
-                work_id,
-                objects_max_refs,
-                cleanup_inconsistent_bundle,
-                report_expectations,
-                batch_plan=plan,
-                backend_batch_plan=backend_batch_plan,
-            )
+        with self.batch_mapping_cache():
+            with self.opencti.batch_mutation_plan() as plan:
+                imported, rejected = self.import_bundle(
+                    data,
+                    update,
+                    types,
+                    work_id,
+                    objects_max_refs,
+                    cleanup_inconsistent_bundle,
+                    report_expectations,
+                    batch_plan=plan,
+                    backend_batch_plan=backend_batch_plan,
+                )
         execute_kwargs = {
             "execution_mode": execution_mode,
             "wait_until": wait_until,
@@ -482,9 +554,7 @@ class OpenCTIStix2:
         successful_imports = [
             item for item in imported if item.get("id") not in failed_object_ids
         ]
-        rejected_ids = {
-            item.get("id") for item in rejected if isinstance(item, dict)
-        }
+        rejected_ids = {item.get("id") for item in rejected if isinstance(item, dict)}
         failed_items = []
         for item in data.get("objects", []):
             if (
@@ -621,8 +691,9 @@ class OpenCTIStix2:
 
         # Open vocabularies
         object_open_vocabularies = {}
-        if self.mapping_cache_permanent.get("vocabularies_definition_fields") is None:
-            self.mapping_cache_permanent["vocabularies_definition_fields"] = []
+        mapping_cache_permanent = self._get_mapping_cache_permanent()
+        if mapping_cache_permanent.get("vocabularies_definition_fields") is None:
+            mapping_cache_permanent["vocabularies_definition_fields"] = []
             query = """
                     query getVocabCategories {
                       vocabularyCategories {
@@ -639,9 +710,7 @@ class OpenCTIStix2:
             result = self.opencti.query(query)
             for category in result["data"]["vocabularyCategories"]:
                 for field in category["fields"]:
-                    self.mapping_cache_permanent[
-                        "vocabularies_definition_fields"
-                    ].append(
+                    mapping_cache_permanent["vocabularies_definition_fields"].append(
                         {
                             "key": field["key"],
                             "required": field["required"],
@@ -667,7 +736,7 @@ class OpenCTIStix2:
 
         vocabulary_fields = [
             field
-            for field in self.mapping_cache_permanent["vocabularies_definition_fields"]
+            for field in mapping_cache_permanent["vocabularies_definition_fields"]
             if field["key"] in stix_object
             and (
                 normalized_stix_object_entity_type
@@ -688,7 +757,7 @@ class OpenCTIStix2:
                     for vocab in stix_object[f["key"]]:
                         resolved_vocab = (
                             self.opencti.vocabulary.read_or_create_unchecked_with_cache(
-                                vocab, self.mapping_cache_permanent, field=f
+                                vocab, mapping_cache_permanent, field=f
                             )
                         )
                         if resolved_vocab is not None:
@@ -698,7 +767,7 @@ class OpenCTIStix2:
                 else:
                     resolved_vocab = (
                         self.opencti.vocabulary.read_or_create_unchecked_with_cache(
-                            stix_object[f["key"]], self.mapping_cache_permanent, field=f
+                            stix_object[f["key"]], mapping_cache_permanent, field=f
                         )
                     )
                     if resolved_vocab is not None:
