@@ -25,6 +25,14 @@ export const registerBatchCreatedEntity = (element: BasicStoreBase): void => {
   getInstanceIds(element).forEach((id) => createdEntityIds?.add(id));
 };
 
+export const hasBatchCreatedEntityParticipant = (participantIds: string[]): boolean => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return false;
+  }
+  const createdEntityIds = getBatchCreatedEntityIds();
+  return createdEntityIds !== undefined && participantIds.some((participantId) => createdEntityIds.has(participantId));
+};
+
 export const hasBatchCreatedRelationEndpoint = (input: RelationEndpointInput): boolean => {
   if (!isBatchWriteBoundaryOpen()) {
     return false;

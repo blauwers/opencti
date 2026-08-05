@@ -3922,6 +3922,7 @@ const internalCreateEntityRaw = async (
   const participantIds = getInputIds(type, resolvedInput, fromRule);
   // Create the element
   let lock;
+  let isBatchCoordinatedLookup = false;
   let isBatchRetainedLock = false;
   try {
     // Check if the entity exists, must be done with SYSTEM USER to really find it.
@@ -3936,13 +3937,13 @@ const internalCreateEntityRaw = async (
     });
     let existingByIdsPromise: Promise<BasicStoreObject[]>;
     if (coordinatedLookup) {
+      isBatchCoordinatedLookup = true;
       const coordinatedResolution = await coordinatedLookup;
       lock = coordinatedResolution.lock;
       existingByIdsPromise = Promise.resolve(coordinatedResolution.existingByIds);
     } else {
       // Try to get the lock in redis
       lock = await lockResources(participantIds, getBatchAwareLockOptions(draftId));
-      isBatchRetainedLock = retainBatchLockUntilCommit(lock, participantIds, draftId);
       existingByIdsPromise = findExistingEntitiesByIds(context, finderIds, type) as Promise<BasicStoreObject[]>;
     }
     // Generate the internal id if needed
@@ -4190,6 +4191,9 @@ const internalCreateEntityRaw = async (
 
     // Index the created element
     lock.signal.throwIfAborted();
+    if (!isBatchCoordinatedLookup) {
+      isBatchRetainedLock = retainBatchLockUntilCommit(lock, participantIds, draftId);
+    }
     registerBatchCreatedEntity(dataEntity.element as BasicStoreBase);
     await indexCreatedElement(context, user, dataEntity);
     // Push the input in the stream

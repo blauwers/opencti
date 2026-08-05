@@ -7,6 +7,7 @@ import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
 import { getBatchAwareLockOptions, retainBatchLockUntilCommit } from './batch-lock-retention';
+import { hasBatchCreatedEntityParticipant } from './batch-relation-lookup';
 
 type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'parked' | 'completed';
 type BatchEntityCreateLookupRetention = 'group' | 'lock';
@@ -205,7 +206,9 @@ export class BatchEntityCreateCoordinator {
     const ready = this.readyActivations.splice(0);
     ready.forEach(({ reject }) => reject(new Error('Batch entity create phase ended before lookup resolution')));
     const retainedLocks = this.heldLocks.filter((lock) => {
-      return retainBatchLockUntilCommit(lock, lock.participantIds ?? [], lock.draftId);
+      const participantIds = lock.participantIds ?? [];
+      return hasBatchCreatedEntityParticipant(participantIds)
+        && retainBatchLockUntilCommit(lock, participantIds, lock.draftId);
     });
     await this.releasePhysicalLocks([
       ...Array.from(this.scopedLocks),

@@ -12,6 +12,7 @@ import {
   runWithBatchEntityCreateCoordinator,
 } from '../../../../src/modules/batch/batch-entity-create-coordinator';
 import { BatchMutationKind, executeBatchMutations } from '../../../../src/modules/batch/batch-executor';
+import { registerBatchCreatedEntity } from '../../../../src/modules/batch/batch-relation-lookup';
 
 vi.mock('../../../../src/database/middleware-loader', () => ({
   internalFindByIds: vi.fn(),
@@ -417,6 +418,11 @@ describe('batch entity create coordinator', () => {
             participantIds: ['identity--one'],
             type: 'Identity',
           });
+          registerBatchCreatedEntity({
+            internal_id: 'identity--internal-one',
+            standard_id: 'identity--one',
+            entity_type: 'Identity',
+          } as any);
         });
         await coordinator.close();
 
@@ -431,6 +437,42 @@ describe('batch entity create coordinator', () => {
     }]);
 
     expect(acquiredLock.unlock).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases group-owned locks for persisted entities when the phase closes', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([{
+      internal_id: 'identity--internal-one',
+      standard_id: 'identity--one',
+      entity_type: 'Identity',
+    }] as any);
+    const acquiredLocks: ReturnType<typeof buildLock>[] = [];
+    vi.mocked(lockResources).mockImplementation(async () => {
+      const lock = buildLock();
+      acquiredLocks.push(lock);
+      return lock as any;
+    });
+
+    await executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        const coordinator = new BatchEntityCreateCoordinator(context, [0]);
+        await runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+          await resolveBatchEntityCreateLookup({
+            finderIds: ['identity--one'],
+            participantIds: ['identity--one'],
+            type: 'Identity',
+          });
+        });
+        await coordinator.close();
+
+        expect(getBatchRetainedLockIds()).toEqual([]);
+        expect(acquiredLocks).toHaveLength(2);
+        acquiredLocks.forEach((lock) => expect(lock.unlock).toHaveBeenCalledTimes(1));
+        return null;
+      },
+    }]);
+
+    acquiredLocks.forEach((lock) => expect(lock.unlock).toHaveBeenCalledTimes(1));
   });
 
   it('coordinates lock-only relation participants without issuing an entity lookup', async () => {

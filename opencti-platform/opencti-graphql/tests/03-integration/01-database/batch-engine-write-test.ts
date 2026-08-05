@@ -28,6 +28,7 @@ import { addVocabulary, deleteVocabulary, editVocabulary } from '../../../src/mo
 import { ENTITY_TYPE_VOCABULARY } from '../../../src/modules/vocabulary/vocabulary-types';
 import { addIndicator } from '../../../src/modules/indicator/indicator-domain';
 import { ENTITY_TYPE_INDICATOR } from '../../../src/modules/indicator/indicator-types';
+import { addOrganization } from '../../../src/modules/organization/organization-domain';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../../../src/modules/organization/organization-types';
 import { FilterMode, FilterOperator, VocabularyCategory } from '../../../src/generated/graphql';
 import { buildRefRelationKey } from '../../../src/schema/general';
@@ -764,6 +765,134 @@ describe('batch engine writes', () => {
     expect(secondOrganizationId).toBe(firstOrganizationId);
     expect(persistedOrganizations).toHaveLength(1);
     expect(persistedOrganizations[0].internal_id).toBe(firstOrganizationId);
+  });
+
+  it('releases persisted entity add locks before the outer batch commits', async () => {
+    const schema = createSchema();
+    const creatorStixId = `identity--${uuidv4()}`;
+    const organizationName = `Batch persisted creator ${uuidv4()}`;
+    const existingOrganization = await addOrganization(testContext, ADMIN_USER, {
+      name: organizationName,
+      stix_id: creatorStixId,
+      update: true,
+    });
+    cleanupOrganizations.push(existingOrganization);
+    let releaseFirstCommit: (() => void) | undefined;
+    const firstCommitGate = new Promise<void>((resolve) => {
+      releaseFirstCommit = resolve;
+    });
+    let firstReachedCommitGateResolve: (() => void) | undefined;
+    const firstReachedCommitGate = new Promise<void>((resolve) => {
+      firstReachedCommitGateResolve = resolve;
+    });
+
+    const runBatch = async (batchIndex: number, holdBeforeCommit = false) => {
+      const workerUser = { ...ADMIN_USER, origin: { ...ADMIN_USER.origin, call_retry_number: 1 } };
+      const batchContext = executionContext(`batch-graphql-persisted-created-by-resolution-${batchIndex}`, workerUser);
+      batchContext.batch = computeLoaders(batchContext, workerUser);
+      const operations = [{
+        query: 'mutation OrganizationAdd($input: OrganizationAddInput!) { organizationAdd(input: $input) { id standard_id } }',
+        variables: JSON.stringify({
+          input: {
+            name: organizationName,
+            stix_id: creatorStixId,
+            update: true,
+          },
+        }),
+        objectId: creatorStixId,
+        executionGroup: 0,
+        executionPhase: 0,
+      }];
+
+      const execution = await executeBatchMutations([{
+        kind: BatchMutationKind.GraphqlOperation,
+        executeWrite: async () => {
+          const batchExecution = await executeBatchGraphqlOperations(schema, batchContext, operations, {
+            bundlePlan: {
+              version: 1,
+              executionPhases: [{ phase: 0, objectIds: [creatorStixId] }],
+            },
+          });
+          const organizationId = (batchExecution.results[0] as any).organizationAdd.id;
+          if (holdBeforeCommit) {
+            firstReachedCommitGateResolve?.();
+            await firstCommitGate;
+          }
+          return organizationId;
+        },
+      }]);
+      return execution.results[0];
+    };
+
+    const firstBatch = runBatch(0, true);
+    await firstReachedCommitGate;
+
+    const secondBatch = runBatch(1);
+    let secondOrganizationId: string | undefined;
+    let secondBatchRaceError: unknown;
+    let secondBatchTimeout: NodeJS.Timeout | undefined;
+    try {
+      secondOrganizationId = await Promise.race([
+        secondBatch,
+        new Promise<never>((_, reject) => {
+          secondBatchTimeout = setTimeout(() => reject(new Error('persisted entity add lock was retained until outer commit')), 2000);
+        }),
+      ]);
+    } catch (cause) {
+      secondBatchRaceError = cause;
+    } finally {
+      if (secondBatchTimeout) {
+        clearTimeout(secondBatchTimeout);
+      }
+      releaseFirstCommit?.();
+    }
+
+    const [firstOrganizationId, settledSecondOrganizationId] = await Promise.all([firstBatch, secondBatch]);
+    if (secondBatchRaceError) {
+      throw secondBatchRaceError;
+    }
+    expect(firstOrganizationId).toBe(existingOrganization.internal_id);
+    expect(secondOrganizationId ?? settledSecondOrganizationId).toBe(existingOrganization.internal_id);
+  });
+
+  it('completes a batch marking definition add with auto-new-marking group side effects', async () => {
+    const schema = createSchema();
+    const workerUser = { ...ADMIN_USER, origin: { ...ADMIN_USER.origin, call_retry_number: 1 } };
+    const batchContext = executionContext(`batch-graphql-marking-definition-${uuidv4()}`, workerUser);
+    batchContext.batch = computeLoaders(batchContext, workerUser);
+    const markingStixId = `marking-definition--${uuidv4()}`;
+    const operations = [{
+      query: 'mutation MarkingDefinitionAdd($input: MarkingDefinitionAddInput!) { markingDefinitionAdd(input: $input) { id standard_id } }',
+      variables: JSON.stringify({
+        input: {
+          definition_type: 'statement',
+          definition: `Batch marking definition ${uuidv4()}`,
+          stix_id: markingStixId,
+          x_opencti_order: 0,
+          update: true,
+        },
+      }),
+      objectId: markingStixId,
+      executionGroup: 0,
+      executionPhase: 0,
+    }];
+
+    await expect(executeBatchMutations([{
+      kind: BatchMutationKind.GraphqlOperation,
+      executeWrite: async () => {
+        const batchExecution = await executeBatchGraphqlOperations(schema, batchContext, operations, {
+          bundlePlan: {
+            version: 1,
+            executionPhases: [{ phase: 0, objectIds: [markingStixId] }],
+          },
+        });
+        expect((batchExecution.results[0] as any).markingDefinitionAdd).toEqual(expect.objectContaining({
+          id: expect.any(String),
+          standard_id: expect.any(String),
+        }));
+        throw new Error('abort batch marking definition add');
+      },
+    }])).rejects.toThrow('abort batch marking definition add');
   });
 
   it('buffers direct document and replace updates inside the batch boundary', async () => {
