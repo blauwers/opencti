@@ -194,11 +194,8 @@ import {
   registerBatchSideEffect,
   setBatchExecutionMetadata,
 } from '../modules/batch/batch-executor';
-import {
-  getBatchEntityCreateCoordinatorHeldParticipantIds,
-  resolveBatchEntityCreateLookup,
-  resolveBatchParticipantLock,
-} from '../modules/batch/batch-entity-create-coordinator';
+import { getBatchEntityCreateCoordinatorHeldParticipantIds, resolveBatchEntityCreateLookup, resolveBatchParticipantLock } from '../modules/batch/batch-entity-create-coordinator';
+import { executeBatchCoalescedEntityCreate } from '../modules/batch/batch-entity-create-cache';
 import { hasBatchCreatedRelationEndpoint, registerBatchCreatedEntity } from '../modules/batch/batch-relation-lookup';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
@@ -3481,7 +3478,7 @@ export const createRelationRaw = async (
   opts: CreateRelationRawOpts = {},
 ) => {
   let lock;
-  let isBatchCoordinatedLock = false;
+  let isBatchCoordinatedLock: boolean;
   const { fromRule, locks = [] } = opts;
   const { fromId, toId, relationship_type: relationshipType } = rawInput;
 
@@ -4201,7 +4198,7 @@ export const createEntity = async (
   const isCompleteResult = opts.complete === true;
   const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
   // volumes of objects relationships must be controlled
-  const data = await executeSingleBatchMutation({
+  const data = await executeBatchCoalescedEntityCreate(type, input, { ...opts, waitUntil }, () => executeSingleBatchMutation({
     kind: BatchMutationKind.CreateEntity,
     executeWrite: () => createEntityRaw(context, user, input, type, opts),
     sideEffects: (result) => {
@@ -4219,7 +4216,7 @@ export const createEntity = async (
       }
       return [];
     },
-  }, { waitUntil });
+  }, { waitUntil }));
   return isCompleteResult ? data : data.element;
 };
 

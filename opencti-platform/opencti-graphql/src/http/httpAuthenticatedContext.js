@@ -4,7 +4,12 @@ import { authenticateUserFromRequest, userWithOrigin, batchCreator, batchCreator
 import { isNotEmptyField } from '../database/utils';
 import { logApp } from '../config/conf';
 import { batchLoader, storeLoadByIdsWithRefs } from '../database/middleware';
-import { createExistingEntityIdsBatchLoader, createExistingRelationIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../modules/batch/batch-reference-loader';
+import {
+  createExistingEntityIdsBatchLoader,
+  createExistingRelationIdsBatchLoader,
+  createInputResolveRefsBatchLoader,
+  createStoreLoadByIdWithRefsBatchLoader,
+} from '../modules/batch/batch-reference-loader';
 import { batchInternalRels, batchMarkingDefinitions } from '../domain/stixCoreObject';
 import { elBatchIds, elBatchIdsWithRelCount } from '../database/engine';
 import { batchStixDomainObjects } from '../domain/stixDomainObject';
