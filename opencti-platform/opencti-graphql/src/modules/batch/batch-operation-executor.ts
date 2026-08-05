@@ -23,6 +23,7 @@ import {
   runWithBatchEntityCreateCoordinator,
   waitForBatchEntityCreateCoordinatorPromise,
 } from './batch-entity-create-coordinator';
+import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
 import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
 import { BatchExecutionMode, type BatchGraphqlExecutionPlanInput, type BatchGraphqlFileInput, type BatchGraphqlOperationInput } from './batch-types';
 
@@ -85,6 +86,12 @@ type BatchGraphqlOperationExecutionState = {
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
+const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 2;
+const configuredBatchGraphqlMaxActiveExecutions = Number(conf.get('app:concurrency:batch_max_active_executions'));
+const BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS = Number.isInteger(configuredBatchGraphqlMaxActiveExecutions) && configuredBatchGraphqlMaxActiveExecutions > 0
+  ? configuredBatchGraphqlMaxActiveExecutions
+  : BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS;
+const batchGraphqlExecutionAdmissionGate = createBatchExecutionAdmissionGate(BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS);
 const BATCH_DEPENDENCY_FAILED_CODE = 'BATCH_DEPENDENCY_FAILED';
 const BATCH_OPERATION_FAILED_CODE = 'BATCH_OPERATION_FAILED';
 const BATCH_LOCK_ERROR_CODE = 'LOCK_ERROR';
@@ -1045,22 +1052,27 @@ export const executeBatchGraphqlOperations = async (
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
-  const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
-  const resultBindings: BatchGraphqlResultBindings = new Map();
-  const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
-    kind: BatchMutationKind.GraphqlOperation,
-    executeWrite: () => executeOperationGroups(
-      schema,
-      context,
-      preparedOperations,
-      resultBindings,
-      options.bundlePlan,
-      options.executionMode !== BatchExecutionMode.Atomic,
-    ),
-  }], options);
-  return {
-    ...execution,
-    operationErrors: execution.results[0].operationErrors,
-    results: execution.results[0].results,
-  };
+  const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire();
+  try {
+    const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
+    const resultBindings: BatchGraphqlResultBindings = new Map();
+    const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
+      kind: BatchMutationKind.GraphqlOperation,
+      executeWrite: () => executeOperationGroups(
+        schema,
+        context,
+        preparedOperations,
+        resultBindings,
+        options.bundlePlan,
+        options.executionMode !== BatchExecutionMode.Atomic,
+      ),
+    }], options);
+    return {
+      ...execution,
+      operationErrors: execution.results[0].operationErrors,
+      results: execution.results[0].results,
+    };
+  } finally {
+    releaseAdmission();
+  }
 };
