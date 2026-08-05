@@ -384,6 +384,74 @@ describe('batch GraphQL operation executor', () => {
     ]);
   });
 
+  it('coalesces repeated add operations during pruned batch execution and preserves duplicate result bindings', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    const execution = await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'shared' }),
+        objectId: 'external-reference--one',
+        executionGroup: 0,
+        executionPhase: 0,
+      },
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'shared' }),
+        objectId: 'external-reference--two',
+        executionGroup: 1,
+        executionPhase: 1,
+      },
+      {
+        query: 'mutation Echo($value: String!) { echo(value: $value) }',
+        variables: JSON.stringify({ value: buildBatchGraphqlResultToken(1, ['recordAdd']) }),
+        objectId: 'relationship--one',
+        executionGroup: 2,
+        executionPhase: 2,
+      },
+    ], {
+      pruneUnusedResultFields: true,
+    });
+
+    expect(calls).toEqual([
+      'add:shared:true',
+      'echo:shared',
+    ]);
+    expect(execution.results).toEqual([
+      { recordAdd: 'shared' },
+      { recordAdd: 'shared' },
+      { echo: 'shared' },
+    ]);
+  });
+
+  it('does not retain completed add results for non-pruned batch execution', async () => {
+    const calls: string[] = [];
+    const schema = buildSchema(calls);
+
+    await executeBatchGraphqlOperations(schema, {} as any, [
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'shared' }),
+        objectId: 'external-reference--one',
+        executionGroup: 0,
+        executionPhase: 0,
+      },
+      {
+        query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+        variables: JSON.stringify({ value: 'shared' }),
+        objectId: 'external-reference--two',
+        executionGroup: 1,
+        executionPhase: 1,
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'add:shared:true',
+      'add:shared:true',
+    ]);
+  });
+
   it('executes independent declared groups in the same phase concurrently', async () => {
     const calls: string[] = [];
     let releaseFirst: (() => void) | undefined;

@@ -3,6 +3,7 @@ import {
   execute,
   Kind,
   parse,
+  print,
   type DocumentNode,
   type ExecutionResult,
   type FieldNode,
@@ -12,6 +13,7 @@ import {
   validate,
 } from 'graphql';
 import Upload from 'graphql-upload/Upload.mjs';
+import jsonCanonicalize from 'canonicalize';
 import conf from '../../config/conf';
 import { FunctionalError, MISSING_REF_ERROR } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
@@ -35,6 +37,7 @@ type BatchGraphqlRequiredResultPathNode = {
   terminalPaths: Set<string>;
 };
 type PreparedBatchGraphqlOperation = {
+  coalesceCompletedAdd: boolean;
   dependencyOperationIndexes: Set<number>;
   document: DocumentNode;
   executionGroup?: number;
@@ -65,6 +68,7 @@ type BatchGraphqlExecutionResult = BatchExecutionResult<BatchGraphqlOperationRes
 };
 type BatchGraphqlOperationExecutionState = {
   allowPartialFailures: boolean;
+  coalescedOperationResults: Map<string, Promise<BatchGraphqlOperationResult>>;
   failedGroupIds: Set<number>;
   operationErrors: BatchGraphqlOperationError[];
 };
@@ -484,32 +488,55 @@ const executeOperation = async (
   context: AuthContext,
   operation: PreparedBatchGraphqlOperation,
   resultBindings: BatchGraphqlResultBindings,
+  state: BatchGraphqlOperationExecutionState,
 ): Promise<BatchGraphqlOperationResult> => {
   const resolvedVariables = hydrateOperationFiles(
     replaceResultTokens(operation.variables, resultBindings) as Record<string, unknown>,
     operation.files,
     operation.operationIndex,
   );
-  const result = await execute({
-    schema,
-    document: operation.document,
-    contextValue: context,
-    operationName: operation.operationName ?? undefined,
-    variableValues: resolvedVariables,
-  }) as ExecutionResult<BatchGraphqlOperationResult>;
-  if (result.errors && result.errors.length > 0) {
-    throw FunctionalError('Batch GraphQL operation failed', {
-      operation_index: operation.operationIndex,
-      errors: result.errors.map((error) => error.message),
-      operation_errors: result.errors.map((error) => ({
-        extensions: error.extensions,
-        message: error.message,
-        path: error.path,
-      })),
-    });
+  const executeResolvedOperation = async () => {
+    const result = await execute({
+      schema,
+      document: operation.document,
+      contextValue: context,
+      operationName: operation.operationName ?? undefined,
+      variableValues: resolvedVariables,
+    }) as ExecutionResult<BatchGraphqlOperationResult>;
+    if (result.errors && result.errors.length > 0) {
+      throw FunctionalError('Batch GraphQL operation failed', {
+        operation_index: operation.operationIndex,
+        errors: result.errors.map((error) => error.message),
+        operation_errors: result.errors.map((error) => ({
+          extensions: error.extensions,
+          message: error.message,
+          path: error.path,
+        })),
+      });
+    }
+    return result.data;
+  };
+  const cacheKey = buildCoalescedOperationKey(operation, resolvedVariables);
+  let resultPromise: Promise<BatchGraphqlOperationResult>;
+  if (!cacheKey) {
+    resultPromise = executeResolvedOperation();
+  } else {
+    const existing = state.coalescedOperationResults.get(cacheKey);
+    if (existing) {
+      resultPromise = existing;
+    } else {
+      resultPromise = executeResolvedOperation();
+      state.coalescedOperationResults.set(cacheKey, resultPromise);
+      void resultPromise.catch(() => {
+        if (state.coalescedOperationResults.get(cacheKey) === resultPromise) {
+          state.coalescedOperationResults.delete(cacheKey);
+        }
+      });
+    }
   }
-  registerResultBindings(result.data, operation.operationIndex, resultBindings);
-  return result.data;
+  const data = await resultPromise;
+  registerResultBindings(data, operation.operationIndex, resultBindings);
+  return data;
 };
 
 const buildRetryableOperationError = (
@@ -553,6 +580,7 @@ const prepareBatchGraphqlOperations = (
     validateOperationFiles(prepared.variables, operation.files, operationIndex);
     return {
       ...prepared,
+      coalesceCompletedAdd: false,
       dependencyOperationIndexes: new Set<number>(),
       executionGroup: parseExecutionCoordinate(operation.executionGroup, 'execution_group', operationIndex),
       executionPhase: parseExecutionCoordinate(operation.executionPhase, 'execution_phase', operationIndex),
@@ -576,6 +604,7 @@ const prepareBatchGraphqlOperations = (
   }
   return preparedOperations.map((operation) => ({
     ...operation,
+    coalesceCompletedAdd: isCoordinatedAddOperation(operation) && !operation.files?.length,
     document: pruneUnusedResultFields(operation.document, requiredResultPaths.get(operation.operationIndex), operation.operationIndex),
   }));
 };
@@ -826,7 +855,7 @@ const executeOperationGroup = async (
   for (let index = 0; index < group.operations.length; index += 1) {
     const operation = group.operations[index];
     try {
-      results[operation.operationIndex] = await executeOperation(schema, context, operation, resultBindings);
+      results[operation.operationIndex] = await executeOperation(schema, context, operation, resultBindings, state);
     } catch (error) {
       const operationError = state.allowPartialFailures ? buildRetryableOperationError(operation, error) : undefined;
       if (!operationError) {
@@ -868,6 +897,24 @@ const isCoordinatedAddOperation = (operation: PreparedBatchGraphqlOperation): bo
     && fieldName !== undefined
     && fieldName.endsWith('Add')
     && !fieldName.endsWith('RelationsAdd');
+};
+
+const buildCoalescedOperationKey = (
+  operation: PreparedBatchGraphqlOperation,
+  resolvedVariables: Record<string, unknown>,
+): string | undefined => {
+  if (!operation.coalesceCompletedAdd) {
+    return undefined;
+  }
+  try {
+    return jsonCanonicalize({
+      document: print(operation.document),
+      operationName: operation.operationName ?? null,
+      variables: resolvedVariables,
+    }) as string;
+  } catch {
+    return undefined;
+  }
 };
 
 const containsCoordinatedAddOperation = (group: PreparedBatchGraphqlOperationGroup): boolean => {
@@ -923,6 +970,7 @@ const executeOperationGroups = async (
   const results = new Array<BatchGraphqlOperationResult>(operations.length);
   const state: BatchGraphqlOperationExecutionState = {
     allowPartialFailures,
+    coalescedOperationResults: new Map(),
     failedGroupIds: new Set(),
     operationErrors: [],
   };
