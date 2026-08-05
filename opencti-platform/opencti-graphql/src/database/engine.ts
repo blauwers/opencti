@@ -303,9 +303,15 @@ type BufferedBulkUpdateWrite = {
 
 type BufferedEngineWrite = BufferedIndexWrite | BufferedRawIndexWrite | BufferedDirectIndexWrite | BufferedUpdateWrite | BufferedDeleteWrite | BufferedBulkUpdateWrite;
 
+type BufferedEngineWriteLookup = {
+  write: BufferedEngineWrite;
+  ids: string[];
+};
+
 type BufferedEngineState = {
   nextSequence: number;
   writes: BufferedEngineWrite[];
+  writeLookupsById: Map<string, BufferedEngineWriteLookup[]>;
 };
 
 type BufferedConnectionProjection = {
@@ -2207,6 +2213,62 @@ const getBufferedWriteElements = (
   })) as BasicStoreBase[];
 };
 
+const normalizeBufferedEngineLookupIds = (ids: Array<string | null | undefined>): string[] => {
+  return R.uniq(ids.filter((id) => isNotEmptyField(id)) as string[]);
+};
+
+const getBufferedEngineWriteLookups = (write: BufferedEngineWrite): BufferedEngineWriteLookup[] => {
+  if (write.kind === 'bulk-update') {
+    return write.operations
+      .map((operation) => normalizeBufferedEngineLookupIds([operation.internalId]))
+      .filter((ids) => ids.length > 0)
+      .map((ids) => ({ write, ids }));
+  }
+  return getBufferedWriteElements(write)
+    .map((element) => normalizeBufferedEngineLookupIds(getInstanceIds(element)))
+    .filter((ids) => ids.length > 0)
+    .map((ids) => ({ write, ids }));
+};
+
+const appendBufferedEngineWrite = (state: BufferedEngineState, write: BufferedEngineWrite) => {
+  state.writes.push(write);
+  getBufferedEngineWriteLookups(write).forEach((lookup) => {
+    lookup.ids.forEach((id) => {
+      const existingLookups = state.writeLookupsById.get(id) ?? [];
+      existingLookups.push(lookup);
+      state.writeLookupsById.set(id, existingLookups);
+    });
+  });
+  state.nextSequence += 1;
+};
+
+const getOrderedBufferedEngineWritesForIds = (ids: string[]): BufferedEngineWrite[] => {
+  const state = getBufferedEngineState();
+  if (!state) {
+    return [];
+  }
+  const selectedWrites = new Set<BufferedEngineWrite>();
+  const visitedIds = new Set<string>();
+  const pendingIds = normalizeBufferedEngineLookupIds(ids);
+  while (pendingIds.length > 0) {
+    const id = pendingIds.pop() as string;
+    if (visitedIds.has(id)) {
+      continue;
+    }
+    visitedIds.add(id);
+    const lookups = state.writeLookupsById.get(id) ?? [];
+    lookups.forEach((lookup) => {
+      selectedWrites.add(lookup.write);
+      lookup.ids.forEach((lookupId) => {
+        if (!visitedIds.has(lookupId)) {
+          pendingIds.push(lookupId);
+        }
+      });
+    });
+  }
+  return Array.from(selectedWrites).sort((left, right) => left.sequence - right.sequence);
+};
+
 const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   hits: T[],
   ids: string[],
@@ -2214,7 +2276,8 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   indices: string | string[] | null | undefined,
 ): T[] => {
   const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
-  getOrderedBufferedEngineWrites().forEach((write) => {
+  const lookupIds = R.uniq([...ids, ...hits.flatMap((hit) => getInstanceIds(hit))]);
+  getOrderedBufferedEngineWritesForIds(lookupIds).forEach((write) => {
     if (write.kind === 'bulk-update') {
       write.operations.forEach((operation) => {
         const existing = mergedHits.get(operation.internalId);
@@ -2261,7 +2324,7 @@ const resolveBufferedEngineElementsByIds = <T extends BasicStoreBase>(
   computedIndices: string | string[] | null | undefined,
 ): ResolvedBufferedEngineElements<T> => {
   const bufferedHits = new Map<string, { element: T; complete: boolean }>();
-  getOrderedBufferedEngineWrites().forEach((write) => {
+  getOrderedBufferedEngineWritesForIds(processIds).forEach((write) => {
     if (write.kind === 'bulk-update') {
       write.operations.forEach((operation) => {
         const existing = bufferedHits.get(operation.internalId);
@@ -5082,7 +5145,7 @@ const applyBufferedWritesToRawDocument = (source: Record<string, any>, internalI
 } => {
   let document: Record<string, any> | undefined = source;
   let needsVisibleElement = false;
-  getOrderedBufferedEngineWrites().forEach((write) => {
+  getOrderedBufferedEngineWritesForIds([internalId]).forEach((write) => {
     if (!document) {
       return;
     }
@@ -5192,14 +5255,13 @@ const bufferReindexElements = async (
     _id: document._id ?? document.internal_id,
     _source: R.pipe(R.dissoc('_index'), R.dissoc('_id'))(document),
   })));
-  state.writes.push({
+  appendBufferedEngineWrite(state, {
     kind: 'raw-index',
     sequence: state.nextSequence,
     context,
     documents,
     overlayElements,
   });
-  state.nextSequence += 1;
   invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(overlayElements));
   return true;
 };
@@ -5231,7 +5293,7 @@ const bufferDirectIndexDocument = async (
     _id: documentBody._id ?? documentBody.internal_id,
   };
   const overlayElements = await buildBufferedOverlayElements([document]);
-  state.writes.push({
+  appendBufferedEngineWrite(state, {
     kind: 'direct-index',
     sequence: state.nextSequence,
     context,
@@ -5239,7 +5301,6 @@ const bufferDirectIndexDocument = async (
     overlayElements,
     refresh,
   });
-  state.nextSequence += 1;
   invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(overlayElements));
   return true;
 };
@@ -5721,7 +5782,7 @@ const getOrCreateBufferedEngineState = (): BufferedEngineState | undefined => {
   }
   let state = getBufferedEngineState();
   if (!state) {
-    state = { nextSequence: 0, writes: [] };
+    state = { nextSequence: 0, writes: [], writeLookupsById: new Map() };
     setBatchExecutionMetadata(BATCH_ENGINE_WRITES_METADATA_KEY, state);
     registerBatchCommitter({
       key: BATCH_ENGINE_WRITES_METADATA_KEY,
@@ -5743,14 +5804,13 @@ const bufferDeleteInstances = <T extends BasicStoreBase>(
   if (!state) {
     return false;
   }
-  state.writes.push({
+  appendBufferedEngineWrite(state, {
     kind: 'delete',
     sequence: state.nextSequence,
     context,
     elements,
     forceRefresh: opts.forceRefresh ?? true,
   });
-  state.nextSequence += 1;
   invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(elements));
   return true;
 };
@@ -5767,14 +5827,13 @@ const bufferBulkUpdateOperations = (
   if (!state) {
     return false;
   }
-  state.writes.push({
+  appendBufferedEngineWrite(state, {
     kind: 'bulk-update',
     sequence: state.nextSequence,
     context,
     operations,
     forceRefresh,
   });
-  state.nextSequence += 1;
   invalidateBufferedReadCaches(context, operations.map((operation) => operation.internalId));
   return true;
 };
@@ -5789,7 +5848,7 @@ const bufferIndexElements = (
   if (!state) {
     return false;
   }
-  state.writes.push({
+  appendBufferedEngineWrite(state, {
     kind: 'index',
     sequence: state.nextSequence,
     context,
@@ -5797,7 +5856,6 @@ const bufferIndexElements = (
     indexingType,
     elements,
   });
-  state.nextSequence += 1;
   invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds(elements as BasicStoreBase[]));
   return true;
 };
@@ -7394,7 +7452,7 @@ const bufferUpdateElement = (
   if (!state) {
     return false;
   }
-  state.writes.push({
+  appendBufferedEngineWrite(state, {
     kind: 'update',
     sequence: state.nextSequence,
     context,
@@ -7402,7 +7460,6 @@ const bufferUpdateElement = (
     instance,
     dataToReplace,
   });
-  state.nextSequence += 1;
   invalidateBufferedReadCaches(context, getBufferedWriteInvalidationIds([instance]));
   return true;
 };
