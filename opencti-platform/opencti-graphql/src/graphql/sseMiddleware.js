@@ -70,6 +70,23 @@ const MAX_CACHE_TIME = (conf.get('app:live_stream:cache_max_time') ?? 1) * ONE_H
 const MAX_CACHE_SIZE = conf.get('app:live_stream:cache_max_size') ?? 5000;
 const HEARTBEAT_PERIOD = conf.get('app:live_stream:heartbeat_period') ?? 5000;
 
+export const extractStixRelationEndpoints = (stixData) => {
+  if (stixData.type === STIX_TYPE_RELATION) {
+    if (isEmptyField(stixData.source_ref) || isEmptyField(stixData.target_ref)) {
+      return undefined;
+    }
+    return { fromId: stixData.source_ref, toId: stixData.target_ref };
+  }
+  if (stixData.type === STIX_TYPE_SIGHTING) {
+    const whereSightedRef = Array.isArray(stixData.where_sighted_refs) ? stixData.where_sighted_refs[0] : undefined;
+    if (isEmptyField(stixData.sighting_of_ref) || isEmptyField(whereSightedRef)) {
+      return undefined;
+    }
+    return { fromId: stixData.sighting_of_ref, toId: whereSightedRef };
+  }
+  return undefined;
+};
+
 const sendErrorStatus = (_req, res, httpStatus) => {
   try {
     res.status(httpStatus).end();
@@ -434,10 +451,13 @@ const createSseMiddleware = () => {
     const refs = stixRefsExtractor(stixData);
     const missingInstances = await resolveMissingReferences(context, req.user, refs, cache);
     if (stixData.type === STIX_TYPE_RELATION || stixData.type === STIX_TYPE_SIGHTING) {
+      const endpoints = extractStixRelationEndpoints(stixData);
+      if (!endpoints) {
+        return false;
+      }
       const resolvedMissingIds = new Set(missingInstances.map((m) => m.instanceIds).flat());
       // Check for a relation that the from and the to is correctly accessible.
-      const fromId = stixData.source_ref ?? stixData.sighting_of_ref;
-      const toId = stixData.target_ref ?? stixData.where_sighted_refs[0];
+      const { fromId, toId } = endpoints;
       const hasFrom = resolvedMissingIds.has(fromId) || cache.has(fromId);
       const hasTo = resolvedMissingIds.has(toId) || cache.has(toId);
       if (!hasFrom || !hasTo) {
@@ -535,16 +555,20 @@ const createSseMiddleware = () => {
     if (!isRelationAccessible) {
       return;
     }
+    const endpoints = extractStixRelationEndpoints(stix);
+    if (!endpoints) {
+      return;
+    }
     const isRel = stix.type === 'relationship';
-    const fromId = isRel ? stix.source_ref : stix.sighting_of_ref;
-    const toId = isRel ? stix.target_ref : stix.where_sighted_refs[0];
+    const { fromId, toId } = endpoints;
     // Pre-filter by type to prevent resolutions as much as possible.
     const entityTypeFilters = findFiltersFromKey(streamFilters.filters, 'entity_type', 'eq');
     if (entityTypeFilters.length > 0 && entityTypeFilters[0].values.length > 0) {
-      const fromType = isRel ? stix.extensions[STIX_EXT_OCTI].source_type : stix.extensions[STIX_EXT_OCTI].sighting_of_type;
-      const matchingFrom = isFiltersEntityTypeMatch(streamFilters, fromType);
-      const toType = isRel ? stix.extensions[STIX_EXT_OCTI].target_type : stix.extensions[STIX_EXT_OCTI].where_sighted_types[0];
-      const matchingTo = isFiltersEntityTypeMatch(streamFilters, toType);
+      const extension = stix.extensions?.[STIX_EXT_OCTI];
+      const fromType = isRel ? extension?.source_type : extension?.sighting_of_type;
+      const matchingFrom = isNotEmptyField(fromType) && isFiltersEntityTypeMatch(streamFilters, fromType);
+      const toType = isRel ? extension?.target_type : extension?.where_sighted_types?.[0];
+      const matchingTo = isNotEmptyField(toType) && isFiltersEntityTypeMatch(streamFilters, toType);
       if (!matchingFrom && !matchingTo) {
         return;
       }
