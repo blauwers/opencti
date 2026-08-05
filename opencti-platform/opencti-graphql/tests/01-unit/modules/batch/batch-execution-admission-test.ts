@@ -80,7 +80,7 @@ describe('batch execution admission gate', () => {
 
   it('preserves waiter order while admitting weighted executions', async () => {
     const gate = createBatchExecutionAdmissionGate(4);
-    const releaseFirst = await gate.acquire(3);
+    const releaseFirst = await gate.acquire(4);
     const admitted: string[] = [];
     const secondReleasePromise = gate.acquire(2).then((release) => {
       admitted.push('second');
@@ -93,7 +93,7 @@ describe('batch execution admission gate', () => {
 
     expect(gate.snapshot()).toEqual({
       activeExecutions: 1,
-      activeWeight: 3,
+      activeWeight: 4,
       maxActiveExecutions: 4,
       maxActiveWeight: 4,
       waitingExecutions: 2,
@@ -116,6 +116,70 @@ describe('batch execution admission gate', () => {
 
     releaseSecond();
     releaseThird();
+  });
+
+  it('uses bounded backfill when a heavy head waiter cannot fit yet', async () => {
+    const gate = createBatchExecutionAdmissionGate(4);
+    const releaseFirst = await gate.acquire(3);
+    const admitted: string[] = [];
+    const secondReleasePromise = gate.acquire(2).then((release) => {
+      admitted.push('second');
+      return release;
+    });
+    const thirdRelease = await gate.acquire(1).then((release) => {
+      admitted.push('third');
+      return release;
+    });
+    const fourthReleasePromise = gate.acquire(1).then((release) => {
+      admitted.push('fourth');
+      return release;
+    });
+    const fifthReleasePromise = gate.acquire(1).then((release) => {
+      admitted.push('fifth');
+      return release;
+    });
+
+    expect(admitted).toEqual(['third']);
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 2,
+      activeWeight: 4,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 3,
+      waitingWeight: 4,
+    });
+
+    thirdRelease();
+    const fourthRelease = await fourthReleasePromise;
+    expect(admitted).toEqual(['third', 'fourth']);
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 2,
+      activeWeight: 4,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 2,
+      waitingWeight: 3,
+    });
+
+    fourthRelease();
+    await Promise.resolve();
+    expect(admitted).toEqual(['third', 'fourth']);
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 1,
+      activeWeight: 3,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 2,
+      waitingWeight: 3,
+    });
+
+    releaseFirst();
+    const releaseSecond = await secondReleasePromise;
+    const releaseFifth = await fifthReleasePromise;
+    expect(admitted).toEqual(['third', 'fourth', 'second', 'fifth']);
+
+    releaseSecond();
+    releaseFifth();
   });
 
   it('rejects weights that can never fit in the gate', async () => {

@@ -92,7 +92,7 @@ const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
 const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 4;
-const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 1000;
+const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 2000;
 const BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT = 5 * 1024 * 1024;
 const BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE = '[BATCH] GraphQL execution admission';
 const BATCH_GRAPHQL_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
@@ -1103,6 +1103,15 @@ export const executeBatchGraphqlOperations = async (
   const admissionStats = getBatchGraphqlExecutionAdmissionStats(operations);
   const admissionRequestedAt = Date.now();
   const admissionSnapshotBefore = BATCH_GRAPHQL_PERFORMANCE_LOG ? batchGraphqlExecutionAdmissionGate.snapshot() : undefined;
+  if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+    logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+      event: 'requested',
+      operation_count: admissionStats.operationCount,
+      encoded_bytes: admissionStats.encodedBytes,
+      admission_weight: admissionStats.weight,
+      admission_snapshot_before: admissionSnapshotBefore,
+    });
+  }
   const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(admissionStats.weight);
   const admittedAt = Date.now();
   if (BATCH_GRAPHQL_PERFORMANCE_LOG) {

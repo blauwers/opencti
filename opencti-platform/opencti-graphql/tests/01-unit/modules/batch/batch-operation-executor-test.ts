@@ -127,7 +127,8 @@ const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<
 
 describe('batch GraphQL operation executor', () => {
   it('weights admission by both operation count and encoded payload bytes', () => {
-    expect(getBatchGraphqlExecutionAdmissionWeight(Array.from({ length: 1001 }, () => ({ query: 'mutation { record(value: "x") }' })), 4)).toBe(2);
+    expect(getBatchGraphqlExecutionAdmissionWeight(Array.from({ length: 1089 }, () => ({ query: 'mutation { record(value: "x") }' })), 4)).toBe(1);
+    expect(getBatchGraphqlExecutionAdmissionWeight(Array.from({ length: 2001 }, () => ({ query: 'mutation { record(value: "x") }' })), 4)).toBe(2);
     expect(getBatchGraphqlExecutionAdmissionWeight([{
       query: 'mutation { record(value: "x") }',
       variables: 'x'.repeat(11 * 1024 * 1024),

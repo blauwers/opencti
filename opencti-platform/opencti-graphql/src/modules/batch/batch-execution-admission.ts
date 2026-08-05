@@ -1,6 +1,7 @@
 export type BatchExecutionAdmissionRelease = () => void;
 
 type BatchExecutionAdmissionWaiter = {
+  bypassedWeight: number;
   resolve: (release: BatchExecutionAdmissionRelease) => void;
   weight: number;
 };
@@ -43,17 +44,53 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
       released = true;
       activeExecutions -= 1;
       activeWeight -= weight;
-      while (waiters.length > 0) {
-        const nextWaiter = waiters[0];
-        if (activeWeight + nextWaiter.weight > maxActiveExecutions) {
-          break;
-        }
-        waiters.shift();
-        activeExecutions += 1;
-        activeWeight += nextWaiter.weight;
-        nextWaiter.resolve(buildRelease(nextWaiter.weight));
-      }
+      drainWaiters();
     };
+  };
+
+  const admitWaiter = (waiterIndex: number): void => {
+    const [waiter] = waiters.splice(waiterIndex, 1);
+    activeExecutions += 1;
+    activeWeight += waiter.weight;
+    waiter.resolve(buildRelease(waiter.weight));
+  };
+
+  const findNextWaiterIndex = (): number => {
+    const availableWeight = maxActiveExecutions - activeWeight;
+    if (availableWeight < 1 || waiters.length === 0) {
+      return -1;
+    }
+    const headWaiter = waiters[0];
+    if (headWaiter.weight <= availableWeight) {
+      return 0;
+    }
+
+    // A blocked heavy head may allow a bounded amount of smaller work through
+    // so the gate does not leave capacity idle indefinitely. The budget stays
+    // attached to the head waiter, which prevents continuous small requests
+    // from starving the oldest heavy batch.
+    const remainingBypassWeight = headWaiter.weight - headWaiter.bypassedWeight;
+    if (remainingBypassWeight < 1) {
+      return -1;
+    }
+    return waiters.findIndex((waiter, waiterIndex) => (
+      waiterIndex > 0
+      && waiter.weight <= availableWeight
+      && waiter.weight <= remainingBypassWeight
+    ));
+  };
+
+  const drainWaiters = (): void => {
+    while (waiters.length > 0) {
+      const waiterIndex = findNextWaiterIndex();
+      if (waiterIndex < 0) {
+        return;
+      }
+      if (waiterIndex > 0) {
+        waiters[0].bypassedWeight += waiters[waiterIndex].weight;
+      }
+      admitWaiter(waiterIndex);
+    }
   };
 
   return {
@@ -65,7 +102,8 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
         return buildRelease(weight);
       }
       return new Promise<BatchExecutionAdmissionRelease>((resolve) => {
-        waiters.push({ resolve, weight });
+        waiters.push({ bypassedWeight: 0, resolve, weight });
+        drainWaiters();
       });
     },
     snapshot: () => ({
