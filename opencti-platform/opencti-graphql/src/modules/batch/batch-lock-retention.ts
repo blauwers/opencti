@@ -1,3 +1,4 @@
+import conf from '../../config/conf';
 import { getBatchExecutionMetadata, isBatchWriteBoundaryOpen, registerBatchFinalizer, setBatchExecutionMetadata } from './batch-executor';
 
 type BatchRetainedLock = {
@@ -10,6 +11,7 @@ type BatchRetainedLockState = {
 };
 
 const BATCH_RETAINED_LOCKS_METADATA_KEY = 'batch.retained-locks';
+const BATCH_LOCK_RETRY_COUNT_CONFIG_KEY = 'app:concurrency:batch_retry_count';
 
 const getDraftKey = (draftId?: string) => draftId ?? '';
 
@@ -51,4 +53,19 @@ export const retainBatchLockUntilCommit = (
 
 export const getBatchRetainedLockIds = (draftId?: string): string[] => {
   return Array.from(getBatchRetainedLockState()?.participantIdsByDraft.get(getDraftKey(draftId)) ?? []);
+};
+
+export const getBatchAwareLockOptions = (draftId?: string): { draftId?: string; retryCount?: number } => {
+  const lockOptions = { draftId };
+  if (!isBatchWriteBoundaryOpen()) {
+    return lockOptions;
+  }
+  const batchRetryCount = Number(conf.get(BATCH_LOCK_RETRY_COUNT_CONFIG_KEY));
+  if (!Number.isInteger(batchRetryCount) || batchRetryCount < 0) {
+    return lockOptions;
+  }
+  return {
+    ...lockOptions,
+    retryCount: batchRetryCount,
+  };
 };

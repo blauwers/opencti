@@ -106,6 +106,7 @@
     },
     "concurrency": {
       "retry_count": 100,
+      "batch_retry_count": 3600,
       "retry_delay": 250,
       "retry_jitter": 100,
       "max_ttl": 60000,

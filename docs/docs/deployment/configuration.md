@@ -147,6 +147,7 @@ For a detailed list of exposed metrics, please refer to the [Telemetry](../deplo
 | app:graphql:playground:enabled                      | APP__GRAPHQL__PLAYGROUND__ENABLED                        | `true`        | Enable the playground on /public/graphql                                    |
 | app:graphql:playground:force_disabled_introspection | APP__GRAPHQL__PLAYGROUND__FORCE_DISABLED_INTROSPECTION   | `true`        | Introspection is allowed to auth users but can be disabled in needed        |
 | app:concurrency:retry_count                         | APP__CONCURRENCY__RETRY_COUNT                            | 200           | Number of try to get the lock to work an element (create/update/merge, ...) |
+| app:concurrency:batch_retry_count                   | APP__CONCURRENCY__BATCH_RETRY_COUNT                      | 3600          | Number of tries to get a lock while a buffered batch waits for another batch to commit |
 | app:concurrency:retry_delay                         | APP__CONCURRENCY__RETRY_DELAY                            | 100           | Delay between 2 lock retry (in milliseconds)                                |
 | app:concurrency:retry_jitter                        | APP__CONCURRENCY__RETRY_JITTER                           | 50            | Random jitter to prevent concurrent retry  (in milliseconds)                |
 | app:concurrency:max_ttl                             | APP__CONCURRENCY__MAX_TTL                                | 30000         | Global maximum time for lock retry (in milliseconds)                        |

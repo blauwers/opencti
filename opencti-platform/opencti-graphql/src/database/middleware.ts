@@ -196,7 +196,7 @@ import {
 } from '../modules/batch/batch-executor';
 import { getBatchEntityCreateCoordinatorHeldParticipantIds, resolveBatchEntityCreateLookup, resolveBatchParticipantLock } from '../modules/batch/batch-entity-create-coordinator';
 import { executeBatchCoalescedEntityCreate } from '../modules/batch/batch-entity-create-cache';
-import { getBatchRetainedLockIds, retainBatchLockUntilCommit } from '../modules/batch/batch-lock-retention';
+import { getBatchAwareLockOptions, getBatchRetainedLockIds, retainBatchLockUntilCommit } from '../modules/batch/batch-lock-retention';
 import { hasBatchCreatedRelationEndpoint, registerBatchCreatedEntity } from '../modules/batch/batch-relation-lookup';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
@@ -2031,7 +2031,7 @@ const mergeEntitiesInWriteBoundary = async (
   let lock;
   try {
     // Lock the participants that will be merged
-    lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });
+    lock = await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
     // Entities must be fully loaded with admin user to resolve/move all dependencies
     const initialInstance = await storeLoadByIdWithRefs<StoreObject>(context, user, targetEntityId);
     if (!initialInstance) {
@@ -2666,7 +2666,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
   const participantIds = R.uniq(locksIds.filter((e) => !alreadyHeldLockIds.has(e)));
   try {
     // Try to get the lock in redis
-    lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });
+    lock = await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
     // region handle attributes
     // Only for StixCyberObservable
     const lookingEntities: BasicStoreBase[] = [];
@@ -3556,7 +3556,7 @@ export const createRelationRaw = async (
     isBatchCoordinatedLock = coordinatedLock !== undefined;
     lock = coordinatedLock
       ? await coordinatedLock
-      : await lockResources(participantIds, { draftId: getDraftContext(context, user) });
+      : await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
     if (!isBatchCoordinatedLock) {
       isBatchRetainedLock = retainBatchLockUntilCommit(lock, participantIds, getDraftContext(context, user));
     }
@@ -3900,7 +3900,7 @@ const internalCreateEntityRaw = async (
       existingByIdsPromise = Promise.resolve(coordinatedResolution.existingByIds);
     } else {
       // Try to get the lock in redis
-      lock = await lockResources(participantIds, { draftId });
+      lock = await lockResources(participantIds, getBatchAwareLockOptions(draftId));
       isBatchRetainedLock = retainBatchLockUntilCommit(lock, participantIds, draftId);
       existingByIdsPromise = findExistingEntitiesByIds(context, finderIds, type) as Promise<BasicStoreObject[]>;
     }
@@ -4259,7 +4259,7 @@ const draftInternalDeleteElement = async <T extends StoreObject>(
   const participantIds = [draftElement.internal_id];
   try {
     // Try to get the lock in redis
-    lock = await lockResources(participantIds, { draftId: getDraftContext(context, user) });
+    lock = await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
 
     await elMarkElementsAsDraftDelete(context, user, [draftElement]);
   } catch (err: any) {
@@ -4330,7 +4330,7 @@ export const internalDeleteElementById = async <T extends StoreObject>(
   const participantIds = [element.internal_id];
   try {
     // Try to get the lock in redis
-    lock = await lockResources(participantIds);
+    lock = await lockResources(participantIds, getBatchAwareLockOptions());
     if (isStixRefRelationship(element.entity_type)) {
       const relationElement = element as StoreRelation;
       let referencesPromises;

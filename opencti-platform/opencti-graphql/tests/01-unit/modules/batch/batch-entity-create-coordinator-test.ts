@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import conf from '../../../../src/config/conf';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
 import { lockResources } from '../../../../src/lock/master-lock';
 import { executeBatchCoalescedEntityCreate } from '../../../../src/modules/batch/batch-entity-create-cache';
@@ -421,6 +422,10 @@ describe('batch entity create coordinator', () => {
 
         expect(acquiredLock.unlock).not.toHaveBeenCalled();
         expect(getBatchRetainedLockIds()).toEqual(['identity--one']);
+        expect(lockResources).toHaveBeenCalledWith(['identity--one'], {
+          draftId: undefined,
+          retryCount: Number(conf.get('app:concurrency:batch_retry_count')),
+        });
         return null;
       },
     }]);

@@ -6,7 +6,7 @@ import { getInstanceIds } from '../../schema/identifier';
 import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
-import { retainBatchLockUntilCommit } from './batch-lock-retention';
+import { getBatchAwareLockOptions, retainBatchLockUntilCommit } from './batch-lock-retention';
 
 type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'parked' | 'completed';
 type BatchEntityCreateLookupRetention = 'group' | 'lock';
@@ -609,7 +609,7 @@ export class BatchEntityCreateCoordinator {
   ): Promise<BatchEntityCreateLock> {
     const normalizedParticipantIds = normalizeIds(participantIds);
     const draftKey = draftId ?? '';
-    const lock = await lockResources(normalizedParticipantIds, { draftId }) as BatchEntityCreateLock;
+    const lock = await lockResources(normalizedParticipantIds, getBatchAwareLockOptions(draftId)) as BatchEntityCreateLock;
     if (lock.signal.aborted) {
       this.sharedAbortController.abort(lock.signal.reason);
     } else {
