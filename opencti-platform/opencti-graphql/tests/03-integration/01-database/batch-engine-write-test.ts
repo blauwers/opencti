@@ -13,7 +13,13 @@ import { addLabel } from '../../../src/domain/label';
 import { addDraftContext, createWork, loadWorkById, pingWork, updateReceivedTime } from '../../../src/domain/work';
 import { addStixCyberObservable, stixCyberObservableDelete } from '../../../src/domain/stixCyberObservable';
 import { addStixCoreRelationship } from '../../../src/domain/stixCoreRelationship';
-import { BatchMutationKind, BatchSideEffectKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
+import {
+  BatchMutationKind,
+  BatchSideEffectKind,
+  executeBatchMutations,
+  getBatchExecutionMetadata,
+  registerBatchSideEffect,
+} from '../../../src/modules/batch/batch-executor';
 import { INDEX_DELETED_OBJECTS, INDEX_DRAFT_OBJECTS, INDEX_FILES, INDEX_HISTORY } from '../../../src/database/utils';
 import { confirmDelete } from '../../../src/modules/deleteOperation/deleteOperation-domain';
 import { ENTITY_TYPE_DELETE_OPERATION } from '../../../src/modules/deleteOperation/deleteOperation-types';
@@ -1305,6 +1311,34 @@ describe('batch engine writes', () => {
         },
       },
     ]);
+  });
+
+  it('releases buffered write history before side effects materialize', async () => {
+    let bufferedStateAtMaterialization: { lookups: number; writes: number } | undefined;
+
+    await executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        const created = await addMalware(testContext, ADMIN_USER, { name: `Batch released history ${uuidv4()}` });
+        cleanupMalwares.push(created);
+        await registerBatchSideEffect({
+          kind: BatchSideEffectKind.CompatibilityProjection,
+          execute: async () => {
+            const state = getBatchExecutionMetadata<{
+              writes: unknown[];
+              writeLookupsById: Map<string, unknown>;
+            }>('engine.writes');
+            bufferedStateAtMaterialization = {
+              lookups: state?.writeLookupsById.size ?? 0,
+              writes: state?.writes.length ?? 0,
+            };
+          },
+        });
+        return created;
+      },
+    }]);
+
+    expect(bufferedStateAtMaterialization).toEqual({ lookups: 0, writes: 0 });
   });
 
   it('deduplicates repeated relation creation inside one backend batch scope', async () => {

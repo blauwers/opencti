@@ -2243,6 +2243,13 @@ const appendBufferedEngineWrite = (state: BufferedEngineState, write: BufferedEn
   state.nextSequence += 1;
 };
 
+const takeOrderedBufferedEngineWritesForFlush = (state: BufferedEngineState): Array<BufferedEngineWrite | undefined> => {
+  const orderedWrites = state.writes.sort((left, right) => left.sequence - right.sequence);
+  state.writes = [];
+  state.writeLookupsById.clear();
+  return orderedWrites;
+};
+
 const getOrderedBufferedEngineWritesForIds = (ids: string[]): BufferedEngineWrite[] => {
   const state = getBufferedEngineState();
   if (!state) {
@@ -6894,16 +6901,34 @@ const loadBufferedConnectionProjectionRelations = async (
 
 const finalizeBufferedEngineBulkActions = async (actions: BufferedEngineBulkAction[]): Promise<BufferedEngineBulkAction[]> => {
   const connectionProjections = getBatchExecutionMetadata<BufferedConnectionProjectionState>(BATCH_CONNECTION_PROJECTIONS_METADATA_KEY)?.projections;
-  const projectionRelations = connectionProjections && actions.length > 0
-    ? await loadBufferedConnectionProjectionRelations(actions[0].context, connectionProjections)
-    : [];
-  const projectionActions = connectionProjections && actions.length > 0
-    ? buildBufferedConnectionProjectionActions(actions[0].context, actions, projectionRelations, connectionProjections)
-    : [];
-  const finalActions = [...actions, ...projectionActions];
-  const { groups } = buildBufferedEngineBulkActionGroups(finalActions);
-  const originalDocuments = await loadBufferedEngineOriginalDocuments(groups, connectionProjections);
-  return materializeBufferedEngineBulkActions(finalActions, originalDocuments, connectionProjections);
+  let projectionRelations: BasicStoreRelation[] = [];
+  let projectionActions: BufferedEngineBulkAction[] = [];
+  let finalActions = actions;
+  let groups: BufferedEngineBulkActionGroup[] = [];
+  let originalDocuments: BufferedEngineOriginalDocuments | undefined;
+  try {
+    projectionRelations = connectionProjections && actions.length > 0
+      ? await loadBufferedConnectionProjectionRelations(actions[0].context, connectionProjections)
+      : [];
+    projectionActions = connectionProjections && actions.length > 0
+      ? buildBufferedConnectionProjectionActions(actions[0].context, actions, projectionRelations, connectionProjections)
+      : [];
+    finalActions = projectionActions.length > 0 ? [...actions, ...projectionActions] : actions;
+    ({ groups } = buildBufferedEngineBulkActionGroups(finalActions));
+    originalDocuments = await loadBufferedEngineOriginalDocuments(groups, connectionProjections);
+    return materializeBufferedEngineBulkActions(finalActions, originalDocuments, connectionProjections);
+  } finally {
+    projectionRelations.length = 0;
+    projectionActions.length = 0;
+    groups.length = 0;
+    originalDocuments?.documents.clear();
+    originalDocuments?.loadedKeys.clear();
+    originalDocuments?.versions.clear();
+    if (finalActions !== actions) {
+      finalActions.length = 0;
+    }
+    actions.length = 0;
+  }
 };
 
 const buildIndexBulkActions = async (
@@ -7116,9 +7141,9 @@ const buildBufferedBulkUpdateActions = (writes: BufferedBulkUpdateWrite[]): Buff
 };
 
 const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
-  const orderedWrites = state.writes.slice().sort((left, right) => left.sequence - right.sequence);
+  const orderedWrites = takeOrderedBufferedEngineWritesForFlush(state);
   let segment: BufferedEngineWrite[] = [];
-  const actions: BufferedEngineBulkAction[] = [];
+  let actions: BufferedEngineBulkAction[] = [];
   const appendSegmentActions = async () => {
     if (segment.length === 0) {
       return;
@@ -7137,19 +7162,29 @@ const flushBufferedEngineWrites = async (state: BufferedEngineState) => {
       actions.push(...buildBufferedBulkUpdateActions(segment as BufferedBulkUpdateWrite[]));
     }
   };
-  for (let index = 0; index <= orderedWrites.length; index += 1) {
-    const write = orderedWrites[index];
-    const kindChanged = segment.length > 0 && (!write || write.kind !== segment[0].kind);
-    if (kindChanged) {
-      await appendSegmentActions();
-      segment = [];
+  try {
+    for (let index = 0; index <= orderedWrites.length; index += 1) {
+      const write = orderedWrites[index];
+      const kindChanged = segment.length > 0 && (!write || write.kind !== segment[0].kind);
+      if (kindChanged) {
+        await appendSegmentActions();
+        segment = [];
+      }
+      if (write) {
+        segment.push(write);
+        orderedWrites[index] = undefined;
+      }
     }
-    if (write) {
-      segment.push(write);
-    }
+    actions = await finalizeBufferedEngineBulkActions(actions);
+    actions = coalesceBufferedEngineBulkActions(actions);
+    await executeBufferedEngineCommitActions(actions);
+  } finally {
+    state.writes = [];
+    state.writeLookupsById.clear();
+    orderedWrites.length = 0;
+    segment = [];
+    actions = [];
   }
-  const finalizedActions = await finalizeBufferedEngineBulkActions(actions);
-  await executeBufferedEngineCommitActions(coalesceBufferedEngineBulkActions(finalizedActions));
 };
 
 export const elIndexElements = async (
