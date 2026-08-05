@@ -2,7 +2,7 @@ import { v5 as uuidv5 } from 'uuid';
 import { createEntity, deleteElementById, internalDeleteElementById, patchAttribute, patchAttributeFromLoadedWithRefsInBatch, updateAttribute } from '../database/middleware';
 import { type GetHttpClient, getHttpClient } from '../utils/http-client';
 import { completeConnector, connector, connectors, connectorsFor } from '../database/repository';
-import { getConnectorQueueDetails, purgeConnectorQueues, registerConnectorQueues, unregisterConnector, unregisterExchanges } from '../database/rabbitmq';
+import { ensureConnectorQueues, getConnectorQueueDetails, purgeConnectorQueues, registerConnectorQueues, unregisterConnector, unregisterExchanges } from '../database/rabbitmq';
 import { ENTITY_TYPE_CONNECTOR, ENTITY_TYPE_CONNECTOR_MANAGER, ENTITY_TYPE_SYNC, ENTITY_TYPE_USER, ENTITY_TYPE_WORK } from '../schema/internalObject';
 import { FunctionalError, UnsupportedError, ValidationError } from '../config/errors';
 import { validateFilterGroupForStixMatch } from '../utils/filtering/filtering-stix/stix-filtering';
@@ -154,7 +154,7 @@ export const pingConnector = async (context: AuthContext, user: AuthUser, id: st
   }
   // Ensure queue are correctly setup
   const scopes = connectorEntity.connector_scope ? connectorEntity.connector_scope.split(',') : [];
-  await registerConnectorQueues(connectorEntity.id, connectorEntity.name, connectorEntity.connector_type, scopes);
+  await ensureConnectorQueues(connectorEntity.id, connectorEntity.name, connectorEntity.connector_type, scopes);
 
   const { element } = await updateConnectorWithConnectorInfo(context, user, connectorEntity, state, connectorInfo);
   return completeConnector(element);

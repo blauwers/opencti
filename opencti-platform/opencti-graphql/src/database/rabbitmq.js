@@ -30,6 +30,7 @@ const RABBITMQ_MGMT_REJECT_UNAUTHORIZED = booleanConf('rabbitmq:management_ssl_r
 export const BACKGROUND_TASK_QUEUES = parseInt(conf.get('app:task_scheduler:max_queues_breakdown') ?? '4', 10);
 const RABBITMQ_PUSH_QUEUE_PREFIX = `${RABBIT_QUEUE_PREFIX}push_`;
 const RABBITMQ_LISTEN_QUEUE_PREFIX = `${RABBIT_QUEUE_PREFIX}listen_`;
+const CONNECTOR_QUEUE_ENSURE_TTL = 5 * 60 * 1000;
 const HOSTNAME = conf.get('rabbitmq:hostname');
 const PORT = conf.get('rabbitmq:port');
 const USERNAME = conf.get('rabbitmq:username');
@@ -551,10 +552,13 @@ export const connectorConfig = (id, listen_callback_uri = undefined) => ({
   dead_letter_routing: listenRouting(CONNECTOR_QUEUE_BUNDLES_TOO_LARGE_ID),
 });
 
+const connectorQueueRegistrationCache = new LRUCache({ ttl: CONNECTOR_QUEUE_ENSURE_TTL, max: 10000 });
+const connectorQueueRegistrationFingerprint = (name, type, scope) => JSON.stringify([name, type, scope]);
+
 export const registerConnectorQueues = async (id, name, type, scope) => {
   const listenQueue = `${RABBIT_QUEUE_PREFIX}listen_${id}`;
   const pushQueue = `${RABBIT_QUEUE_PREFIX}push_${id}`;
-  await amqpExecute(async (channel) => {
+  const registration = amqpExecute(async (channel) => {
     // 01. Ensure exchange exists
     const assertExchange = util.promisify(channel.assertExchange).bind(channel);
     await assertExchange(CONNECTOR_EXCHANGE, 'direct', { durable: true });
@@ -581,7 +585,28 @@ export const registerConnectorQueues = async (id, name, type, scope) => {
     await bindQueue(pushQueue, WORKER_EXCHANGE, pushRouting(id), {});
     return true;
   });
-  return connectorConfig(id);
+  const cacheEntry = {
+    fingerprint: connectorQueueRegistrationFingerprint(name, type, scope),
+    registration: registration.then(() => connectorConfig(id)),
+  };
+  connectorQueueRegistrationCache.set(id, cacheEntry);
+  try {
+    return await cacheEntry.registration;
+  } catch (error) {
+    if (connectorQueueRegistrationCache.get(id) === cacheEntry) {
+      connectorQueueRegistrationCache.delete(id);
+    }
+    throw error;
+  }
+};
+
+export const ensureConnectorQueues = async (id, name, type, scope) => {
+  const fingerprint = connectorQueueRegistrationFingerprint(name, type, scope);
+  const cachedRegistration = connectorQueueRegistrationCache.get(id);
+  if (cachedRegistration?.fingerprint === fingerprint) {
+    return cachedRegistration.registration;
+  }
+  return registerConnectorQueues(id, name, type, scope);
 };
 
 export const getInternalBackgroundTaskQueues = () => {
@@ -660,6 +685,7 @@ export const enforceQueuesConsistency = async (context, user) => {
 };
 
 export const unregisterConnector = async (id) => {
+  connectorQueueRegistrationCache.delete(id);
   const listen = await amqpExecute(async (channel) => {
     const deleteQueue = util.promisify(channel.deleteQueue).bind(channel);
     return deleteQueue(`${RABBIT_QUEUE_PREFIX}listen_${id}`, {});

@@ -21,7 +21,7 @@ vi.mock('../../../src/database/redis', () => ({
   redisSetConnectorLogs: vi.fn(),
 }));
 vi.mock('../../../src/database/rabbitmq', () => ({
-  unregisterConnector: vi.fn(), registerConnectorQueues: vi.fn(),
+  unregisterConnector: vi.fn(), registerConnectorQueues: vi.fn(), ensureConnectorQueues: vi.fn(),
   purgeConnectorQueues: vi.fn(), getConnectorQueueDetails: vi.fn(), unregisterExchanges: vi.fn(),
 }));
 vi.mock('../../../src/database/repository', async (importOriginal) => {
@@ -77,7 +77,7 @@ import { testSync } from '../../../src/domain/connector-utils';
 import { updateAttribute, createEntity, patchAttribute, patchAttributeFromLoadedWithRefsInBatch } from '../../../src/database/middleware';
 import { internalFindByIds, storeLoadById } from '../../../src/database/middleware-loader';
 import { notify } from '../../../src/database/redis';
-import { registerConnectorQueues } from '../../../src/database/rabbitmq';
+import { ensureConnectorQueues } from '../../../src/database/rabbitmq';
 import { completeConnector } from '../../../src/database/repository';
 import { getHttpClient } from '../../../src/utils/http-client';
 import { createOnTheFlyUser } from '../../../src/modules/user/user-domain';
@@ -342,7 +342,7 @@ describe('connector ping refresh behavior', () => {
       connector_type: 'EXTERNAL_IMPORT',
       connector_scope: 'indicator,malware',
     }] as never);
-    vi.mocked(registerConnectorQueues).mockResolvedValue(undefined as never);
+    vi.mocked(ensureConnectorQueues).mockResolvedValue(undefined as never);
     vi.mocked(patchAttributeFromLoadedWithRefsInBatch).mockResolvedValue({
       element: {
         id: 'connector--1',
@@ -361,7 +361,7 @@ describe('connector ping refresh behavior', () => {
       queue_threshold: 500,
     } as never);
 
-    expect(registerConnectorQueues).toHaveBeenCalledWith('connector--1', 'Example Connector', 'EXTERNAL_IMPORT', ['indicator', 'malware']);
+    expect(ensureConnectorQueues).toHaveBeenCalledWith('connector--1', 'Example Connector', 'EXTERNAL_IMPORT', ['indicator', 'malware']);
     expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledWith(
       fakeContext,
       fakeUser,
