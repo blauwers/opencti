@@ -79,10 +79,19 @@ import { internalFindByIds, storeLoadById } from '../../../src/database/middlewa
 import { notify } from '../../../src/database/redis';
 import { ensureConnectorQueues } from '../../../src/database/rabbitmq';
 import { completeConnector } from '../../../src/database/repository';
+import { getEntitiesMapFromCache } from '../../../src/database/cache';
 import { getHttpClient } from '../../../src/utils/http-client';
 import { createOnTheFlyUser } from '../../../src/modules/user/user-domain';
 import { verifyIngestionUri } from '../../../src/modules/ingestion/ingestion-common';
-import { syncEditField, registerSync, findSyncById, testSync as connectorTestSync, fetchRemoteStreams, pingConnector } from '../../../src/domain/connector';
+import {
+  syncEditField,
+  registerSync,
+  findSyncById,
+  testSync as connectorTestSync,
+  fetchRemoteStreams,
+  invalidateConnectorHeartbeatCache,
+  pingConnector,
+} from '../../../src/domain/connector';
 import { publishUserAction } from '../../../src/listener/UserActionListener';
 
 const fakeContext = {} as any;
@@ -336,12 +345,15 @@ describe('connector.ts — fetchRemoteStreams deny-list coverage', () => {
 describe('connector ping refresh behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(internalFindByIds).mockResolvedValue([{
+    invalidateConnectorHeartbeatCache();
+    vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--1', {
       id: 'connector--1',
       name: 'Example Connector',
       connector_type: 'EXTERNAL_IMPORT',
       connector_scope: 'indicator,malware',
-    }] as never);
+      connector_state: '{"last_run":0}',
+      updated_at: new Date(0),
+    }]]) as never);
     vi.mocked(ensureConnectorQueues).mockResolvedValue(undefined as never);
     vi.mocked(patchAttributeFromLoadedWithRefsInBatch).mockResolvedValue({
       element: {
@@ -350,6 +362,7 @@ describe('connector ping refresh behavior', () => {
         connector_type: 'EXTERNAL_IMPORT',
         connector_scope: 'indicator,malware',
         connector_state: '{"last_run":1}',
+        updated_at: new Date(),
       },
     } as never);
     vi.mocked(completeConnector).mockImplementation((connector) => connector as never);
@@ -369,9 +382,154 @@ describe('connector ping refresh behavior', () => {
       expect.objectContaining({ connector_state: '{"last_run":1}' }),
       { forceRefresh: false },
     );
-    expect(internalFindByIds).toHaveBeenCalledWith(fakeContext, fakeUser, ['connector--1'], { type: 'Connector' });
+    expect(getEntitiesMapFromCache).toHaveBeenCalledWith(fakeContext, fakeUser, 'Connector');
+    expect(internalFindByIds).not.toHaveBeenCalled();
     expect(storeLoadById).not.toHaveBeenCalled();
     expect(completeConnector).toHaveBeenCalledWith(expect.objectContaining({ connector_state: '{"last_run":1}' }));
     expect(result).toMatchObject({ connector_state: '{"last_run":1}' });
+  });
+
+  it('skips stable heartbeat persistence until the durable touch interval expires', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-05T12:00:00.000Z'));
+    try {
+      vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--stable', {
+        id: 'connector--stable',
+        name: 'Stable Connector',
+        connector_type: 'EXTERNAL_IMPORT',
+        connector_scope: 'indicator',
+        connector_state: 'null',
+        connector_info: { queue_threshold: 500 },
+        updated_at: new Date('2026-08-05T11:55:00.000Z'),
+      }]]) as never);
+      vi.mocked(patchAttributeFromLoadedWithRefsInBatch).mockResolvedValue({
+        element: {
+          id: 'connector--stable',
+          name: 'Stable Connector',
+          connector_type: 'EXTERNAL_IMPORT',
+          connector_scope: 'indicator',
+          connector_state: 'null',
+          connector_info: { queue_threshold: 500 },
+          updated_at: new Date('2026-08-05T12:00:00.000Z'),
+        },
+      } as never);
+
+      await pingConnector(fakeContext, fakeUser, 'connector--stable', 'null', { queue_threshold: 500 } as never);
+      await pingConnector(fakeContext, fakeUser, 'connector--stable', 'null', { queue_threshold: 500 } as never);
+
+      expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(new Date('2026-08-05T12:04:01.000Z'));
+      await pingConnector(fakeContext, fakeUser, 'connector--stable', 'null', { queue_threshold: 500 } as never);
+
+      expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats an empty persisted state and a JSON null heartbeat state as the same value', async () => {
+    vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--null-state', {
+      id: 'connector--null-state',
+      name: 'Null State Connector',
+      connector_type: 'EXTERNAL_IMPORT',
+      connector_scope: 'indicator',
+      connector_state: null,
+      connector_info: { queue_threshold: 500 },
+      updated_at: new Date(),
+    }]]) as never);
+
+    await pingConnector(fakeContext, fakeUser, 'connector--null-state', 'null', { queue_threshold: 500 } as never);
+
+    expect(patchAttributeFromLoadedWithRefsInBatch).not.toHaveBeenCalled();
+  });
+
+  it('drops the runtime overlay when the connector cache refreshes', async () => {
+    vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--cache-refresh', {
+      id: 'connector--cache-refresh',
+      name: 'Cache Refresh Connector',
+      connector_type: 'EXTERNAL_IMPORT',
+      connector_scope: 'indicator',
+      connector_state: '{"last_run":0}',
+      connector_info: { queue_threshold: 500 },
+      updated_at: new Date(),
+    }]]) as never);
+
+    await pingConnector(fakeContext, fakeUser, 'connector--cache-refresh', '{"last_run":0}', { queue_threshold: 500 } as never);
+
+    vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--cache-refresh', {
+      id: 'connector--cache-refresh',
+      name: 'Cache Refresh Connector',
+      connector_type: 'EXTERNAL_IMPORT',
+      connector_scope: 'indicator',
+      connector_state: '{"last_run":1}',
+      connector_info: { queue_threshold: 500 },
+      updated_at: new Date(),
+    }]]) as never);
+
+    await pingConnector(fakeContext, fakeUser, 'connector--cache-refresh', '{"last_run":0}', { queue_threshold: 500 } as never);
+
+    expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledTimes(1);
+    expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledWith(
+      fakeContext,
+      fakeUser,
+      expect.objectContaining({ connector_state: '{"last_run":1}' }),
+      expect.objectContaining({ connector_state: '{"last_run":0}' }),
+      { forceRefresh: false },
+    );
+  });
+
+  it('does not enter the write path once the heartbeat request is already aborted', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+    vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--aborted', {
+      id: 'connector--aborted',
+      name: 'Aborted Connector',
+      connector_type: 'EXTERNAL_IMPORT',
+      connector_scope: 'indicator',
+      connector_state: '{"last_run":0}',
+      updated_at: new Date(0),
+    }]]) as never);
+
+    const result = await pingConnector({ requestAbortSignal: abortController.signal } as any, fakeUser, 'connector--aborted', '{"last_run":1}', {
+      queue_threshold: 500,
+    } as never);
+
+    expect(patchAttributeFromLoadedWithRefsInBatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ id: 'connector--aborted' });
+  });
+
+  it('publishes a cache refresh when a heartbeat clears a remote state reset', async () => {
+    vi.mocked(getEntitiesMapFromCache).mockResolvedValue(new Map([['connector--reset', {
+      id: 'connector--reset',
+      name: 'Reset Connector',
+      connector_type: 'EXTERNAL_IMPORT',
+      connector_scope: 'indicator',
+      connector_state: '',
+      connector_state_reset: true,
+      updated_at: new Date(),
+    }]]) as never);
+    vi.mocked(patchAttributeFromLoadedWithRefsInBatch).mockResolvedValue({
+      element: {
+        id: 'connector--reset',
+        name: 'Reset Connector',
+        connector_type: 'EXTERNAL_IMPORT',
+        connector_scope: 'indicator',
+        connector_state: '',
+        connector_state_reset: false,
+        updated_at: new Date(),
+      },
+    } as never);
+
+    await pingConnector(fakeContext, fakeUser, 'connector--reset', '{"last_run":1}', { queue_threshold: 500 } as never);
+
+    expect(patchAttributeFromLoadedWithRefsInBatch).toHaveBeenCalledWith(
+      fakeContext,
+      fakeUser,
+      expect.objectContaining({ connector_state_reset: true }),
+      expect.objectContaining({ connector_state_reset: false }),
+      { forceRefresh: false },
+    );
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('CONNECTOR_EDIT_TOPIC'), expect.objectContaining({ id: 'connector--reset' }), fakeUser);
   });
 });

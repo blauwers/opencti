@@ -69,6 +69,115 @@ import { encryptSynchronizerCredential } from './connector-sync-crypto';
 import { verifyIngestionUri } from '../modules/ingestion/ingestion-common';
 
 const MINIMAL_SYNCHRONIZER_COMPATIBLE_VERSION = '6.9.6';
+const CONNECTOR_HEARTBEAT_PERSIST_INTERVAL_MS = 4 * 60 * 1000;
+
+interface ConnectorHeartbeatCacheEntry {
+  entity: BasicStoreEntityConnector;
+  persistedAt: number;
+  topologyFingerprint: string;
+  cacheAnchor?: BasicStoreEntityConnector;
+}
+
+const connectorHeartbeatCache = new Map<string, ConnectorHeartbeatCacheEntry>();
+
+const connectorHeartbeatScopes = (connectorEntity: BasicStoreEntityConnector) => (
+  Array.isArray(connectorEntity.connector_scope)
+    ? connectorEntity.connector_scope
+    : connectorEntity.connector_scope ? connectorEntity.connector_scope.split(',') : []
+);
+
+const connectorHeartbeatTopologyFingerprint = (connectorEntity: BasicStoreEntityConnector) => JSON.stringify([
+  connectorEntity.name,
+  connectorEntity.connector_type,
+  connectorHeartbeatScopes(connectorEntity),
+  connectorEntity.connector_state_reset === true,
+]);
+
+const connectorHeartbeatPersistedAt = (connectorEntity: BasicStoreEntityConnector) => {
+  const persistedAt = new Date(connectorEntity.updated_at).getTime();
+  return Number.isNaN(persistedAt) ? 0 : persistedAt;
+};
+
+const normalizeConnectorInfoDate = (value: unknown) => {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value as string | number | Date);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+};
+
+const connectorInfoFingerprint = (connectorInfo: ConnectorInfo | null | undefined) => JSON.stringify({
+  run_and_terminate: connectorInfo?.run_and_terminate ?? null,
+  buffering: connectorInfo?.buffering ?? null,
+  queue_threshold: connectorInfo?.queue_threshold ?? null,
+  queue_messages_size: connectorInfo?.queue_messages_size ?? null,
+  next_run_datetime: normalizeConnectorInfoDate(connectorInfo?.next_run_datetime),
+  last_run_datetime: normalizeConnectorInfoDate(connectorInfo?.last_run_datetime),
+});
+
+const normalizeConnectorState = (state: string | null | undefined) => {
+  if (state === null || state === undefined || state === '' || state === 'null') {
+    return null;
+  }
+  return state;
+};
+
+const rememberConnectorHeartbeat = (
+  connectorEntity: BasicStoreEntityConnector,
+  persistedAt = connectorHeartbeatPersistedAt(connectorEntity),
+  cacheAnchor?: BasicStoreEntityConnector,
+) => {
+  connectorHeartbeatCache.set(connectorEntity.id, {
+    entity: connectorEntity,
+    persistedAt,
+    topologyFingerprint: connectorHeartbeatTopologyFingerprint(connectorEntity),
+    cacheAnchor,
+  });
+};
+
+export const invalidateConnectorHeartbeatCache = (id?: string) => {
+  if (id) {
+    connectorHeartbeatCache.delete(id);
+  } else {
+    connectorHeartbeatCache.clear();
+  }
+};
+
+const loadConnectorForHeartbeat = async (context: AuthContext, user: AuthUser, id: string) => {
+  const connectorsById = await getEntitiesMapFromCache<BasicStoreEntityConnector>(context, user, ENTITY_TYPE_CONNECTOR);
+  const cachedConnector = connectorsById.get(id) as BasicStoreEntityConnector | undefined;
+  if (cachedConnector) {
+    const runtimeEntry = connectorHeartbeatCache.get(id);
+    if (
+      runtimeEntry?.cacheAnchor === cachedConnector
+      && runtimeEntry.topologyFingerprint === connectorHeartbeatTopologyFingerprint(cachedConnector)
+    ) {
+      return { connectorEntity: runtimeEntry.entity, cacheAnchor: cachedConnector };
+    }
+    return { connectorEntity: cachedConnector, cacheAnchor: cachedConnector };
+  }
+  const connectorEntities = await internalFindByIds<BasicStoreEntityConnector>(context, user, [id], { type: ENTITY_TYPE_CONNECTOR }) as BasicStoreEntityConnector[];
+  return { connectorEntity: connectorEntities[0] };
+};
+
+const shouldPersistConnectorHeartbeat = (
+  connectorEntity: BasicStoreEntityConnector,
+  state: string,
+  connectorInfo: ConnectorInfo,
+) => {
+  if (connectorEntity.connector_state_reset) {
+    return true;
+  }
+  const stateUnchanged = normalizeConnectorState(connectorEntity.connector_state) === normalizeConnectorState(state);
+  const infoUnchanged = !connectorInfo || connectorInfoFingerprint(connectorEntity.connector_info) === connectorInfoFingerprint(connectorInfo);
+  if (!stateUnchanged || !infoUnchanged) {
+    return true;
+  }
+  const runtimeEntry = connectorHeartbeatCache.get(connectorEntity.id);
+  const persistedAt = runtimeEntry?.persistedAt ?? connectorHeartbeatPersistedAt(connectorEntity);
+  return Date.now() - persistedAt >= CONNECTOR_HEARTBEAT_PERSIST_INTERVAL_MS;
+};
+
 // Sanitize name for K8s/Docker
 const sanitizeContainerName = (label: string): string => {
   let sanitized = label
@@ -147,21 +256,44 @@ export const updateConnectorWithConnectorInfo = async (
 };
 
 export const pingConnector = async (context: AuthContext, user: AuthUser, id: string, state: string, connectorInfo: ConnectorInfo) => {
-  const connectorEntities = await internalFindByIds<BasicStoreEntityConnector>(context, user, [id], { type: ENTITY_TYPE_CONNECTOR }) as BasicStoreEntityConnector[];
-  const [connectorEntity] = connectorEntities;
+  const { connectorEntity, cacheAnchor } = await loadConnectorForHeartbeat(context, user, id);
   if (!connectorEntity) {
     throw FunctionalError('No connector found with the specified ID', { id });
   }
   // Ensure queue are correctly setup
-  const scopes = connectorEntity.connector_scope ? connectorEntity.connector_scope.split(',') : [];
+  const scopes = connectorHeartbeatScopes(connectorEntity);
   await ensureConnectorQueues(connectorEntity.id, connectorEntity.name, connectorEntity.connector_type, scopes);
 
-  const { element } = await updateConnectorWithConnectorInfo(context, user, connectorEntity, state, connectorInfo);
+  if (!shouldPersistConnectorHeartbeat(connectorEntity, state, connectorInfo)) {
+    const observedEntity = { ...connectorEntity, updated_at: new Date() };
+    const persistedAt = connectorHeartbeatCache.get(connectorEntity.id)?.persistedAt ?? connectorHeartbeatPersistedAt(connectorEntity);
+    rememberConnectorHeartbeat(observedEntity, persistedAt, cacheAnchor);
+    return completeConnector(observedEntity);
+  }
+
+  if (context.requestAbortSignal?.aborted) {
+    return completeConnector(connectorEntity);
+  }
+
+  let element: BasicStoreEntityConnector;
+  try {
+    ({ element } = await updateConnectorWithConnectorInfo(context, user, connectorEntity, state, connectorInfo));
+  } catch (err: any) {
+    if (context.requestAbortSignal?.aborted && (err?.name === 'AbortError' || err?.message === 'The http call was aborted before el request started.')) {
+      return completeConnector(connectorEntity);
+    }
+    throw err;
+  }
+  rememberConnectorHeartbeat(element, connectorEntity.connector_state_reset ? 0 : connectorHeartbeatPersistedAt(element), cacheAnchor);
+  if (connectorEntity.connector_state_reset) {
+    await notify(BUS_TOPICS[ENTITY_TYPE_CONNECTOR].EDIT_TOPIC, element, user);
+  }
   return completeConnector(element);
 };
 export const resetStateConnector = async (context: AuthContext, user: AuthUser, id: string) => {
   const patch = { connector_state: '', connector_state_reset: true, connector_state_timestamp: now() };
   const { element } = await patchAttribute<BasicStoreEntityConnector>(context, user, id, ENTITY_TYPE_CONNECTOR, patch);
+  invalidateConnectorHeartbeatCache(id);
   await publishUserAction({
     user,
     event_type: 'mutation',
@@ -170,6 +302,7 @@ export const resetStateConnector = async (context: AuthContext, user: AuthUser, 
     message: `resets \`state\` and purge queues for ${ENTITY_TYPE_CONNECTOR} \`${element.name}\``,
     context_data: { id, entity_type: ENTITY_TYPE_CONNECTOR, input: patch },
   });
+  await notify(BUS_TOPICS[ENTITY_TYPE_CONNECTOR].EDIT_TOPIC, element, user);
   await purgeConnectorQueues(element);
   return storeLoadById(context, user, id, ENTITY_TYPE_CONNECTOR).then((data) => completeConnector(data));
 };
@@ -236,7 +369,8 @@ export const managedConnectorEdit = async (
     manager_contract_configuration: contractConfigurations,
   };
   const { element } = await patchAttribute(context, user, input.id, ENTITY_TYPE_CONNECTOR, patch);
-  return element;
+  invalidateConnectorHeartbeatCache(input.id);
+  return notify(BUS_TOPICS[ENTITY_TYPE_CONNECTOR].EDIT_TOPIC, element, user);
 };
 
 export const managedConnectorAdd = async (
@@ -354,6 +488,7 @@ export const registerConnector = async (
       patch.active = opts.active;
     }
     const { element } = await patchAttribute(context, user, id, ENTITY_TYPE_CONNECTOR, patch);
+    invalidateConnectorHeartbeatCache(id);
     // Notify configuration change for caching system
     await notify(BUS_TOPICS[ABSTRACT_INTERNAL_OBJECT].EDIT_TOPIC, element, user);
     return storeLoadById(context, user, id, ENTITY_TYPE_CONNECTOR).then((data) => completeConnector(data));
@@ -380,6 +515,7 @@ export const registerConnector = async (
     connectorToCreate.active = opts.active;
   }
   const createdConnector = await createEntity(context, user, connectorToCreate, ENTITY_TYPE_CONNECTOR);
+  invalidateConnectorHeartbeatCache(id);
   await publishUserAction({
     user,
     event_type: 'mutation',
@@ -397,6 +533,7 @@ export const registerConnector = async (
 export const connectorDelete = async (context: AuthContext, user: AuthUser, connectorId: string) => {
   await deleteWorkForConnector(context, user, connectorId);
   await unregisterConnector(connectorId);
+  invalidateConnectorHeartbeatCache(connectorId);
   const { element } = await internalDeleteElementById<BasicStoreEntityConnector>(context, user, connectorId, ENTITY_TYPE_CONNECTOR);
   await publishUserAction({
     user,
@@ -413,6 +550,7 @@ export const connectorDelete = async (context: AuthContext, user: AuthUser, conn
 
 const updateConnector = async (context: AuthContext, user: AuthUser, connectorId: string, input: EditInput[]) => {
   const { element } = await updateAttribute<BasicStoreEntityConnector>(context, user, connectorId, ENTITY_TYPE_CONNECTOR, input);
+  invalidateConnectorHeartbeatCache(connectorId);
   await publishUserAction({
     user,
     event_type: 'mutation',
