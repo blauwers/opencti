@@ -313,6 +313,12 @@ describe('batch entity create coordinator', () => {
 
   it('coordinates lock-only relation participants without issuing an entity lookup', async () => {
     vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+    const acquiredLocks: ReturnType<typeof buildLock>[] = [];
+    vi.mocked(lockResources).mockImplementation(async () => {
+      const lock = buildLock();
+      acquiredLocks.push(lock);
+      return lock as any;
+    });
 
     const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
     let releaseFirst: (() => void) | undefined;
@@ -349,8 +355,10 @@ describe('batch entity create coordinator', () => {
     await coordinator.close();
 
     expect(secondResolved).toBe(true);
-    expect(lockResources).toHaveBeenCalledTimes(1);
-    expect(lockResources).toHaveBeenCalledWith(['relationship--one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenCalledTimes(2);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--one'], { draftId: undefined });
+    expect(acquiredLocks[0].unlock).toHaveBeenCalledTimes(1);
   });
 
   it('serializes later lock-only lookups that discover the same persisted relation id', async () => {
@@ -408,9 +416,11 @@ describe('batch entity create coordinator', () => {
     await Promise.all([firstPromise, secondPromise]);
     await coordinator.close();
 
-    expect(lockResources).toHaveBeenCalledTimes(2);
-    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--planned-one', 'relationship--planned-two'], { draftId: undefined });
-    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--internal-shared'], { draftId: undefined });
+    expect(lockResources).toHaveBeenCalledTimes(4);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--planned-one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--planned-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(3, ['relationship--internal-shared'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(4, ['relationship--internal-shared'], { draftId: undefined });
   });
 
   it('does not require a phase-wide barrier for later lock-only lookups', async () => {
@@ -453,9 +463,10 @@ describe('batch entity create coordinator', () => {
     await Promise.all([firstPromise, secondPromise]);
     await coordinator.close();
 
-    expect(lockResources).toHaveBeenCalledTimes(2);
-    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--planned-one', 'relationship--planned-two'], { draftId: undefined });
-    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--internal-one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenCalledTimes(3);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--planned-one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--planned-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(3, ['relationship--internal-one'], { draftId: undefined });
   });
 
   it('releases lock-only reservations between operations to avoid crossed follow-on waits', async () => {
@@ -505,8 +516,11 @@ describe('batch entity create coordinator', () => {
     await coordinator.close();
 
     expect(secondOperationCount).toBe(2);
-    expect(lockResources).toHaveBeenCalledTimes(1);
-    expect(lockResources).toHaveBeenCalledWith(['relationship--internal-one', 'relationship--internal-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenCalledTimes(4);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--internal-one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--internal-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(3, ['relationship--internal-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(4, ['relationship--internal-one'], { draftId: undefined });
   });
 
 });
