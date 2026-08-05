@@ -14,7 +14,7 @@ import {
 } from 'graphql';
 import Upload from 'graphql-upload/Upload.mjs';
 import jsonCanonicalize from 'canonicalize';
-import conf from '../../config/conf';
+import conf, { booleanConf, logApp } from '../../config/conf';
 import { FUNCTIONAL_ERROR, FunctionalError, MISSING_REF_ERROR, VALIDATION_ERROR } from '../../config/errors';
 import type { AuthContext } from '../../types/user';
 import {
@@ -82,6 +82,11 @@ type BatchGraphqlOperationExecutionState = {
   failedGroupRetryableById: Map<number, boolean>;
   operationErrors: BatchGraphqlOperationError[];
 };
+type BatchGraphqlExecutionAdmissionStats = {
+  encodedBytes: number;
+  operationCount: number;
+  weight: number;
+};
 
 const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
@@ -89,6 +94,8 @@ const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concur
 const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 4;
 const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 1000;
 const BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT = 5 * 1024 * 1024;
+const BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE = '[BATCH] GraphQL execution admission';
+const BATCH_GRAPHQL_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
 const configuredBatchGraphqlMaxActiveExecutions = Number(conf.get('app:concurrency:batch_max_active_executions'));
 const BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS = Number.isInteger(configuredBatchGraphqlMaxActiveExecutions) && configuredBatchGraphqlMaxActiveExecutions > 0
   ? configuredBatchGraphqlMaxActiveExecutions
@@ -108,6 +115,13 @@ export const getBatchGraphqlExecutionAdmissionWeight = (
   operations: BatchGraphqlOperationInput[],
   maxActiveWeight = BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS,
 ): number => {
+  return getBatchGraphqlExecutionAdmissionStats(operations, maxActiveWeight).weight;
+};
+
+export const getBatchGraphqlExecutionAdmissionStats = (
+  operations: BatchGraphqlOperationInput[],
+  maxActiveWeight = BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS,
+): BatchGraphqlExecutionAdmissionStats => {
   const encodedBytes = operations.reduce((total, operation) => {
     const fileBytes = operation.files?.reduce((filesTotal, file) => {
       return filesTotal
@@ -125,7 +139,11 @@ export const getBatchGraphqlExecutionAdmissionWeight = (
   }, 0);
   const operationWeight = Math.ceil(operations.length / BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT);
   const byteWeight = Math.ceil(encodedBytes / BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT);
-  return Math.min(maxActiveWeight, Math.max(1, operationWeight, byteWeight));
+  return {
+    encodedBytes,
+    operationCount: operations.length,
+    weight: Math.min(maxActiveWeight, Math.max(1, operationWeight, byteWeight)),
+  };
 };
 
 export const buildBatchGraphqlResultToken = (operationIndex: number, path: string[]): string => {
@@ -1082,7 +1100,22 @@ export const executeBatchGraphqlOperations = async (
   if (!Array.isArray(operations) || operations.length === 0) {
     throw FunctionalError('Batch GraphQL operations cannot be empty');
   }
-  const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(getBatchGraphqlExecutionAdmissionWeight(operations));
+  const admissionStats = getBatchGraphqlExecutionAdmissionStats(operations);
+  const admissionRequestedAt = Date.now();
+  const admissionSnapshotBefore = BATCH_GRAPHQL_PERFORMANCE_LOG ? batchGraphqlExecutionAdmissionGate.snapshot() : undefined;
+  const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(admissionStats.weight);
+  const admittedAt = Date.now();
+  if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+    logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+      event: 'admitted',
+      operation_count: admissionStats.operationCount,
+      encoded_bytes: admissionStats.encodedBytes,
+      admission_weight: admissionStats.weight,
+      admission_wait_ms: admittedAt - admissionRequestedAt,
+      admission_snapshot_before: admissionSnapshotBefore,
+      admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+    });
+  }
   try {
     const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
     const resultBindings: BatchGraphqlResultBindings = new Map();
@@ -1103,6 +1136,19 @@ export const executeBatchGraphqlOperations = async (
       results: execution.results[0].results,
     };
   } finally {
+    const completedAt = Date.now();
     releaseAdmission();
+    if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+      logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+        event: 'released',
+        operation_count: admissionStats.operationCount,
+        encoded_bytes: admissionStats.encodedBytes,
+        admission_weight: admissionStats.weight,
+        admission_wait_ms: admittedAt - admissionRequestedAt,
+        execution_time_ms: completedAt - admittedAt,
+        total_time_ms: completedAt - admissionRequestedAt,
+        admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+      });
+    }
   }
 };

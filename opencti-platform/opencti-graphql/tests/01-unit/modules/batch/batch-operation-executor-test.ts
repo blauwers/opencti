@@ -11,6 +11,7 @@ import {
 import {
   buildBatchGraphqlResultToken,
   executeBatchGraphqlOperations,
+  getBatchGraphqlExecutionAdmissionStats,
   getBatchGraphqlExecutionAdmissionWeight,
 } from '../../../../src/modules/batch/batch-operation-executor';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
@@ -135,6 +136,22 @@ describe('batch GraphQL operation executor', () => {
       query: 'mutation { record(value: "x") }',
       variables: 'x'.repeat(30 * 1024 * 1024),
     }], 4)).toBe(4);
+    expect(getBatchGraphqlExecutionAdmissionStats([{
+      query: 'a',
+      variables: 'bc',
+      operationName: 'd',
+      objectId: 'e',
+      files: [{
+        path: 'f',
+        name: 'g',
+        mimeType: 'h',
+        data: 'ij',
+      }],
+    }], 4)).toEqual({
+      encodedBytes: 10,
+      operationCount: 1,
+      weight: 1,
+    });
   });
 
   it('executes mutation documents under one write boundary and preserves batch metadata', async () => {
