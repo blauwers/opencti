@@ -199,6 +199,7 @@ import {
   resolveBatchEntityCreateLookup,
   resolveBatchParticipantLock,
 } from '../modules/batch/batch-entity-create-coordinator';
+import { hasBatchCreatedRelationEndpoint, registerBatchCreatedEntity } from '../modules/batch/batch-relation-lookup';
 import { BatchWaitUntil } from '../modules/batch/batch-types';
 import { convertExternalReferenceToStix, convertStoreToStix_2_1 } from './stix-2-1-converter';
 import { convertStoreToStix } from './stix-common-converter';
@@ -3400,9 +3401,21 @@ export const getExistingRelations = async (
   const { fromRule } = opts;
   const existingRelationships: StoreProxyRelation[] = [];
   const inputIds = getInputIds(relationshipType, input, false);
-  if (isBatchWriteBoundaryOpen()) {
+  const isBufferedBatchLookup = isBatchWriteBoundaryOpen();
+  if (isBufferedBatchLookup) {
     const bufferedRelationships = await elFindBufferedElementsByIds<BasicStoreRelation>(context, SYSTEM_USER, inputIds, { type: relationshipType }) as StoreProxyRelation[];
     pushAll(existingRelationships, bufferedRelationships);
+    if (existingRelationships.length > 0) {
+      return R.uniqBy((relation) => relation.internal_id, existingRelationships);
+    }
+    if (hasBatchCreatedRelationEndpoint(input)) {
+      return existingRelationships;
+    }
+    const directRelationships = await findExistingRelationsByIds(context, inputIds, relationshipType) as StoreProxyRelation[];
+    pushAll(existingRelationships, directRelationships);
+    if (existingRelationships.length > 0) {
+      return R.uniqBy((relation) => relation.internal_id, existingRelationships);
+    }
   }
   if (fromRule) {
     // In case inferred rule, try to find the relation with basic filters
@@ -3468,6 +3481,7 @@ export const createRelationRaw = async (
   opts: CreateRelationRawOpts = {},
 ) => {
   let lock;
+  let isBatchCoordinatedLock = false;
   const { fromRule, locks = [] } = opts;
   const { fromId, toId, relationship_type: relationshipType } = rawInput;
 
@@ -3539,6 +3553,7 @@ export const createRelationRaw = async (
       draftId: getDraftContext(context, user),
       participantIds,
     });
+    isBatchCoordinatedLock = coordinatedLock !== undefined;
     lock = coordinatedLock
       ? await coordinatedLock
       : await lockResources(participantIds, { draftId: getDraftContext(context, user) });
@@ -3573,12 +3588,17 @@ export const createRelationRaw = async (
 
     // endregion
     if (existingRelationship) {
+      // Buffered batch writes fold concurrent updates to the same relation document
+      // before commit, so nested upserts must not reacquire its canonical ids in Redis.
+      const nestedLocks = isBatchCoordinatedLock
+        ? R.uniq([...participantIds, ...getInstanceIds(existingRelationship)])
+        : participantIds;
       // If upsert come from a rule, do a specific upsert.
       if (fromRule) {
-        return await upsertRelationRule(context, user, existingRelationship, input, { ...opts, fromRule, locks: participantIds });
+        return await upsertRelationRule(context, user, existingRelationship, input, { ...opts, fromRule, locks: nestedLocks });
       }
       // If not upsert the element
-      return upsertElement(context, user, existingRelationship, relationshipType, resolvedInput, { ...opts, locks: participantIds, elementAlreadyResolved: true });
+      return upsertElement(context, user, existingRelationship, relationshipType, resolvedInput, { ...opts, locks: nestedLocks, elementAlreadyResolved: true });
     }
     // Check cyclic reference consistency for embedded relationships before creation
     if (isStixRefRelationship(relationshipType)) {
@@ -3772,6 +3792,17 @@ const findExistingEntitiesByIds = (
   type: string,
 ) => {
   const batchLoader = isBatchWriteBoundaryOpen() ? context?.batch?.existingEntityIdsBatchLoader : undefined;
+  if (batchLoader) {
+    return batchLoader.load({ ids, type });
+  }
+  return internalFindByIds(context, SYSTEM_USER, ids, { type });
+};
+const findExistingRelationsByIds = (
+  context: AuthContext,
+  ids: string[],
+  type: string,
+) => {
+  const batchLoader = isBatchWriteBoundaryOpen() ? context?.batch?.existingRelationIdsBatchLoader : undefined;
   if (batchLoader) {
     return batchLoader.load({ ids, type });
   }
@@ -4113,6 +4144,7 @@ const internalCreateEntityRaw = async (
 
     // Index the created element
     lock.signal.throwIfAborted();
+    registerBatchCreatedEntity(dataEntity.element as BasicStoreBase);
     await indexCreatedElement(context, user, dataEntity);
     // Push the input in the stream
     const createdElement = { ...resolvedInput, ...dataEntity.element };

@@ -322,17 +322,19 @@ describe('batch entity create coordinator', () => {
     let firstResolved = false;
     let secondResolved = false;
     const firstPromise = runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
-      await resolveBatchParticipantLock({
+      const lock = await resolveBatchParticipantLock({
         participantIds: ['relationship--one'],
-      });
+      }) as any;
       firstResolved = true;
       await firstGate;
+      await lock.unlock();
     });
     const secondPromise = runWithBatchEntityCreateCoordinator(coordinator, 1, async () => {
-      await resolveBatchParticipantLock({
+      const lock = await resolveBatchParticipantLock({
         participantIds: ['relationship--one'],
-      });
+      }) as any;
       secondResolved = true;
+      await lock.unlock();
     });
 
     for (let tick = 0; tick < 10 && !firstResolved; tick += 1) {
@@ -350,4 +352,161 @@ describe('batch entity create coordinator', () => {
     expect(lockResources).toHaveBeenCalledTimes(1);
     expect(lockResources).toHaveBeenCalledWith(['relationship--one'], { draftId: undefined });
   });
+
+  it('serializes later lock-only lookups that discover the same persisted relation id', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
+    let releaseFirstShared: (() => void) | undefined;
+    const firstSharedGate = new Promise<void>((resolve) => {
+      releaseFirstShared = resolve;
+    });
+    let releaseFirstGroup: (() => void) | undefined;
+    const firstGroupGate = new Promise<void>((resolve) => {
+      releaseFirstGroup = resolve;
+    });
+    let firstResolvedSharedId = false;
+    let secondResolvedSharedId = false;
+    const firstPromise = runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+      const plannedLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--planned-one'],
+      }) as any;
+      const sharedLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-shared'],
+      }) as any;
+      firstResolvedSharedId = true;
+      await firstSharedGate;
+      await sharedLock.unlock();
+      await firstGroupGate;
+      await plannedLock.unlock();
+    });
+    const secondPromise = runWithBatchEntityCreateCoordinator(coordinator, 1, async () => {
+      const plannedLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--planned-two'],
+      }) as any;
+      const sharedLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-shared'],
+      }) as any;
+      secondResolvedSharedId = true;
+      await sharedLock.unlock();
+      await plannedLock.unlock();
+    });
+
+    for (let tick = 0; tick < 10 && !firstResolvedSharedId; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(firstResolvedSharedId).toBe(true);
+    expect(secondResolvedSharedId).toBe(false);
+
+    releaseFirstShared?.();
+    for (let tick = 0; tick < 10 && !secondResolvedSharedId; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(secondResolvedSharedId).toBe(true);
+
+    releaseFirstGroup?.();
+    await Promise.all([firstPromise, secondPromise]);
+    await coordinator.close();
+
+    expect(lockResources).toHaveBeenCalledTimes(2);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--planned-one', 'relationship--planned-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--internal-shared'], { draftId: undefined });
+  });
+
+  it('does not require a phase-wide barrier for later lock-only lookups', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
+    let releaseSecond: (() => void) | undefined;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let firstResolvedAdditionalId = false;
+    let secondResolvedInitialId = false;
+    const firstPromise = runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+      const plannedLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--planned-one'],
+      }) as any;
+      const additionalLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-one'],
+      }) as any;
+      firstResolvedAdditionalId = true;
+      await additionalLock.unlock();
+      await plannedLock.unlock();
+    });
+    const secondPromise = runWithBatchEntityCreateCoordinator(coordinator, 1, async () => {
+      const lock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--planned-two'],
+      }) as any;
+      secondResolvedInitialId = true;
+      await secondGate;
+      await lock.unlock();
+    });
+
+    for (let tick = 0; tick < 10 && (!firstResolvedAdditionalId || !secondResolvedInitialId); tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(secondResolvedInitialId).toBe(true);
+    expect(firstResolvedAdditionalId).toBe(true);
+
+    releaseSecond?.();
+    await Promise.all([firstPromise, secondPromise]);
+    await coordinator.close();
+
+    expect(lockResources).toHaveBeenCalledTimes(2);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['relationship--planned-one', 'relationship--planned-two'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--internal-one'], { draftId: undefined });
+  });
+
+  it('releases lock-only reservations between operations to avoid crossed follow-on waits', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0, 1]);
+    let releaseSecondOperation: (() => void) | undefined;
+    const secondOperationGate = new Promise<void>((resolve) => {
+      releaseSecondOperation = resolve;
+    });
+    let firstOperationCount = 0;
+    let secondOperationCount = 0;
+    const firstPromise = runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+      const firstLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-one'],
+      }) as any;
+      firstOperationCount += 1;
+      await firstLock.unlock();
+      await secondOperationGate;
+      const secondLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-two'],
+      }) as any;
+      secondOperationCount += 1;
+      await secondLock.unlock();
+    });
+    const secondPromise = runWithBatchEntityCreateCoordinator(coordinator, 1, async () => {
+      const firstLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-two'],
+      }) as any;
+      firstOperationCount += 1;
+      await firstLock.unlock();
+      await secondOperationGate;
+      const secondLock = await resolveBatchParticipantLock({
+        participantIds: ['relationship--internal-one'],
+      }) as any;
+      secondOperationCount += 1;
+      await secondLock.unlock();
+    });
+
+    for (let tick = 0; tick < 10 && firstOperationCount < 2; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(firstOperationCount).toBe(2);
+
+    releaseSecondOperation?.();
+    await Promise.all([firstPromise, secondPromise]);
+    await coordinator.close();
+
+    expect(secondOperationCount).toBe(2);
+    expect(lockResources).toHaveBeenCalledTimes(1);
+    expect(lockResources).toHaveBeenCalledWith(['relationship--internal-one', 'relationship--internal-two'], { draftId: undefined });
+  });
+
 });

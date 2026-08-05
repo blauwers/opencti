@@ -8,6 +8,7 @@ import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
 
 type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'completed';
+type BatchEntityCreateLookupRetention = 'group' | 'lock';
 
 type BatchEntityCreateLock = {
   signal: AbortSignal;
@@ -35,6 +36,7 @@ type PendingBatchEntityCreateLookup = {
   groupId: number;
   input: BatchEntityCreateLookupInput;
   reject: (cause: unknown) => void;
+  retention: BatchEntityCreateLookupRetention;
   resolve: (resolution: BatchEntityCreateLookupResolution) => void;
 };
 
@@ -77,6 +79,8 @@ export class BatchEntityCreateCoordinator {
 
   private readonly ownedParticipantIdsByGroup = new Map<number, Map<string, Set<string>>>();
 
+  private readonly scopedParticipantIdCountsByGroup = new Map<number, Map<string, Map<string, number>>>();
+
   private readonly reservedParticipantIdsByGroup = new Map<number, Map<string, Set<string>>>();
 
   private readonly pendingLookups = new Map<number, PendingBatchEntityCreateLookup>();
@@ -91,18 +95,31 @@ export class BatchEntityCreateCoordinator {
 
   private closed = false;
 
+  private reservationChangePromise!: Promise<void>;
+
+  private reservationChangeResolver!: () => void;
+
   constructor(context: AuthContext, groupIds: number[], maxActiveGroups = Number.POSITIVE_INFINITY) {
     this.context = context;
     this.groupOrder = [...groupIds];
     this.maxActiveGroups = Math.max(1, maxActiveGroups);
+    this.resetReservationChangePromise();
     this.groupOrder.forEach((groupId) => this.groupStates.set(groupId, 'collecting'));
   }
 
   getHeldParticipantIds(groupId: number, draftId?: string): string[] {
-    return Array.from(this.ownedParticipantIdsByGroup.get(groupId)?.get(draftId ?? '') ?? []);
+    const draftKey = draftId ?? '';
+    return normalizeIds([
+      ...Array.from(this.ownedParticipantIdsByGroup.get(groupId)?.get(draftKey) ?? []),
+      ...Array.from(this.scopedParticipantIdCountsByGroup.get(groupId)?.get(draftKey)?.keys() ?? []),
+    ]);
   }
 
-  registerLookup(groupId: number, input: BatchEntityCreateLookupInput): Promise<BatchEntityCreateLookupResolution> {
+  registerLookup(
+    groupId: number,
+    input: BatchEntityCreateLookupInput,
+    retention: BatchEntityCreateLookupRetention = 'group',
+  ): Promise<BatchEntityCreateLookupResolution> {
     if (this.closed) {
       return Promise.reject(new Error('Batch entity create coordinator is closed'));
     }
@@ -112,6 +129,7 @@ export class BatchEntityCreateCoordinator {
     if (this.groupStates.get(groupId) === 'active') {
       this.activeGroupCount -= 1;
       this.reservedParticipantIdsByGroup.delete(groupId);
+      this.notifyReservationChange();
     }
     return new Promise<BatchEntityCreateLookupResolution>((resolve, reject) => {
       this.pendingLookups.set(groupId, {
@@ -122,6 +140,7 @@ export class BatchEntityCreateCoordinator {
           participantIds: normalizeIds(input.participantIds),
         },
         reject,
+        retention,
         resolve,
       });
       this.groupStates.set(groupId, 'waiting');
@@ -136,9 +155,22 @@ export class BatchEntityCreateCoordinator {
     }
     this.groupStates.set(groupId, 'completed');
     this.ownedParticipantIdsByGroup.delete(groupId);
+    this.scopedParticipantIdCountsByGroup.delete(groupId);
     this.reservedParticipantIdsByGroup.delete(groupId);
+    this.notifyReservationChange();
     this.releaseReadyLookups();
     this.scheduleFlushIfReady();
+  }
+
+  acquireParticipantLock(groupId: number, input: BatchParticipantLockInput): Promise<BatchEntityCreateLock> {
+    if (this.groupStates.get(groupId) !== 'active') {
+      return this.registerLookup(groupId, {
+        ...input,
+        finderIds: [],
+        type: '',
+      }, 'lock').then((resolution) => resolution.lock);
+    }
+    return this.acquireAdditionalParticipantLock(groupId, input);
   }
 
   async close(): Promise<void> {
@@ -212,10 +244,7 @@ export class BatchEntityCreateCoordinator {
           participantIds,
           resolution: {
             existingByIds,
-            lock: {
-              signal: this.sharedAbortController.signal,
-              unlock: async () => undefined,
-            },
+            lock: this.buildNoopLock(),
           },
         };
       });
@@ -228,7 +257,12 @@ export class BatchEntityCreateCoordinator {
       })));
       readyLookups.forEach((readyLookup) => {
         const { lookup, participantIds } = readyLookup;
-        this.addGroupOwnedParticipantIds(lookup.groupId, lookup.input.draftId, participantIds);
+        if (lookup.retention === 'lock') {
+          this.addGroupScopedParticipantIds(lookup.groupId, lookup.input.draftId, participantIds);
+          readyLookup.resolution.lock = this.buildScopedParticipantLock(lookup.groupId, lookup.input.draftId, participantIds);
+        } else {
+          this.addGroupOwnedParticipantIds(lookup.groupId, lookup.input.draftId, participantIds);
+        }
         this.reserveGroupParticipantIds(lookup.groupId);
         this.groupStates.set(lookup.groupId, 'ready');
         this.readyLookups.push(readyLookup);
@@ -267,15 +301,146 @@ export class BatchEntityCreateCoordinator {
     this.ownedParticipantIdsByGroup.set(groupId, idsByDraft);
   }
 
-  private reserveGroupParticipantIds(groupId: number): void {
-    const ownedIdsByDraft = this.ownedParticipantIdsByGroup.get(groupId);
-    if (!ownedIdsByDraft) {
-      this.reservedParticipantIdsByGroup.delete(groupId);
+  private addGroupScopedParticipantIds(groupId: number, draftId: string | undefined, participantIds: string[]): void {
+    const draftKey = draftId ?? '';
+    const countsByDraft = this.scopedParticipantIdCountsByGroup.get(groupId) ?? new Map<string, Map<string, number>>();
+    const participantCounts = countsByDraft.get(draftKey) ?? new Map<string, number>();
+    participantIds.forEach((id) => participantCounts.set(id, (participantCounts.get(id) ?? 0) + 1));
+    countsByDraft.set(draftKey, participantCounts);
+    this.scopedParticipantIdCountsByGroup.set(groupId, countsByDraft);
+  }
+
+  private removeGroupScopedParticipantIds(groupId: number, draftId: string | undefined, participantIds: string[]): void {
+    const draftKey = draftId ?? '';
+    const countsByDraft = this.scopedParticipantIdCountsByGroup.get(groupId);
+    const participantCounts = countsByDraft?.get(draftKey);
+    if (!participantCounts) {
       return;
     }
-    this.reservedParticipantIdsByGroup.set(groupId, new Map(
-      Array.from(ownedIdsByDraft.entries()).map(([draftKey, participantIds]) => [draftKey, new Set(participantIds)]),
-    ));
+    participantIds.forEach((id) => {
+      const nextCount = (participantCounts.get(id) ?? 0) - 1;
+      if (nextCount > 0) {
+        participantCounts.set(id, nextCount);
+      } else {
+        participantCounts.delete(id);
+      }
+    });
+    if (participantCounts.size === 0) {
+      countsByDraft?.delete(draftKey);
+    }
+    if (countsByDraft?.size === 0) {
+      this.scopedParticipantIdCountsByGroup.delete(groupId);
+    }
+    this.reserveGroupParticipantIds(groupId);
+    this.releaseReadyLookups();
+  }
+
+  private reserveGroupParticipantIds(groupId: number): void {
+    const ownedIdsByDraft = this.ownedParticipantIdsByGroup.get(groupId);
+    const scopedCountsByDraft = this.scopedParticipantIdCountsByGroup.get(groupId);
+    if (!ownedIdsByDraft && !scopedCountsByDraft) {
+      this.reservedParticipantIdsByGroup.delete(groupId);
+      this.notifyReservationChange();
+      return;
+    }
+    const reservedIdsByDraft = new Map<string, Set<string>>();
+    ownedIdsByDraft?.forEach((participantIds, draftKey) => {
+      reservedIdsByDraft.set(draftKey, new Set(participantIds));
+    });
+    scopedCountsByDraft?.forEach((participantCounts, draftKey) => {
+      const participantIds = reservedIdsByDraft.get(draftKey) ?? new Set<string>();
+      participantCounts.forEach((_count, participantId) => participantIds.add(participantId));
+      reservedIdsByDraft.set(draftKey, participantIds);
+    });
+    this.reservedParticipantIdsByGroup.set(groupId, reservedIdsByDraft);
+    this.notifyReservationChange();
+  }
+
+  private getActiveConflictGroupIds(groupId: number, draftId: string | undefined, participantIds: string[]): number[] {
+    const draftKey = draftId ?? '';
+    const requestedIds = new Set(participantIds);
+    const conflictingGroupIds: number[] = [];
+    this.reservedParticipantIdsByGroup.forEach((idsByDraft, otherGroupId) => {
+      if (otherGroupId === groupId || this.groupStates.get(otherGroupId) !== 'active') {
+        return;
+      }
+      const otherIds = idsByDraft.get(draftKey);
+      if (otherIds && Array.from(requestedIds).some((id) => otherIds.has(id))) {
+        conflictingGroupIds.push(otherGroupId);
+      }
+    });
+    return conflictingGroupIds;
+  }
+
+  private async acquireAdditionalParticipantLock(groupId: number, input: BatchParticipantLockInput): Promise<BatchEntityCreateLock> {
+    const participantIds = normalizeIds(input.participantIds);
+    const ownedParticipantIds = new Set(this.getHeldParticipantIds(groupId, input.draftId));
+    const additionalParticipantIds = participantIds.filter((id) => !ownedParticipantIds.has(id));
+    if (additionalParticipantIds.length === 0) {
+      return this.buildNoopLock();
+    }
+
+    while (true) {
+      const reservationChangePromise = this.reservationChangePromise;
+      const conflictingGroupIds = this.getActiveConflictGroupIds(groupId, input.draftId, additionalParticipantIds);
+      if (conflictingGroupIds.length === 0) {
+        break;
+      }
+      await reservationChangePromise;
+    }
+
+    this.addGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
+    this.reserveGroupParticipantIds(groupId);
+    try {
+      await this.acquireParticipantLocks([{
+        groupId,
+        input: {
+          ...input,
+          finderIds: [],
+          participantIds: additionalParticipantIds,
+          type: '',
+        },
+        reject: () => undefined,
+        retention: 'lock',
+        resolve: () => undefined,
+      }]);
+      return this.buildScopedParticipantLock(groupId, input.draftId, additionalParticipantIds);
+    } catch (cause) {
+      this.removeGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
+      throw cause;
+    }
+  }
+
+  private buildNoopLock(): BatchEntityCreateLock {
+    return {
+      signal: this.sharedAbortController.signal,
+      unlock: async () => undefined,
+    };
+  }
+
+  private buildScopedParticipantLock(groupId: number, draftId: string | undefined, participantIds: string[]): BatchEntityCreateLock {
+    let unlocked = false;
+    return {
+      signal: this.sharedAbortController.signal,
+      unlock: async () => {
+        if (unlocked) {
+          return;
+        }
+        unlocked = true;
+        this.removeGroupScopedParticipantIds(groupId, draftId, participantIds);
+      },
+    };
+  }
+
+  private resetReservationChangePromise(): void {
+    this.reservationChangePromise = new Promise<void>((resolve) => {
+      this.reservationChangeResolver = resolve;
+    });
+  }
+
+  private notifyReservationChange(): void {
+    this.reservationChangeResolver();
+    this.resetReservationChangePromise();
   }
 
   private hasReservedParticipantConflict(groupId: number): boolean {
@@ -383,11 +548,7 @@ export const resolveBatchParticipantLock = (
   input: BatchParticipantLockInput,
 ): Promise<BatchEntityCreateLock> | undefined => {
   const scope = batchEntityCreateCoordinatorStorage.getStore();
-  return scope?.coordinator.registerLookup(scope.groupId, {
-    ...input,
-    finderIds: [],
-    type: '',
-  }).then((resolution) => resolution.lock);
+  return scope?.coordinator.acquireParticipantLock(scope.groupId, input);
 };
 
 export const getBatchEntityCreateCoordinatorHeldParticipantIds = (draftId?: string): string[] => {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
-import { createExistingEntityIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
+import { createExistingEntityIdsBatchLoader, createExistingRelationIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
 import { BatchMutationKind, executeBatchMutations } from '../../../../src/modules/batch/batch-executor';
 
 vi.mock('../../../../src/database/middleware-loader', () => ({
@@ -164,6 +164,25 @@ describe('batch reference loader', () => {
     expect(internalFindByIds).toHaveBeenCalledTimes(2);
     expect(internalFindByIds).toHaveBeenCalledWith(context, user, ['indicator--standard-one'], { type: 'Indicator' });
     expect(internalFindByIds).toHaveBeenCalledWith(context, user, ['identity--standard-one'], { type: 'Identity' });
+  });
+
+  it('coalesces relation existence probes through the relation loader alias', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([{
+      internal_id: 'relationship--internal',
+      standard_id: 'relationship--standard',
+      entity_type: 'uses',
+    }] as any);
+
+    const loader = createExistingRelationIdsBatchLoader(context, user);
+    const [first, second] = await Promise.all([
+      loader.load({ ids: ['relationship--standard'], type: 'uses' }),
+      loader.load({ ids: ['relationship--standard'], type: 'uses' }),
+    ]);
+
+    expect(internalFindByIds).toHaveBeenCalledTimes(1);
+    expect(internalFindByIds).toHaveBeenCalledWith(context, user, ['relationship--standard'], { type: 'uses' });
+    expect(first.map((element) => element.internal_id)).toEqual(['relationship--internal']);
+    expect(second.map((element) => element.internal_id)).toEqual(['relationship--internal']);
   });
 
   it('reuses entity existence probes across ticks until an affected id is invalidated', async () => {

@@ -24,6 +24,8 @@ export type ExistingEntityIdsBatchLoader = {
   invalidate: (ids: string[]) => void;
 };
 
+export type ExistingRelationIdsBatchLoader = ExistingEntityIdsBatchLoader;
+
 export type StoreLoadByIdWithRefsLookup<TOpts extends object = Record<string, unknown>> = {
   id: string;
   opts?: TOpts;
@@ -236,6 +238,8 @@ export const createExistingEntityIdsBatchLoader = (
     (elements) => collectElementIds(elements),
   );
 };
+
+export const createExistingRelationIdsBatchLoader = createExistingEntityIdsBatchLoader;
 
 export const createStoreLoadByIdWithRefsBatchLoader = <TOpts extends object>(
   context: AuthContext,

@@ -4,7 +4,7 @@ import { authenticateUserFromRequest, userWithOrigin, batchCreator, batchCreator
 import { isNotEmptyField } from '../database/utils';
 import { logApp } from '../config/conf';
 import { batchLoader, storeLoadByIdsWithRefs } from '../database/middleware';
-import { createExistingEntityIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../modules/batch/batch-reference-loader';
+import { createExistingEntityIdsBatchLoader, createExistingRelationIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../modules/batch/batch-reference-loader';
 import { batchInternalRels, batchMarkingDefinitions } from '../domain/stixCoreObject';
 import { elBatchIds, elBatchIdsWithRelCount } from '../database/engine';
 import { batchStixDomainObjects } from '../domain/stixDomainObject';
@@ -18,6 +18,7 @@ import { batchContextDataForLog } from '../database/data-changes';
 
 export const computeLoaders = (executeContext, user) => {
   const existingEntityIdsBatchLoader = createExistingEntityIdsBatchLoader(executeContext, SYSTEM_USER);
+  const existingRelationIdsBatchLoader = createExistingRelationIdsBatchLoader(executeContext, SYSTEM_USER);
   const inputResolveRefsBatchLoader = createInputResolveRefsBatchLoader(executeContext, user);
   const storeLoadByIdWithRefsBatchLoader = createStoreLoadByIdWithRefsBatchLoader(executeContext, storeLoadByIdsWithRefs);
   // Generic loaders
@@ -28,10 +29,12 @@ export const computeLoaders = (executeContext, user) => {
     idsBatchLoader: batchLoader(elBatchIds, executeContext, user),
     idsBatchLoaderWithCount: batchLoader(elBatchIdsWithRelCount, executeContext, user),
     existingEntityIdsBatchLoader,
+    existingRelationIdsBatchLoader,
     inputResolveRefsBatchLoader,
     storeLoadByIdWithRefsBatchLoader,
     invalidateBufferedReadCaches: (ids) => {
       existingEntityIdsBatchLoader.invalidate(ids);
+      existingRelationIdsBatchLoader.invalidate(ids);
       inputResolveRefsBatchLoader.invalidate(ids);
       storeLoadByIdWithRefsBatchLoader.invalidate(ids);
     },
