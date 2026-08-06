@@ -51,6 +51,42 @@ def build_message(**overrides):
     return json.dumps(message)
 
 
+def test_handler_passes_request_timeouts_to_api_client(monkeypatch):
+    client = MagicMock()
+    client_kwargs = {}
+
+    def build_client(**kwargs):
+        client_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr(push_handler, "OpenCTIApiClient", build_client)
+
+    PushHandler(
+        logger=MagicMock(),
+        log_level="info",
+        json_logging=True,
+        opencti_url="http://localhost:4000",
+        opencti_token="test-token",
+        ssl_verify=False,
+        connector_id="connector--1",
+        push_exchange="push-exchange",
+        listen_exchange="listen-exchange",
+        push_routing="push-routing",
+        dead_letter_routing="dead-letter-routing",
+        pika_parameters=MagicMock(),
+        bundles_global_counter=MagicMock(),
+        bundles_processing_time_gauge=MagicMock(),
+        objects_max_refs=0,
+        requests_timeout=321,
+        batch_requests_timeout=4200,
+        custom_headers="x-test:value",
+    )
+
+    assert client_kwargs["requests_timeout"] == 321
+    assert client_kwargs["batch_requests_timeout"] == 4200
+    assert client_kwargs["custom_headers"] == "x-test:value"
+
+
 def test_bundle_transport_is_unsplit_by_default():
     content = {"objects": [{"id": "indicator--1"}, {"id": "indicator--2"}]}
 

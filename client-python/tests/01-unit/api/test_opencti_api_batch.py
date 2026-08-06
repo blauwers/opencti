@@ -142,4 +142,27 @@ def test_batch_mutation_plan_uses_batch_specific_request_timeout():
 
     client.execute_batch_mutation_plan(plan)
 
+    assert client.session_batch_requests_timeout == 3600
     assert client.query.call_args.kwargs["request_timeout"] == DEFAULT_BATCH_REQUESTS_TIMEOUT
+
+
+def test_batch_mutation_plan_preserves_explicit_batch_request_timeout():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        requests_timeout=300,
+        batch_requests_timeout=4200,
+    )
+    client.query = MagicMock(return_value={"data": {"batchMutationsExecute": {}}})
+    plan = BatchMutationPlan()
+    plan.capture(
+        "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+        {"input": {"stix_id": "indicator--1"}},
+        [],
+    )
+
+    client.execute_batch_mutation_plan(plan)
+
+    assert client.session_batch_requests_timeout == 4200
+    assert client.query.call_args.kwargs["request_timeout"] == 4200

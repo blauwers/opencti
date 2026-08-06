@@ -295,6 +295,9 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
                             bundles_global_counter,
                             bundles_processing_time_gauge,
                             self.objects_max_refs,
+                            requests_timeout=self.opencti_api_requests_timeout,
+                            batch_requests_timeout=self.opencti_api_batch_requests_timeout,
+                            custom_headers=self.opencti_api_custom_headers,
                         )
                         is_realtime = is_priority_connector(
                             connector["connector_priority_group"]

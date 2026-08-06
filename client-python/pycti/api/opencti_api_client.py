@@ -89,7 +89,10 @@ from pycti.utils.opencti_logger import logger
 from pycti.utils.opencti_stix2 import OpenCTIStix2
 from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 
-DEFAULT_BATCH_REQUESTS_TIMEOUT = 900
+# Batch mutation requests can spend substantial time waiting for backend
+# admission before execution starts. Keep the generic API timeout short, but
+# allow a complete admitted batch work item to survive the queue plus execution.
+DEFAULT_BATCH_REQUESTS_TIMEOUT = 3600
 
 # Global singleton variables for proxy certificate management
 _PROXY_CERT_BUNDLE = None
@@ -232,7 +235,7 @@ class OpenCTIApiClient:
         :type perform_health_check: bool
         :param requests_timeout: timeout for API requests in seconds (default: 300)
         :type requests_timeout: int
-        :param batch_requests_timeout: timeout for backend batch mutation requests in seconds (default: 900)
+        :param batch_requests_timeout: timeout for backend batch mutation requests in seconds (default: 3600)
         :type batch_requests_timeout: int or None
         :param provider: client provider for User-Agent header (format: provider/version)
         :type provider: str or None

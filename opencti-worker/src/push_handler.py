@@ -87,6 +87,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
     bundles_global_counter: Any
     bundles_processing_time_gauge: Any
     objects_max_refs: int
+    requests_timeout: int = 300
+    batch_requests_timeout: Optional[int] = None
+    custom_headers: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.api = OpenCTIApiClient(
@@ -95,6 +98,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             log_level=self.log_level,
             json_logging=self.json_logging,
             ssl_verify=self.ssl_verify,
+            custom_headers=self.custom_headers,
+            requests_timeout=self.requests_timeout,
+            batch_requests_timeout=self.batch_requests_timeout,
             provider="worker/" + __version__,
         )
 
