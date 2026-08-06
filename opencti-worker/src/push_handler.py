@@ -9,7 +9,7 @@ import pika
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.exceptions import NackError, UnroutableError
 from pycti import OpenCTIApiClient, OpenCTIStix2Splitter, __version__
-
+from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
 
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
 BATCH_REPLAY_LIMIT = 4
@@ -48,7 +48,9 @@ def build_batch_expectation_error(
 
 def should_dead_letter_rejected_item(item: Dict[str, Any]) -> bool:
     rejection_info = item.get("rejection_info")
-    return isinstance(rejection_info, dict) and rejection_info.get("retryable") is not True
+    return (
+        isinstance(rejection_info, dict) and rejection_info.get("retryable") is not True
+    )
 
 
 def should_replay_rejected_item(item: Dict[str, Any]) -> bool:
@@ -58,15 +60,28 @@ def should_replay_rejected_item(item: Dict[str, Any]) -> bool:
 
 def batch_replay_count(data: Dict[str, Any]) -> int:
     count = data.get(BATCH_REPLAY_COUNT_KEY)
-    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
+    return (
+        count
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        else 0
+    )
 
 
 def should_replay_intact_bundle(
     data: Dict[str, Any], rejected_items: List[Dict[str, Any]]
 ) -> bool:
+    return batch_replay_count(data) < BATCH_REPLAY_LIMIT and any(
+        should_replay_rejected_item(item) for item in rejected_items
+    )
+
+
+def is_batch_payload_too_large_error(error: Exception) -> bool:
+    if isinstance(error, BatchMutationPlanTooLarge):
+        return True
+    error_message = str(error).lower()
     return (
-        batch_replay_count(data) < BATCH_REPLAY_LIMIT
-        and any(should_replay_rejected_item(item) for item in rejected_items)
+        "request entity too large" in error_message
+        or "payload too large" in error_message
     )
 
 
@@ -89,6 +104,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
     objects_max_refs: int
     requests_timeout: int = 300
     batch_requests_timeout: Optional[int] = None
+    batch_requests_max_payload_size: Optional[int] = None
     custom_headers: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -102,6 +118,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             requests_timeout=self.requests_timeout,
             batch_requests_timeout=self.batch_requests_timeout,
             provider="worker/" + __version__,
+            batch_requests_max_payload_size=self.batch_requests_max_payload_size,
         )
 
     def send_bundle_to_specific_queue(
@@ -144,6 +161,52 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 )
                 self.logger.debug("Unable to send bundle error", {"error": str(err)})
                 time.sleep(10)
+
+    def split_and_requeue_bundle(
+        self,
+        data: Dict[str, Any],
+        content: Dict[str, Any],
+        work_id: Optional[str],
+        *,
+        add_expectations: bool,
+        report_parent_expectation: bool,
+    ) -> Literal["ack"]:
+        with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
+            with push_pika_connection.channel() as push_channel:
+                try:
+                    push_channel.confirm_delivery()
+                except Exception as err:  # pylint: disable=broad-except
+                    self.logger.warning(str(err))
+                event_version = content.get("x_opencti_event_version")
+                stix2_splitter = OpenCTIStix2Splitter()
+                expectations, _, bundles = (
+                    stix2_splitter.split_bundle_with_expectations(
+                        content,
+                        False,
+                        event_version,
+                        data.get("cleanup_inconsistent_bundle", False),
+                    )
+                )
+                if work_id is not None and add_expectations:
+                    work_alive = self.api.work.add_expectations(work_id, expectations)
+                    if not work_alive:
+                        return "ack"
+                split_data = dict(data)
+                split_data["split_bundles"] = True
+                split_data["no_split"] = False
+                split_data.pop("batch_plan", None)
+                for bundle in bundles:
+                    self.send_bundle_to_specific_queue(
+                        push_channel,
+                        self.push_exchange,
+                        self.push_routing,
+                        split_data,
+                        bundle,
+                        True,
+                    )
+                if work_id is not None and report_parent_expectation:
+                    self.api.work.report_expectation(work_id, None)
+        return "ack"
 
     def handle_message(
         self,
@@ -218,15 +281,40 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         )
                         import_kwargs["wait_until"] = data.get("batch_wait_until")
                         import_kwargs["backend_batch_plan"] = data.get("batch_plan")
-                    imported_items, too_large_items_bundles = import_bundle(
-                        raw_content,
-                        update,
-                        types,
-                        work_id,
-                        self.objects_max_refs,
-                        data.get("cleanup_inconsistent_bundle", False),
-                        **import_kwargs,
-                    )
+                    try:
+                        imported_items, too_large_items_bundles = import_bundle(
+                            raw_content,
+                            update,
+                            types,
+                            work_id,
+                            self.objects_max_refs,
+                            data.get("cleanup_inconsistent_bundle", False),
+                            **import_kwargs,
+                        )
+                    except Exception as err:
+                        if data.get(
+                            "split_bundles"
+                        ) is not True and is_batch_payload_too_large_error(err):
+                            log_context = {
+                                "bundle_id": content.get("id"),
+                                "object_count": len(content["objects"]),
+                            }
+                            if isinstance(err, BatchMutationPlanTooLarge):
+                                log_context["actual_size"] = err.actual_size
+                                log_context["max_size"] = err.max_size
+                            self.logger.warning(
+                                "Falling back to split bundle transport for oversized batch mutation request",
+                                log_context,
+                            )
+                            return self.split_and_requeue_bundle(
+                                data,
+                                content,
+                                work_id,
+                                add_expectations=data.get("split_bundles") is False,
+                                report_parent_expectation=data.get("split_bundles")
+                                is False,
+                            )
+                        raise
                     if should_replay_intact_bundle(data, too_large_items_bundles):
                         next_replay_count = replay_count + 1
                         self.logger.warning(
@@ -304,43 +392,13 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                     )
                 else:
                     # Bundle splitting was explicitly requested, split and requeue.
-                    # Create a specific channel to push the split bundles
-                    with pika.BlockingConnection(
-                        self.pika_parameters
-                    ) as push_pika_connection:
-                        with push_pika_connection.channel() as push_channel:
-                            try:
-                                push_channel.confirm_delivery()
-                            except Exception as err:  # pylint: disable=broad-except
-                                self.logger.warning(str(err))
-                            # Instance spliter and split the big bundle
-                            event_version = content.get("x_opencti_event_version")
-                            stix2_splitter = OpenCTIStix2Splitter()
-                            expectations, _, bundles = (
-                                stix2_splitter.split_bundle_with_expectations(
-                                    content,
-                                    False,
-                                    event_version,
-                                    data.get("cleanup_inconsistent_bundle", False),
-                                )
-                            )
-                            # Add expectations to the work
-                            if work_id is not None:
-                                work_alive = self.api.work.add_expectations(
-                                    work_id, expectations
-                                )
-                                if not work_alive:
-                                    return "ack"
-                            # For each split bundle, send it to the same queue
-                            for bundle in bundles:
-                                self.send_bundle_to_specific_queue(
-                                    push_channel,
-                                    self.push_exchange,
-                                    self.push_routing,
-                                    data,
-                                    bundle,
-                                    True,
-                                )
+                    return self.split_and_requeue_bundle(
+                        data,
+                        content,
+                        work_id,
+                        add_expectations=True,
+                        report_parent_expectation=False,
+                    )
             # Event type event
             # Specific OpenCTI event operation with specific operation
             elif event_type == "event":

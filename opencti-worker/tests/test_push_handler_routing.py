@@ -2,13 +2,16 @@ import base64
 import json
 from unittest.mock import MagicMock
 
+from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
+
 from src import push_handler
 from src.push_handler import (
     PushHandler,
     batch_replay_count,
     build_batch_expectation_error,
-    should_dead_letter_rejected_item,
+    is_batch_payload_too_large_error,
     should_add_legacy_default_split_expectations,
+    should_dead_letter_rejected_item,
     should_replay_intact_bundle,
     should_replay_rejected_item,
     should_report_batch_expectation,
@@ -79,11 +82,13 @@ def test_handler_passes_request_timeouts_to_api_client(monkeypatch):
         objects_max_refs=0,
         requests_timeout=321,
         batch_requests_timeout=4200,
+        batch_requests_max_payload_size=123456,
         custom_headers="x-test:value",
     )
 
     assert client_kwargs["requests_timeout"] == 321
     assert client_kwargs["batch_requests_timeout"] == 4200
+    assert client_kwargs["batch_requests_max_payload_size"] == 123456
     assert client_kwargs["custom_headers"] == "x-test:value"
 
 
@@ -168,7 +173,10 @@ def test_new_unsplit_messages_report_one_batch_expectation():
     assert batch_replay_count({"batch_replay_count": 2}) == 2
     assert batch_replay_count({"batch_replay_count": "2"}) == 0
     assert should_replay_intact_bundle({}, [retryable_item]) is True
-    assert should_replay_intact_bundle({"batch_replay_count": 4}, [retryable_item]) is False
+    assert (
+        should_replay_intact_bundle({"batch_replay_count": 4}, [retryable_item])
+        is False
+    )
 
 
 def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch):
@@ -223,6 +231,56 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
         == "COMMITTED"
     )
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+
+
+def test_batch_payload_too_large_detection_handles_typed_and_backend_errors():
+    assert is_batch_payload_too_large_error(BatchMutationPlanTooLarge(2, 1)) is True
+    assert (
+        is_batch_payload_too_large_error(ValueError("request entity too large")) is True
+    )
+    assert is_batch_payload_too_large_error(ValueError("unrelated")) is False
+
+
+def test_handler_falls_back_to_split_transport_for_oversized_batch_plan(monkeypatch):
+    handler = build_handler()
+    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooLarge(200, 100)
+    )
+    split_bundles = [
+        {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
+        {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--2"}]},
+    ]
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2Splitter,
+        "split_bundle_with_expectations",
+        lambda *args, **kwargs: (2, [], split_bundles),
+    )
+
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            batch_plan={"version": 1},
+        )
+    )
+
+    assert result == "ack"
+    handler.api.work.add_expectations.assert_called_once_with("work--1", 2)
+    handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+    assert handler.send_bundle_to_specific_queue.call_count == 2
+    split_data = handler.send_bundle_to_specific_queue.call_args.args[3]
+    assert split_data["split_bundles"] is True
+    assert split_data["no_split"] is False
+    assert "batch_plan" not in split_data
 
 
 def test_handler_republishes_intact_bundle_for_retryable_batch_failures(monkeypatch):
@@ -347,8 +405,7 @@ def test_handler_dead_letters_nonretryable_batch_failures(monkeypatch):
     assert dead_letter_call[2] == "dead-letter-routing"
     assert dead_letter_call[4]["id"] == "indicator--1"
     assert (
-        dead_letter_call[4]["rejection_info"]["original_connector_id"]
-        == "connector--1"
+        dead_letter_call[4]["rejection_info"]["original_connector_id"] == "connector--1"
     )
 
 

@@ -39,6 +39,7 @@ Here are the configuration keys, for both containers (environment variables) and
 | app:base_path                | APP__BASE_PATH                 |                       | Specific URI (ie. /opencti)                                                                                                                                                      |
 | app:base_url                 | APP__BASE_URL                  | http://localhost:4000 | Full URL of the platform (should include the `base_path` if any)                                                                                                                 |
 | app:request_timeout          | APP__REQUEST_TIMEOUT           | 1200000               | Request timeout, in ms (default 20 minutes)                                                                                                                                      |
+| app:batch_request_timeout    | APP__BATCH_REQUEST_TIMEOUT     | 3600000               | Request timeout for backend batch mutation execution requests, in ms (default 60 minutes)                                                                                        |
 | app:session_timeout          | APP__SESSION_TIMEOUT           | 1200000               | Session timeout, in ms (default 20 minutes)                                                                                                                                      |
 | app:session_idle_timeout     | APP__SESSION_IDLE_TIMEOUT      | 0                     | Idle timeout (locking the screen), in ms (default 0 minute - disabled)                                                                                                           |
 | app:session_cookie           | APP__SESSION_COOKIE            | false                 | Use memory/session cookie instead of persistent one                                                                                                                              |
@@ -505,6 +506,8 @@ Can be configured manually using the configuration file `config.yml` or through 
 |:-------------------------------|:-------------------------------|:--------------|:-----------------------------------------------------------|
 | opencti:url                    | OPENCTI_URL                    |               | The URL of the OpenCTI platform                            |
 | opencti:token                  | OPENCTI_TOKEN                  |               | A token of an administrator account with bypass capability |
+| opencti:batch_requests_timeout | OPENCTI_BATCH_REQUESTS_TIMEOUT | 3600          | Timeout for backend batch mutation requests, in seconds    |
+| opencti:batch_requests_max_payload_size | OPENCTI_BATCH_REQUESTS_MAX_PAYLOAD_SIZE | 50331648 | Maximum serialized backend batch mutation request size, in bytes, before the worker falls back to split transport |
 | -                              | -                              | -             | -                                                          |
 | mq:use_ssl                     | /                              | /             | Depending of the API configuration (fetch from API)        |
 | mq:use_ssl_ca                  | MQ_USE_SSL_CA                  |               | Path or ca content                                         |

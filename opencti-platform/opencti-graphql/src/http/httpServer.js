@@ -27,9 +27,12 @@ import { computeLoaders } from './httpAuthenticatedContext';
 import { buildRateLimiterOptions } from './httpUtils';
 import { checkDraftInContext } from './httpServer-draft';
 import ipWhitelistMiddleware from './ipWhitelistMiddleware';
+import { buildBatchRequestTimeoutMiddleware } from './httpServer-timeout';
 
 const MIN_20 = 20 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
 const REQ_TIMEOUT = conf.get('app:request_timeout');
+const BATCH_REQ_TIMEOUT = Math.max(REQ_TIMEOUT || MIN_20, conf.get('app:batch_request_timeout') || HOUR);
 const CERT_KEY_PATH = conf.get('app:https_cert:key');
 const CERT_KEY_CERT = conf.get('app:https_cert:crt');
 const CA_CERTS = conf.get('app:https_cert:ca');
@@ -153,6 +156,7 @@ const createHttpServer = async () => {
   // IP whitelist middleware — must be after session middleware to detect session-based auth
   app.use(`${basePath}/graphql`, ipWhitelistMiddleware);
   app.use(`${basePath}/graphql`, graphqlMethodRestriction);
+  app.use(`${basePath}/graphql`, buildBatchRequestTimeoutMiddleware(BATCH_REQ_TIMEOUT));
   app.use((req, res, next) => {
     // Skip graphql-upload for chatbot routes (they handle multipart themselves via Busboy)
     if (req.path.startsWith(`${basePath}/chatbot/`)) {

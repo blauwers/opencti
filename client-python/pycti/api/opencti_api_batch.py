@@ -16,13 +16,25 @@ class BatchMutationPlanUnsupported(Exception):
     pass
 
 
+class BatchMutationPlanTooLarge(Exception):
+    def __init__(self, actual_size: int, max_size: int):
+        self.actual_size = actual_size
+        self.max_size = max_size
+        super().__init__(
+            f"Batch mutation request payload exceeds configured limit "
+            f"({actual_size} > {max_size} bytes)"
+        )
+
+
 @dataclass
 class BatchMutationPlan:
     operations: List[Dict[str, Any]] = field(default_factory=list)
+    max_serialized_operations_size: Optional[int] = None
     _next_execution_group: int = field(default=0, init=False, repr=False)
     _active_execution_group: Optional[int] = field(default=None, init=False, repr=False)
     _active_execution_phase: Optional[int] = field(default=None, init=False, repr=False)
     _active_object_id: Optional[str] = field(default=None, init=False, repr=False)
+    _serialized_operations_size: int = field(default=2, init=False, repr=False)
 
     @staticmethod
     def is_mutation(query: str) -> bool:
@@ -47,6 +59,22 @@ class BatchMutationPlan:
         files = self._serialize_files(files_vars)
         if files:
             operation["files"] = files
+        serialized_operation_size = len(json.dumps(operation).encode("utf-8"))
+        next_serialized_operations_size = (
+            self._serialized_operations_size
+            + (1 if len(self.operations) > 0 else 0)
+            + serialized_operation_size
+        )
+        if (
+            isinstance(self.max_serialized_operations_size, int)
+            and not isinstance(self.max_serialized_operations_size, bool)
+            and self.max_serialized_operations_size > 0
+            and next_serialized_operations_size > self.max_serialized_operations_size
+        ):
+            raise BatchMutationPlanTooLarge(
+                next_serialized_operations_size, self.max_serialized_operations_size
+            )
+        self._serialized_operations_size = next_serialized_operations_size
         self.operations.append(operation)
         return {"data": self._build_synthetic_data(query, operation_index)}
 

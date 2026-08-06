@@ -112,6 +112,13 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
             True,
             default=None,
         )
+        self.opencti_api_batch_requests_max_payload_size = get_config_variable(
+            "OPENCTI_BATCH_REQUESTS_MAX_PAYLOAD_SIZE",
+            ["opencti", "batch_requests_max_payload_size"],
+            config,
+            True,
+            default=None,
+        )
         self.opencti_api_custom_headers = get_config_variable(
             "OPENCTI_CUSTOM_HEADERS",
             ["opencti", "custom_headers"],
@@ -195,6 +202,7 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
             requests_timeout=self.opencti_api_requests_timeout,
             batch_requests_timeout=self.opencti_api_batch_requests_timeout,
             provider="worker/" + __version__,
+            batch_requests_max_payload_size=self.opencti_api_batch_requests_max_payload_size,
         )
         self.worker_logger = self.api.logger_class("worker")
 
@@ -297,6 +305,7 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
                             self.objects_max_refs,
                             requests_timeout=self.opencti_api_requests_timeout,
                             batch_requests_timeout=self.opencti_api_batch_requests_timeout,
+                            batch_requests_max_payload_size=self.opencti_api_batch_requests_max_payload_size,
                             custom_headers=self.opencti_api_custom_headers,
                         )
                         is_realtime = is_priority_connector(

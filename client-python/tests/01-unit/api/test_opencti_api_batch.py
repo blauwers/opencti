@@ -1,6 +1,12 @@
 from unittest.mock import MagicMock
 
-from pycti.api.opencti_api_batch import BatchMutationPlan, build_batch_result_token
+import pytest
+
+from pycti.api.opencti_api_batch import (
+    BatchMutationPlan,
+    BatchMutationPlanTooLarge,
+    build_batch_result_token,
+)
 from pycti.api.opencti_api_client import (
     DEFAULT_BATCH_REQUESTS_TIMEOUT,
     File,
@@ -89,6 +95,20 @@ def test_batch_mutation_plan_serializes_uploads_with_variable_paths():
     ]
 
 
+def test_batch_mutation_plan_stops_capture_when_serialized_operations_exceed_limit():
+    plan = BatchMutationPlan(max_serialized_operations_size=1)
+
+    with pytest.raises(BatchMutationPlanTooLarge) as raised:
+        plan.capture(
+            "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+            {"input": {"stix_id": "indicator--1"}},
+            [],
+        )
+
+    assert raised.value.actual_size > raised.value.max_size
+    assert plan.operations == []
+
+
 def test_batch_mutation_plan_tags_operations_with_execution_group_metadata():
     plan = BatchMutationPlan()
 
@@ -143,7 +163,10 @@ def test_batch_mutation_plan_uses_batch_specific_request_timeout():
     client.execute_batch_mutation_plan(plan)
 
     assert client.session_batch_requests_timeout == 3600
-    assert client.query.call_args.kwargs["request_timeout"] == DEFAULT_BATCH_REQUESTS_TIMEOUT
+    assert (
+        client.query.call_args.kwargs["request_timeout"]
+        == DEFAULT_BATCH_REQUESTS_TIMEOUT
+    )
 
 
 def test_batch_mutation_plan_preserves_explicit_batch_request_timeout():
@@ -166,3 +189,25 @@ def test_batch_mutation_plan_preserves_explicit_batch_request_timeout():
 
     assert client.session_batch_requests_timeout == 4200
     assert client.query.call_args.kwargs["request_timeout"] == 4200
+
+
+def test_batch_mutation_plan_rejects_oversized_serialized_request_before_query():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        batch_requests_max_payload_size=1,
+    )
+    client.query = MagicMock(return_value={"data": {"batchMutationsExecute": {}}})
+    plan = BatchMutationPlan()
+    plan.capture(
+        "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+        {"input": {"stix_id": "indicator--1"}},
+        [],
+    )
+
+    with pytest.raises(BatchMutationPlanTooLarge) as raised:
+        client.execute_batch_mutation_plan(plan)
+
+    assert raised.value.actual_size > raised.value.max_size
+    client.query.assert_not_called()

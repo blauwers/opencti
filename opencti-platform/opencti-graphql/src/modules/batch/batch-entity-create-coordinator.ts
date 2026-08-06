@@ -13,6 +13,8 @@ import { hasBatchCreatedEntityParticipant } from './batch-relation-lookup';
 
 type BatchEntityCreateGroupState = 'collecting' | 'waiting' | 'ready' | 'active' | 'parked' | 'completed';
 type BatchEntityCreateLookupRetention = 'group' | 'lock';
+type BatchEntityCreateGroupWaitReason = 'coalesced_promise' | 'follow_on_conflict' | 'follow_on_physical_lock';
+type BatchEntityCreatePhysicalLockSource = 'retained_lookup_wave' | 'scoped_lookup' | 'follow_on_scoped';
 
 type BatchEntityCreateLock = {
   draftId?: string;
@@ -51,6 +53,23 @@ type ReadyBatchEntityCreateActivation = {
   participantIds: string[];
   reject: (cause: unknown) => void;
   resolve: () => void;
+};
+
+type BatchEntityCreateGroupWait = {
+  conflictingGroupIds?: number[];
+  participantIds?: string[];
+  reason: BatchEntityCreateGroupWaitReason;
+  startedAt: number;
+};
+
+type PendingBatchEntityCreatePhysicalLock = {
+  draftId?: string;
+  groupIds: number[];
+  id: number;
+  participantIds: string[];
+  retained: boolean;
+  source: BatchEntityCreatePhysicalLockSource;
+  startedAt: number;
 };
 
 type BatchEntityCreateCoordinatorScope = {
@@ -101,6 +120,10 @@ export class BatchEntityCreateCoordinator {
 
   private readonly sharedAbortController = new AbortController();
 
+  private readonly groupWaits = new Map<number, BatchEntityCreateGroupWait>();
+
+  private readonly pendingPhysicalLocks = new Map<number, PendingBatchEntityCreatePhysicalLock>();
+
   private readonly performanceTraceId = getBatchExecutionPerformanceTraceId();
 
   private readonly snapshotTimer: NodeJS.Timeout | undefined;
@@ -118,6 +141,8 @@ export class BatchEntityCreateCoordinator {
   private parkCount = 0;
 
   private resumeCount = 0;
+
+  private nextPhysicalLockId = 0;
 
   private lastFollowOnWait: Record<string, unknown> | undefined;
 
@@ -187,6 +212,7 @@ export class BatchEntityCreateCoordinator {
     this.ownedParticipantIdsByGroup.delete(groupId);
     this.scopedParticipantIdCountsByGroup.delete(groupId);
     this.reservedParticipantIdsByGroup.delete(groupId);
+    this.groupWaits.delete(groupId);
     this.notifyReservationChange();
     this.releaseReadyActivations();
     this.scheduleFlushIfReady();
@@ -207,14 +233,23 @@ export class BatchEntityCreateCoordinator {
     if (this.closed) {
       return Promise.reject(new Error('Batch entity create coordinator is closed'));
     }
+    this.setGroupWait(groupId, 'coalesced_promise');
     this.parkGroup(groupId);
     return promise.then(
       async (value) => {
-        await this.resumeParkedGroup(groupId);
+        try {
+          await this.resumeParkedGroup(groupId);
+        } finally {
+          this.clearGroupWait(groupId, 'coalesced_promise');
+        }
         return value;
       },
       async (cause) => {
-        await this.resumeParkedGroup(groupId);
+        try {
+          await this.resumeParkedGroup(groupId);
+        } finally {
+          this.clearGroupWait(groupId, 'coalesced_promise');
+        }
         throw cause;
       },
     );
@@ -509,12 +544,15 @@ export class BatchEntityCreateCoordinator {
       };
       // A group that keeps its current reservations while waiting for another
       // active group can deadlock with a crossed follow-on lock request.
+      this.setGroupWait(groupId, 'follow_on_conflict', additionalParticipantIds, conflictingGroupIds);
       this.parkGroup(groupId);
       try {
         await this.resumeParkedGroup(groupId);
       } catch (cause) {
         this.removeGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
         throw cause;
+      } finally {
+        this.clearGroupWait(groupId, 'follow_on_conflict');
       }
     } else {
       this.reserveGroupParticipantIds(groupId);
@@ -522,18 +560,23 @@ export class BatchEntityCreateCoordinator {
 
     const scopedLocksByGroup = new Map<number, BatchEntityCreateLock[]>();
     try {
-      await this.acquireScopedParticipantLocks([{
-        groupId,
-        input: {
-          ...input,
-          finderIds: [],
-          participantIds: additionalParticipantIds,
-          type: '',
-        },
-        reject: () => undefined,
-        retention: 'lock',
-        resolve: () => undefined,
-      }], scopedLocksByGroup);
+      this.setGroupWait(groupId, 'follow_on_physical_lock', additionalParticipantIds);
+      try {
+        await this.acquireScopedParticipantLocks([{
+          groupId,
+          input: {
+            ...input,
+            finderIds: [],
+            participantIds: additionalParticipantIds,
+            type: '',
+          },
+          reject: () => undefined,
+          retention: 'lock',
+          resolve: () => undefined,
+        }], scopedLocksByGroup, 'follow_on_scoped');
+      } finally {
+        this.clearGroupWait(groupId, 'follow_on_physical_lock');
+      }
       return this.buildScopedParticipantLock(
         groupId,
         input.draftId,
@@ -618,9 +661,11 @@ export class BatchEntityCreateCoordinator {
 
   private async acquireRetainedParticipantLocks(lookups: PendingBatchEntityCreateLookup[]): Promise<void> {
     const idsByDraft = new Map<string, Set<string>>();
+    const groupIdsByDraft = new Map<string, Set<number>>();
     lookups.forEach((lookup) => {
       const draftKey = lookup.input.draftId ?? '';
       const draftIds = idsByDraft.get(draftKey) ?? new Set<string>();
+      const draftGroupIds = groupIdsByDraft.get(draftKey) ?? new Set<number>();
       const heldIds = new Set([
         ...Array.from(this.heldParticipantIdsByDraft.get(draftKey) ?? []),
         ...getBatchRetainedLockIds(lookup.input.draftId),
@@ -631,19 +676,25 @@ export class BatchEntityCreateCoordinator {
         }
       });
       idsByDraft.set(draftKey, draftIds);
+      draftGroupIds.add(lookup.groupId);
+      groupIdsByDraft.set(draftKey, draftGroupIds);
     });
 
     for (const [draftKey, ids] of idsByDraft.entries()) {
       if (ids.size === 0) {
         continue;
       }
-      await this.acquirePhysicalLock(Array.from(ids), draftKey || undefined, true);
+      await this.acquirePhysicalLock(Array.from(ids), draftKey || undefined, true, {
+        groupIds: Array.from(groupIdsByDraft.get(draftKey) ?? []),
+        source: 'retained_lookup_wave',
+      });
     }
   }
 
   private async acquireScopedParticipantLocks(
     lookups: PendingBatchEntityCreateLookup[],
     scopedLocksByGroup: Map<number, BatchEntityCreateLock[]>,
+    source: BatchEntityCreatePhysicalLockSource = 'scoped_lookup',
   ): Promise<void> {
     for (const lookup of lookups) {
       const draftKey = lookup.input.draftId ?? '';
@@ -655,7 +706,10 @@ export class BatchEntityCreateCoordinator {
       if (participantIds.length === 0) {
         continue;
       }
-      const lock = await this.acquirePhysicalLock(participantIds, lookup.input.draftId, false);
+      const lock = await this.acquirePhysicalLock(participantIds, lookup.input.draftId, false, {
+        groupIds: [lookup.groupId],
+        source,
+      });
       const groupLocks = scopedLocksByGroup.get(lookup.groupId) ?? [];
       groupLocks.push(lock);
       scopedLocksByGroup.set(lookup.groupId, groupLocks);
@@ -666,10 +720,44 @@ export class BatchEntityCreateCoordinator {
     participantIds: string[],
     draftId: string | undefined,
     retained: boolean,
+    metadata: {
+      groupIds: number[];
+      source: BatchEntityCreatePhysicalLockSource;
+    },
   ): Promise<BatchEntityCreateLock> {
     const normalizedParticipantIds = normalizeIds(participantIds);
     const draftKey = draftId ?? '';
-    const lock = await lockResources(normalizedParticipantIds, getBatchAwareLockOptions(draftId)) as BatchEntityCreateLock;
+    const pendingLock = this.trackPendingPhysicalLock(normalizedParticipantIds, draftId, retained, metadata);
+    let lock: BatchEntityCreateLock;
+    try {
+      lock = await lockResources(normalizedParticipantIds, getBatchAwareLockOptions(draftId)) as BatchEntityCreateLock;
+      const durationMs = Date.now() - pendingLock.startedAt;
+      if (durationMs >= BATCH_ENTITY_CREATE_COORDINATOR_SNAPSHOT_INTERVAL_MS) {
+        this.logState('physical_lock_acquired', {
+          duration_ms: durationMs,
+          physical_lock_group_ids: pendingLock.groupIds.slice(0, 5),
+          physical_lock_id: pendingLock.id,
+          physical_lock_participant_count: pendingLock.participantIds.length,
+          physical_lock_retained: pendingLock.retained,
+          physical_lock_sample_participant_ids: pendingLock.participantIds.slice(0, 5),
+          physical_lock_source: pendingLock.source,
+        });
+      }
+    } catch (cause) {
+      this.logState('physical_lock_failed', {
+        duration_ms: Date.now() - pendingLock.startedAt,
+        physical_lock_error: cause instanceof Error ? cause.message : String(cause),
+        physical_lock_group_ids: pendingLock.groupIds.slice(0, 5),
+        physical_lock_id: pendingLock.id,
+        physical_lock_participant_count: pendingLock.participantIds.length,
+        physical_lock_retained: pendingLock.retained,
+        physical_lock_sample_participant_ids: pendingLock.participantIds.slice(0, 5),
+        physical_lock_source: pendingLock.source,
+      });
+      throw cause;
+    } finally {
+      this.pendingPhysicalLocks.delete(pendingLock.id);
+    }
     if (lock.signal.aborted) {
       this.sharedAbortController.abort(lock.signal.reason);
     } else {
@@ -723,6 +811,48 @@ export class BatchEntityCreateCoordinator {
     await Promise.allSettled(Array.from(new Set(locks)).reverse().map((lock) => lock.unlock()));
   }
 
+  private setGroupWait(
+    groupId: number,
+    reason: BatchEntityCreateGroupWaitReason,
+    participantIds?: string[],
+    conflictingGroupIds?: number[],
+  ): void {
+    this.groupWaits.set(groupId, {
+      conflictingGroupIds,
+      participantIds,
+      reason,
+      startedAt: Date.now(),
+    });
+  }
+
+  private clearGroupWait(groupId: number, reason: BatchEntityCreateGroupWaitReason): void {
+    if (this.groupWaits.get(groupId)?.reason === reason) {
+      this.groupWaits.delete(groupId);
+    }
+  }
+
+  private trackPendingPhysicalLock(
+    participantIds: string[],
+    draftId: string | undefined,
+    retained: boolean,
+    metadata: {
+      groupIds: number[];
+      source: BatchEntityCreatePhysicalLockSource;
+    },
+  ): PendingBatchEntityCreatePhysicalLock {
+    const pendingLock = {
+      draftId,
+      groupIds: metadata.groupIds,
+      id: this.nextPhysicalLockId += 1,
+      participantIds,
+      retained,
+      source: metadata.source,
+      startedAt: Date.now(),
+    };
+    this.pendingPhysicalLocks.set(pendingLock.id, pendingLock);
+    return pendingLock;
+  }
+
   private logState(event: string, extra: Record<string, unknown> = {}): void {
     if (!BATCH_ENTITY_CREATE_COORDINATOR_PERFORMANCE_LOG) {
       return;
@@ -733,6 +863,55 @@ export class BatchEntityCreateCoordinator {
     });
     const heldParticipantCount = Array.from(this.heldParticipantIdsByDraft.values())
       .reduce((count, ids) => count + ids.size, 0);
+    const groupWaitReasonCounts = new Map<BatchEntityCreateGroupWaitReason, number>();
+    this.groupWaits.forEach((wait) => {
+      groupWaitReasonCounts.set(wait.reason, (groupWaitReasonCounts.get(wait.reason) ?? 0) + 1);
+    });
+    const sampleActiveGroups = this.groupOrder
+      .filter((groupId) => this.groupStates.get(groupId) === 'active')
+      .slice(0, 5)
+      .map((groupId) => {
+        const ownedParticipantIds = Array.from(this.ownedParticipantIdsByGroup.get(groupId)?.values() ?? [])
+          .flatMap((ids) => Array.from(ids));
+        const scopedParticipantIds = Array.from(this.scopedParticipantIdCountsByGroup.get(groupId)?.values() ?? [])
+          .flatMap((counts) => Array.from(counts.keys()));
+        const reservedParticipantIds = Array.from(this.reservedParticipantIdsByGroup.get(groupId)?.values() ?? [])
+          .flatMap((ids) => Array.from(ids));
+        const wait = this.groupWaits.get(groupId);
+        return {
+          group_id: groupId,
+          owned_participant_count: ownedParticipantIds.length,
+          reserved_participant_count: reservedParticipantIds.length,
+          sample_owned_participant_ids: ownedParticipantIds.slice(0, 3),
+          sample_scoped_participant_ids: scopedParticipantIds.slice(0, 3),
+          scoped_participant_count: scopedParticipantIds.length,
+          wait_duration_ms: wait ? Date.now() - wait.startedAt : undefined,
+          wait_reason: wait?.reason,
+        };
+      });
+    const sampleGroupWaits = Array.from(this.groupWaits.entries())
+      .sort(([, first], [, second]) => first.startedAt - second.startedAt)
+      .slice(0, 5)
+      .map(([groupId, wait]) => ({
+        conflicting_group_ids: wait.conflictingGroupIds?.slice(0, 5),
+        duration_ms: Date.now() - wait.startedAt,
+        group_id: groupId,
+        reason: wait.reason,
+        sample_participant_ids: wait.participantIds?.slice(0, 5),
+        state: this.groupStates.get(groupId),
+      }));
+    const samplePendingPhysicalLocks = Array.from(this.pendingPhysicalLocks.values())
+      .sort((first, second) => first.startedAt - second.startedAt)
+      .slice(0, 5)
+      .map((pendingLock) => ({
+        duration_ms: Date.now() - pendingLock.startedAt,
+        group_ids: pendingLock.groupIds.slice(0, 5),
+        id: pendingLock.id,
+        participant_count: pendingLock.participantIds.length,
+        retained: pendingLock.retained,
+        sample_participant_ids: pendingLock.participantIds.slice(0, 5),
+        source: pendingLock.source,
+      }));
     logApp.info(BATCH_ENTITY_CREATE_COORDINATOR_LOG_MESSAGE, {
       active_group_count: this.activeGroupCount,
       event,
@@ -740,14 +919,19 @@ export class BatchEntityCreateCoordinator {
       flush_count: this.flushCount,
       follow_on_wait_count: this.followOnWaitCount,
       group_state_counts: Object.fromEntries(groupStateCounts),
+      group_wait_reason_counts: Object.fromEntries(groupWaitReasonCounts),
       held_lock_count: this.heldLocks.length,
       held_participant_count: heldParticipantCount,
       last_follow_on_wait: this.lastFollowOnWait,
       park_count: this.parkCount,
       pending_lookup_count: this.pendingLookups.size,
+      pending_physical_lock_count: this.pendingPhysicalLocks.size,
       ready_activation_count: this.readyActivations.length,
       resume_count: this.resumeCount,
+      sample_active_groups: sampleActiveGroups,
+      sample_group_waits: sampleGroupWaits,
       sample_pending_group_ids: Array.from(this.pendingLookups.keys()).slice(0, 5),
+      sample_pending_physical_locks: samplePendingPhysicalLocks,
       ...extra,
     });
   }

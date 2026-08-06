@@ -2046,7 +2046,13 @@ const mergeEntitiesInWriteBoundary = async (
   let lock;
   try {
     // Lock the participants that will be merged
-    lock = await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
+    const coordinatedLock = resolveBatchParticipantLock({
+      draftId: getDraftContext(context, user),
+      participantIds,
+    });
+    lock = coordinatedLock
+      ? await coordinatedLock
+      : await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
     // Entities must be fully loaded with admin user to resolve/move all dependencies
     const initialInstance = await storeLoadByIdWithRefs<StoreObject>(context, user, targetEntityId);
     if (!initialInstance) {
@@ -2682,7 +2688,13 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
   const participantIds = R.uniq(locksIds.filter((e) => !alreadyHeldLockIds.has(e)));
   try {
     // Try to get the lock in redis
-    lock = await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
+    const coordinatedLock = resolveBatchParticipantLock({
+      draftId: getDraftContext(context, user),
+      participantIds,
+    });
+    lock = coordinatedLock
+      ? await coordinatedLock
+      : await lockResources(participantIds, getBatchAwareLockOptions(getDraftContext(context, user)));
     // region handle attributes
     // Only for StixCyberObservable
     const lookingEntities: BasicStoreBase[] = [];

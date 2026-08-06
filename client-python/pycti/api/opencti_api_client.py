@@ -17,7 +17,7 @@ import magic
 import requests
 
 from pycti import __version__
-from pycti.api.opencti_api_batch import BatchMutationPlan
+from pycti.api.opencti_api_batch import BatchMutationPlan, BatchMutationPlanTooLarge
 from pycti.api.opencti_api_connector import OpenCTIApiConnector
 from pycti.api.opencti_api_draft import OpenCTIApiDraft
 from pycti.api.opencti_api_internal_file import OpenCTIApiInternalFile
@@ -93,6 +93,7 @@ from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 # admission before execution starts. Keep the generic API timeout short, but
 # allow a complete admitted batch work item to survive the queue plus execution.
 DEFAULT_BATCH_REQUESTS_TIMEOUT = 3600
+DEFAULT_BATCH_REQUESTS_MAX_PAYLOAD_SIZE = 48 * 1024 * 1024
 
 # Global singleton variables for proxy certificate management
 _PROXY_CERT_BUNDLE = None
@@ -193,6 +194,8 @@ class OpenCTIApiClient:
     :type batch_requests_timeout: int, optional
     :param provider: define client provider, and is used to specify it in requests user agent header
     :type provider: string, optional
+    :param batch_requests_max_payload_size: maximum serialized backend batch mutation request size in bytes
+    :type batch_requests_max_payload_size: int, optional
     """
 
     def __init__(
@@ -210,6 +213,7 @@ class OpenCTIApiClient:
         requests_timeout: int = 300,
         batch_requests_timeout: Optional[int] = None,
         provider: Optional[str] = None,
+        batch_requests_max_payload_size: Optional[int] = None,
     ):
         """Initialize the OpenCTIApiClient instance.
 
@@ -239,6 +243,8 @@ class OpenCTIApiClient:
         :type batch_requests_timeout: int or None
         :param provider: client provider for User-Agent header (format: provider/version)
         :type provider: str or None
+        :param batch_requests_max_payload_size: maximum serialized backend batch mutation request size in bytes (default: 48 MiB)
+        :type batch_requests_max_payload_size: int or None
 
         :raises ValueError: If URL or token is missing or invalid
         """
@@ -283,6 +289,11 @@ class OpenCTIApiClient:
             batch_requests_timeout
             if batch_requests_timeout is not None
             else max(requests_timeout, DEFAULT_BATCH_REQUESTS_TIMEOUT)
+        )
+        self.session_batch_requests_max_payload_size = (
+            batch_requests_max_payload_size
+            if batch_requests_max_payload_size is not None
+            else DEFAULT_BATCH_REQUESTS_MAX_PAYLOAD_SIZE
         )
         self._batch_mutation_plan = None
         # Define the dependencies
@@ -808,7 +819,9 @@ class OpenCTIApiClient:
         """Capture GraphQL mutations so they can be executed in one backend batch."""
         if self._batch_mutation_plan is not None:
             raise ValueError("A batch mutation plan is already active")
-        plan = BatchMutationPlan()
+        plan = BatchMutationPlan(
+            max_serialized_operations_size=self.session_batch_requests_max_payload_size
+        )
         self._batch_mutation_plan = plan
         try:
             yield plan
@@ -853,12 +866,25 @@ class OpenCTIApiClient:
                 "version": backend_batch_plan.get("version"),
                 "execution_phases": backend_batch_plan.get("execution_phases"),
             }
+        variables = {
+            "operations": plan.operations,
+            "options": options or None,
+        }
+        request_payload_size = len(
+            json.dumps({"query": mutation, "variables": variables}).encode("utf-8")
+        )
+        if (
+            isinstance(self.session_batch_requests_max_payload_size, int)
+            and not isinstance(self.session_batch_requests_max_payload_size, bool)
+            and self.session_batch_requests_max_payload_size > 0
+            and request_payload_size > self.session_batch_requests_max_payload_size
+        ):
+            raise BatchMutationPlanTooLarge(
+                request_payload_size, self.session_batch_requests_max_payload_size
+            )
         return self.query(
             mutation,
-            {
-                "operations": plan.operations,
-                "options": options or None,
-            },
+            variables,
             request_timeout=self.session_batch_requests_timeout,
         )
 

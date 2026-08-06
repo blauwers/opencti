@@ -3,6 +3,8 @@ opencti:
   url: 'http://localhost:8080'
   token: 'ChangeMe'
   json_logging: true
+  batch_requests_timeout: 3600
+  batch_requests_max_payload_size: 50331648
 
 worker:
   log_level: 'info'

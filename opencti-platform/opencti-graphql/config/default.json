@@ -88,6 +88,7 @@
     },
     "health_access_key": "ChangeMe",
     "request_timeout": 1200000,
+    "batch_request_timeout": 3600000,
     "session_timeout": 1200000,
     "session_cookie": false,
     "child_locking_process": {
