@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { booleanConf, logApp } from '../../config/conf';
 import { internalFindByIds } from '../../database/middleware-loader';
 import { isNotEmptyField } from '../../database/utils';
 import { lockResources } from '../../lock/master-lock';
@@ -6,6 +7,7 @@ import { getInstanceIds } from '../../schema/identifier';
 import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
+import { getBatchExecutionPerformanceTraceId } from './batch-executor';
 import { getBatchAwareLockOptions, getBatchRetainedLockIds, retainBatchLockUntilCommit } from './batch-lock-retention';
 import { hasBatchCreatedEntityParticipant } from './batch-relation-lookup';
 
@@ -57,6 +59,9 @@ type BatchEntityCreateCoordinatorScope = {
 };
 
 const MAX_DIRECT_ID_LOOKUP_SIZE = 5000;
+const BATCH_ENTITY_CREATE_COORDINATOR_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
+const BATCH_ENTITY_CREATE_COORDINATOR_LOG_MESSAGE = '[BATCH] Entity create coordinator';
+const BATCH_ENTITY_CREATE_COORDINATOR_SNAPSHOT_INTERVAL_MS = 5000;
 const batchEntityCreateCoordinatorStorage = new AsyncLocalStorage<BatchEntityCreateCoordinatorScope>();
 
 const normalizeIds = (ids: string[]): string[] => Array.from(new Set(ids.filter((id) => isNotEmptyField(id))));
@@ -96,11 +101,25 @@ export class BatchEntityCreateCoordinator {
 
   private readonly sharedAbortController = new AbortController();
 
+  private readonly performanceTraceId = getBatchExecutionPerformanceTraceId();
+
+  private readonly snapshotTimer: NodeJS.Timeout | undefined;
+
   private activeGroupCount = 0;
 
   private flushPromise: Promise<void> | undefined;
 
   private closed = false;
+
+  private flushCount = 0;
+
+  private followOnWaitCount = 0;
+
+  private parkCount = 0;
+
+  private resumeCount = 0;
+
+  private lastFollowOnWait: Record<string, unknown> | undefined;
 
   private reservationChangePromise!: Promise<void>;
 
@@ -112,6 +131,10 @@ export class BatchEntityCreateCoordinator {
     this.maxActiveGroups = Math.max(1, maxActiveGroups);
     this.resetReservationChangePromise();
     this.groupOrder.forEach((groupId) => this.groupStates.set(groupId, 'collecting'));
+    this.snapshotTimer = BATCH_ENTITY_CREATE_COORDINATOR_PERFORMANCE_LOG
+      ? setInterval(() => this.logState('snapshot'), BATCH_ENTITY_CREATE_COORDINATOR_SNAPSHOT_INTERVAL_MS)
+      : undefined;
+    this.snapshotTimer?.unref();
   }
 
   getHeldParticipantIds(groupId: number, draftId?: string): string[] {
@@ -199,6 +222,9 @@ export class BatchEntityCreateCoordinator {
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.snapshotTimer) {
+      clearInterval(this.snapshotTimer);
+    }
     await this.flushPromise?.catch(() => undefined);
     const pending = Array.from(this.pendingLookups.values());
     this.pendingLookups.clear();
@@ -258,6 +284,12 @@ export class BatchEntityCreateCoordinator {
     if (selectedLookups.length === 0) {
       return;
     }
+    this.flushCount += 1;
+    const flushStartedAt = Date.now();
+    this.logState('flush_started', {
+      flush_count: this.flushCount,
+      selected_lookup_count: selectedLookups.length,
+    });
     selectedLookups.forEach((lookup) => this.pendingLookups.delete(lookup.groupId));
     const scopedLocksByGroup = new Map<number, BatchEntityCreateLock[]>();
     try {
@@ -311,6 +343,11 @@ export class BatchEntityCreateCoordinator {
         });
       });
       this.releaseReadyActivations();
+      this.logState('flush_completed', {
+        duration_ms: Date.now() - flushStartedAt,
+        flush_count: this.flushCount,
+        selected_lookup_count: selectedLookups.length,
+      });
     } catch (cause) {
       await this.releasePhysicalLocks(Array.from(scopedLocksByGroup.values()).flat());
       selectedLookups.forEach((lookup) => {
@@ -337,6 +374,7 @@ export class BatchEntityCreateCoordinator {
   }
 
   private parkGroup(groupId: number): void {
+    this.parkCount += 1;
     const state = this.groupStates.get(groupId);
     if (state === 'active') {
       this.activeGroupCount -= 1;
@@ -358,6 +396,7 @@ export class BatchEntityCreateCoordinator {
       return Promise.reject(new Error(`Batch entity create group ${groupId} is not parked`));
     }
     return new Promise<void>((resolve, reject) => {
+      this.resumeCount += 1;
       this.reserveGroupParticipantIds(groupId);
       this.groupStates.set(groupId, 'ready');
       this.readyActivations.push({
@@ -461,6 +500,13 @@ export class BatchEntityCreateCoordinator {
     const conflictingGroupIds = this.getActiveConflictGroupIds(groupId, input.draftId, additionalParticipantIds);
     this.addGroupScopedParticipantIds(groupId, input.draftId, additionalParticipantIds);
     if (conflictingGroupIds.length > 0) {
+      this.followOnWaitCount += 1;
+      this.lastFollowOnWait = {
+        additional_participant_count: additionalParticipantIds.length,
+        conflicting_group_ids: conflictingGroupIds.slice(0, 5),
+        group_id: groupId,
+        sample_participant_ids: additionalParticipantIds.slice(0, 5),
+      };
       // A group that keeps its current reservations while waiting for another
       // active group can deadlock with a crossed follow-on lock request.
       this.parkGroup(groupId);
@@ -675,6 +721,35 @@ export class BatchEntityCreateCoordinator {
 
   private async releasePhysicalLocks(locks: BatchEntityCreateLock[]): Promise<void> {
     await Promise.allSettled(Array.from(new Set(locks)).reverse().map((lock) => lock.unlock()));
+  }
+
+  private logState(event: string, extra: Record<string, unknown> = {}): void {
+    if (!BATCH_ENTITY_CREATE_COORDINATOR_PERFORMANCE_LOG) {
+      return;
+    }
+    const groupStateCounts = new Map<BatchEntityCreateGroupState, number>();
+    this.groupStates.forEach((state) => {
+      groupStateCounts.set(state, (groupStateCounts.get(state) ?? 0) + 1);
+    });
+    const heldParticipantCount = Array.from(this.heldParticipantIdsByDraft.values())
+      .reduce((count, ids) => count + ids.size, 0);
+    logApp.info(BATCH_ENTITY_CREATE_COORDINATOR_LOG_MESSAGE, {
+      active_group_count: this.activeGroupCount,
+      event,
+      execution_id: this.performanceTraceId,
+      flush_count: this.flushCount,
+      follow_on_wait_count: this.followOnWaitCount,
+      group_state_counts: Object.fromEntries(groupStateCounts),
+      held_lock_count: this.heldLocks.length,
+      held_participant_count: heldParticipantCount,
+      last_follow_on_wait: this.lastFollowOnWait,
+      park_count: this.parkCount,
+      pending_lookup_count: this.pendingLookups.size,
+      ready_activation_count: this.readyActivations.length,
+      resume_count: this.resumeCount,
+      sample_pending_group_ids: Array.from(this.pendingLookups.keys()).slice(0, 5),
+      ...extra,
+    });
   }
 
   private async resolveDirectIdsByType(lookups: PendingBatchEntityCreateLookup[]): Promise<Map<string, BasicStoreObject[]>> {
