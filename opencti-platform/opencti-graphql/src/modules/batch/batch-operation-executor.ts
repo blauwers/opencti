@@ -92,6 +92,8 @@ const BATCH_RESULT_TOKEN_PREFIX = '__opencti_batch_result__';
 const BATCH_RESULT_TOKEN_PATTERN = new RegExp(`^${BATCH_RESULT_TOKEN_PREFIX}:(\\d+):(.+)$`);
 const BATCH_GRAPHQL_MAX_CONCURRENCY: number = conf.get('elasticsearch:max_concurrency') || 4;
 const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS = 4;
+const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_GROUPS = 64;
+const BATCH_GRAPHQL_DEFAULT_MAX_COORDINATED_GROUPS_PER_WAVE = 1024;
 const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 2000;
 const BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT = 5 * 1024 * 1024;
 const BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE = '[BATCH] GraphQL execution admission';
@@ -101,6 +103,15 @@ const configuredBatchGraphqlMaxActiveExecutions = Number(conf.get('app:concurren
 const BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS = Number.isInteger(configuredBatchGraphqlMaxActiveExecutions) && configuredBatchGraphqlMaxActiveExecutions > 0
   ? configuredBatchGraphqlMaxActiveExecutions
   : BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_EXECUTIONS;
+const configuredBatchGraphqlMaxActiveGroups = Number(conf.get('app:concurrency:batch_max_active_groups'));
+const BATCH_GRAPHQL_MAX_ACTIVE_GROUPS = Number.isInteger(configuredBatchGraphqlMaxActiveGroups) && configuredBatchGraphqlMaxActiveGroups > 0
+  ? configuredBatchGraphqlMaxActiveGroups
+  : BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_GROUPS;
+const configuredBatchGraphqlMaxCoordinatedGroupsPerWave = Number(conf.get('app:concurrency:batch_max_coordinated_groups_per_wave'));
+const BATCH_GRAPHQL_MAX_COORDINATED_GROUPS_PER_WAVE = Number.isInteger(configuredBatchGraphqlMaxCoordinatedGroupsPerWave)
+  && configuredBatchGraphqlMaxCoordinatedGroupsPerWave > 0
+  ? configuredBatchGraphqlMaxCoordinatedGroupsPerWave
+  : BATCH_GRAPHQL_DEFAULT_MAX_COORDINATED_GROUPS_PER_WAVE;
 const batchGraphqlExecutionAdmissionGate = createBatchExecutionAdmissionGate(BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS);
 let batchGraphqlExecutionSequence = 0;
 const BATCH_DEPENDENCY_FAILED_CODE = 'BATCH_DEPENDENCY_FAILED';
@@ -1004,7 +1015,7 @@ const containsCoordinatedAddOperation = (group: PreparedBatchGraphqlOperationGro
   return group.operations.some(isCoordinatedAddOperation);
 };
 
-const executeOperationGroupsWithEntityCreateCoordinator = async (
+const executeOperationGroupWaveWithEntityCreateCoordinator = async (
   schema: GraphQLSchema,
   context: AuthContext,
   groups: PreparedBatchGraphqlOperationGroup[],
@@ -1013,10 +1024,15 @@ const executeOperationGroupsWithEntityCreateCoordinator = async (
   state: BatchGraphqlOperationExecutionState,
 ): Promise<void> => {
   // Coordinated entity creates do not issue their Elasticsearch writes until the
-  // enclosing batch boundary commits. Releasing the full disjoint lookup wave
-  // lets request-local loaders resolve the phase set-wise instead of cycling a
-  // large bundle through the generic Elasticsearch concurrency cap.
-  const coordinator = new BatchEntityCreateCoordinator(context, groups.map((group) => group.groupId));
+  // enclosing batch boundary commits. Let every group reach the shared lookup
+  // barrier so request-local loaders resolve the phase set-wise, then bound the
+  // number of resumed groups so a large phase does not build an unbounded
+  // follow-on conflict graph in memory.
+  const coordinator = new BatchEntityCreateCoordinator(
+    context,
+    groups.map((group) => group.groupId),
+    BATCH_GRAPHQL_MAX_ACTIVE_GROUPS,
+  );
   let firstError: unknown;
   await Promise.all(groups.map(async (group) => {
     try {
@@ -1032,6 +1048,27 @@ const executeOperationGroupsWithEntityCreateCoordinator = async (
   await coordinator.close();
   if (firstError) {
     throw firstError;
+  }
+};
+
+const executeOperationGroupsWithEntityCreateCoordinator = async (
+  schema: GraphQLSchema,
+  context: AuthContext,
+  groups: PreparedBatchGraphqlOperationGroup[],
+  resultBindings: BatchGraphqlResultBindings,
+  results: BatchGraphqlOperationResult[],
+  state: BatchGraphqlOperationExecutionState,
+): Promise<void> => {
+  for (let offset = 0; offset < groups.length; offset += BATCH_GRAPHQL_MAX_COORDINATED_GROUPS_PER_WAVE) {
+    const waveGroups = groups.slice(offset, offset + BATCH_GRAPHQL_MAX_COORDINATED_GROUPS_PER_WAVE);
+    await executeOperationGroupWaveWithEntityCreateCoordinator(
+      schema,
+      context,
+      waveGroups,
+      resultBindings,
+      results,
+      state,
+    );
   }
 };
 

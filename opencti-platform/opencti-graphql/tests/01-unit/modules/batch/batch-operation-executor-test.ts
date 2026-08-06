@@ -1,6 +1,7 @@
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import GraphQLUpload from 'graphql-upload/GraphQLUpload.mjs';
 import { describe, expect, it } from 'vitest';
+import conf from '../../../../src/config/conf';
 import { FUNCTIONAL_ERROR, FunctionalError, MissingReferenceError } from '../../../../src/config/errors';
 import {
   BatchSideEffectKind,
@@ -14,7 +15,7 @@ import {
   getBatchGraphqlExecutionAdmissionStats,
   getBatchGraphqlExecutionAdmissionWeight,
 } from '../../../../src/modules/batch/batch-operation-executor';
-import { getBatchEntityCreateCoordinatorGroupId } from '../../../../src/modules/batch/batch-entity-create-coordinator';
+import { getBatchEntityCreateCoordinatorGroupId, resolveBatchEntityCreateLookup } from '../../../../src/modules/batch/batch-entity-create-coordinator';
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
 const buildSchema = (calls: string[], beforeRecord?: (value: string) => Promise<void>) => makeExecutableSchema({
@@ -553,6 +554,100 @@ describe('batch GraphQL operation executor', () => {
 
     expect(coordinatorGroupId).toBe(0);
     expect(execution.results).toEqual([{ recordAdd: 'scoped' }]);
+  });
+
+  it('bounds post-lookup add-group activation after one batched lookup wave', async () => {
+    const maxActiveGroups = Number(conf.get('app:concurrency:batch_max_active_groups'));
+    expect(maxActiveGroups).toBeGreaterThan(0);
+
+    const calls: string[] = [];
+    const startedValues: string[] = [];
+    let activeGroupCount = 0;
+    let maxObservedActiveGroupCount = 0;
+    let releaseGroups: (() => void) | undefined;
+    const groupGate = new Promise<void>((resolve) => {
+      releaseGroups = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      await resolveBatchEntityCreateLookup({
+        finderIds: [],
+        participantIds: [],
+        type: '',
+      });
+      startedValues.push(value);
+      activeGroupCount += 1;
+      maxObservedActiveGroupCount = Math.max(maxObservedActiveGroupCount, activeGroupCount);
+      await groupGate;
+      activeGroupCount -= 1;
+    });
+    const operations = Array.from({ length: maxActiveGroups + 1 }, (_, index) => ({
+      query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+      variables: JSON.stringify({ value: `group-${index}` }),
+      objectId: `identity--${index}`,
+      executionGroup: index,
+      executionPhase: 0,
+    }));
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, operations);
+    try {
+      for (let tick = 0; tick < 100 && startedValues.length < maxActiveGroups; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(startedValues).toHaveLength(maxActiveGroups);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(startedValues).toHaveLength(maxActiveGroups);
+      expect(maxObservedActiveGroupCount).toBe(maxActiveGroups);
+    } finally {
+      releaseGroups?.();
+    }
+
+    const execution = await executionPromise;
+    expect(startedValues).toHaveLength(maxActiveGroups + 1);
+    expect(execution.results).toHaveLength(maxActiveGroups + 1);
+  });
+
+  it('bounds coordinated lookup collection to finite waves', async () => {
+    const maxGroupsPerWave = Number(conf.get('app:concurrency:batch_max_coordinated_groups_per_wave'));
+    expect(maxGroupsPerWave).toBeGreaterThan(0);
+
+    const calls: string[] = [];
+    const enteredValues: string[] = [];
+    let releaseGroups: (() => void) | undefined;
+    const groupGate = new Promise<void>((resolve) => {
+      releaseGroups = resolve;
+    });
+    const schema = buildSchema(calls, async (value) => {
+      enteredValues.push(value);
+      await resolveBatchEntityCreateLookup({
+        finderIds: [],
+        participantIds: [],
+        type: '',
+      });
+      await groupGate;
+    });
+    const operations = Array.from({ length: maxGroupsPerWave + 1 }, (_, index) => ({
+      query: 'mutation RecordAdd($value: String!) { recordAdd(value: $value) }',
+      variables: JSON.stringify({ value: `group-${index}` }),
+      objectId: `identity--${index}`,
+      executionGroup: index,
+      executionPhase: 0,
+    }));
+
+    const executionPromise = executeBatchGraphqlOperations(schema, {} as any, operations);
+    try {
+      for (let tick = 0; tick < 500 && enteredValues.length < maxGroupsPerWave; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(enteredValues).toHaveLength(maxGroupsPerWave);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(enteredValues).toHaveLength(maxGroupsPerWave);
+    } finally {
+      releaseGroups?.();
+    }
+
+    const execution = await executionPromise;
+    expect(enteredValues).toHaveLength(maxGroupsPerWave + 1);
+    expect(execution.results).toHaveLength(maxGroupsPerWave + 1);
   });
 
   it('does not retain completed add results for non-pruned batch execution', async () => {
