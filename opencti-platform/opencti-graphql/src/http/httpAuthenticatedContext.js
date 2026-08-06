@@ -3,8 +3,9 @@ import { ENTITY_TYPE_SETTINGS } from '../schema/internalObject';
 import { authenticateUserFromRequest, userWithOrigin, batchCreator, batchCreators, batchRolesForUsers, batchUserEffectiveConfidenceLevel, batchUserTokens } from '../domain/user';
 import { isNotEmptyField } from '../database/utils';
 import { logApp } from '../config/conf';
-import { batchLoader, storeLoadByIdsWithRefs } from '../database/middleware';
+import { batchLoader, listEntitiesByHashValues, storeLoadByIdsWithRefs } from '../database/middleware';
 import {
+  createExistingEntityHashesBatchLoader,
   createExistingEntityIdsBatchLoader,
   createExistingRelationIdsBatchLoader,
   createInputResolveRefsBatchLoader,
@@ -24,6 +25,7 @@ import { batchContextDataForLog } from '../database/data-changes';
 export const computeLoaders = (executeContext, user) => {
   const existingEntityIdsBatchLoader = createExistingEntityIdsBatchLoader(executeContext, SYSTEM_USER);
   const existingRelationIdsBatchLoader = createExistingRelationIdsBatchLoader(executeContext, SYSTEM_USER);
+  const existingEntityHashesBatchLoader = createExistingEntityHashesBatchLoader(executeContext, listEntitiesByHashValues);
   const inputResolveRefsBatchLoader = createInputResolveRefsBatchLoader(executeContext, user);
   const storeLoadByIdWithRefsBatchLoader = createStoreLoadByIdWithRefsBatchLoader(executeContext, storeLoadByIdsWithRefs);
   // Generic loaders
@@ -35,11 +37,13 @@ export const computeLoaders = (executeContext, user) => {
     idsBatchLoaderWithCount: batchLoader(elBatchIdsWithRelCount, executeContext, user),
     existingEntityIdsBatchLoader,
     existingRelationIdsBatchLoader,
+    existingEntityHashesBatchLoader,
     inputResolveRefsBatchLoader,
     storeLoadByIdWithRefsBatchLoader,
     invalidateBufferedReadCaches: (ids) => {
       existingEntityIdsBatchLoader.invalidate(ids);
       existingRelationIdsBatchLoader.invalidate(ids);
+      existingEntityHashesBatchLoader.invalidate(ids);
       inputResolveRefsBatchLoader.invalidate(ids);
       storeLoadByIdWithRefsBatchLoader.invalidate(ids);
     },

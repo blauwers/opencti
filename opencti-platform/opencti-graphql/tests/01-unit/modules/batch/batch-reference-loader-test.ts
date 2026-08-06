@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { internalFindByIds } from '../../../../src/database/middleware-loader';
-import { createExistingEntityIdsBatchLoader, createExistingRelationIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
+import { createExistingEntityHashesBatchLoader, createExistingEntityIdsBatchLoader, createExistingRelationIdsBatchLoader, createInputResolveRefsBatchLoader, createStoreLoadByIdWithRefsBatchLoader } from '../../../../src/modules/batch/batch-reference-loader';
 import { BatchMutationKind, executeBatchMutations } from '../../../../src/modules/batch/batch-executor';
 
 vi.mock('../../../../src/database/middleware-loader', () => ({
@@ -204,6 +204,56 @@ describe('batch reference loader', () => {
     expect(first).toEqual([]);
     expect(second).toEqual([]);
     expect(third.map((element) => element.internal_id)).toEqual(['indicator--one']);
+  });
+
+  it('coalesces same-type hashed observable probes and maps results back to each input', async () => {
+    const listEntitiesByHashValues = vi.fn().mockResolvedValue([
+      {
+        internal_id: 'file--one',
+        standard_id: 'file--standard-one',
+        entity_type: 'StixFile',
+        hashes: { MD5: 'md5-one' },
+      },
+      {
+        internal_id: 'file--two',
+        standard_id: 'file--standard-two',
+        entity_type: 'StixFile',
+        hashes: { SHA256: 'sha256-two' },
+      },
+    ] as any);
+
+    const loader = createExistingEntityHashesBatchLoader(context, listEntitiesByHashValues);
+    const [first, second] = await Promise.all([
+      loader.load({ hashes: ['md5-one'], type: 'StixFile', user }),
+      loader.load({ hashes: ['sha256-two'], type: 'StixFile', user }),
+    ]);
+
+    expect(listEntitiesByHashValues).toHaveBeenCalledTimes(1);
+    expect(listEntitiesByHashValues).toHaveBeenCalledWith(context, user, 'StixFile', ['md5-one', 'sha256-two']);
+    expect(first.map((element) => element.internal_id)).toEqual(['file--one']);
+    expect(second.map((element) => element.internal_id)).toEqual(['file--two']);
+  });
+
+  it('reuses hashed observable probes across ticks until an affected hash is invalidated', async () => {
+    const listEntitiesByHashValues = vi.fn()
+      .mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([{
+        internal_id: 'file--one',
+        standard_id: 'file--standard-one',
+        entity_type: 'StixFile',
+        hashes: { MD5: 'md5-one' },
+      }] as any);
+
+    const loader = createExistingEntityHashesBatchLoader(context, listEntitiesByHashValues);
+    const first = await loader.load({ hashes: ['md5-one'], type: 'StixFile', user });
+    const second = await loader.load({ hashes: ['md5-one'], type: 'StixFile', user });
+    loader.invalidate(['md5-one']);
+    const third = await loader.load({ hashes: ['md5-one'], type: 'StixFile', user });
+
+    expect(listEntitiesByHashValues).toHaveBeenCalledTimes(2);
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    expect(third.map((element) => element.internal_id)).toEqual(['file--one']);
   });
 
   it('coalesces same-user hydrated reads with matching options', async () => {

@@ -1510,16 +1510,12 @@ const mergeInstanceWithUpdateInputs = (base: Record<string, any>, inputs: EditIn
   const resolvedInputs = R.filter((f) => !R.isEmpty(f), remappedInputs);
   return mergeInstanceWithInputs(instance, resolvedInputs as EditInput[]);
 };
-const listEntitiesByHashes = async (
+export const listEntitiesByHashValues = async (
   context: AuthContext,
   user: AuthUser,
   type: string,
-  hashes: Record<string, string> | null | undefined,
+  searchHashes: string[],
 ): Promise<BasicStoreEntity[]> => {
-  if (isEmptyField(hashes)) {
-    return [];
-  }
-  const searchHashes = extractNotFuzzyHashValues(hashes as Record<string, string>); // Search hashes must filter the fuzzy hashes
   if (searchHashes.length === 0) {
     return [];
   }
@@ -1545,6 +1541,25 @@ const listEntitiesByHashes = async (
     const entityHashes = extractNotFuzzyHashValues(entity.hashes ?? {});
     return entityHashes.some((hash) => searchHashSet.has(hash));
   });
+};
+const listEntitiesByHashes = async (
+  context: AuthContext,
+  user: AuthUser,
+  type: string,
+  hashes: Record<string, string> | null | undefined,
+): Promise<BasicStoreEntity[]> => {
+  if (isEmptyField(hashes)) {
+    return [];
+  }
+  const searchHashes = extractNotFuzzyHashValues(hashes as Record<string, string>); // Search hashes must filter the fuzzy hashes
+  if (searchHashes.length === 0) {
+    return [];
+  }
+  const batchLoader = isBatchWriteBoundaryOpen() ? context?.batch?.existingEntityHashesBatchLoader : undefined;
+  if (batchLoader) {
+    return batchLoader.load({ hashes: searchHashes, type, user }) as Promise<BasicStoreEntity[]>;
+  }
+  return listEntitiesByHashValues(context, user, type, searchHashes);
 };
 export const hashMergeValidation = (instances: { hashes?: { [k: string]: string } }[]) => {
   // region Specific check for observables with hashes

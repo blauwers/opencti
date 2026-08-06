@@ -2,6 +2,7 @@ import DataLoader from 'dataloader';
 import nconf from 'nconf';
 import { internalFindByIds } from '../../database/middleware-loader';
 import { isNotEmptyField } from '../../database/utils';
+import { extractNotFuzzyHashValues } from '../../schema/fieldDataAdapter';
 import { getInstanceIds } from '../../schema/identifier';
 import type { BasicStoreObject } from '../../types/store';
 import type { AuthContext, AuthUser } from '../../types/user';
@@ -25,6 +26,24 @@ export type ExistingEntityIdsBatchLoader = {
 };
 
 export type ExistingRelationIdsBatchLoader = ExistingEntityIdsBatchLoader;
+
+type ExistingEntityHashesLookup = {
+  hashes: string[];
+  type: string;
+  user: AuthUser;
+};
+
+type ListEntitiesByHashValues = (
+  context: AuthContext,
+  user: AuthUser,
+  type: string,
+  hashes: string[],
+) => Promise<BasicStoreObject[]>;
+
+export type ExistingEntityHashesBatchLoader = {
+  load: (lookup: ExistingEntityHashesLookup) => Promise<BasicStoreObject[]>;
+  invalidate: (ids: string[]) => void;
+};
 
 export type StoreLoadByIdWithRefsLookup<TOpts extends object = Record<string, unknown>> = {
   id: string;
@@ -240,6 +259,64 @@ export const createExistingEntityIdsBatchLoader = (
 };
 
 export const createExistingRelationIdsBatchLoader = createExistingEntityIdsBatchLoader;
+
+export const createExistingEntityHashesBatchLoader = (
+  context: AuthContext,
+  listEntitiesByHashValues: ListEntitiesByHashValues,
+): ExistingEntityHashesBatchLoader => {
+  const userCacheKeys = new Map<AuthUser, number>();
+  let nextUserCacheKey = 0;
+  const getUserCacheKey = (user: AuthUser) => {
+    const existingKey = userCacheKeys.get(user);
+    if (existingKey !== undefined) {
+      return existingKey;
+    }
+    const cacheKey = nextUserCacheKey;
+    nextUserCacheKey += 1;
+    userCacheKeys.set(user, cacheKey);
+    return cacheKey;
+  };
+  const loadFn = async (lookups: ReadonlyArray<ExistingEntityHashesLookup>): Promise<BasicStoreObject[][]> => {
+    const groupsByUser = new Map<AuthUser, Map<string, {
+      hashes: Set<string>;
+      resolvedElements?: BasicStoreObject[];
+    }>>();
+    for (let index = 0; index < lookups.length; index += 1) {
+      const lookup = lookups[index];
+      const groupsByType = groupsByUser.get(lookup.user) ?? new Map();
+      const group = groupsByType.get(lookup.type) ?? { hashes: new Set<string>() };
+      normalizeTrackedIds(lookup.hashes).forEach((hash) => group.hashes.add(hash));
+      groupsByType.set(lookup.type, group);
+      groupsByUser.set(lookup.user, groupsByType);
+    }
+
+    await Promise.all(Array.from(groupsByUser.entries()).flatMap(([user, groupsByType]) => {
+      return Array.from(groupsByType.entries()).map(async ([type, group]) => {
+        group.resolvedElements = group.hashes.size === 0
+          ? []
+          : await listEntitiesByHashValues(context, user, type, Array.from(group.hashes));
+      });
+    }));
+
+    return lookups.map((lookup) => {
+      const expectedHashes = new Set(normalizeTrackedIds(lookup.hashes));
+      if (expectedHashes.size === 0) {
+        return [];
+      }
+      const resolvedElements = groupsByUser.get(lookup.user)?.get(lookup.type)?.resolvedElements ?? [];
+      return resolvedElements.filter((element) => {
+        return extractNotFuzzyHashValues(element.hashes ?? {}).some((hash) => expectedHashes.has(hash));
+      });
+    });
+  };
+
+  return createTrackedLoader(
+    loadFn,
+    (lookup) => `${getUserCacheKey(lookup.user)}:${lookup.type}:${normalizeTrackedIds(lookup.hashes).sort().join('|')}`,
+    (lookup) => lookup.hashes,
+    (elements) => collectElementIds(elements),
+  );
+};
 
 export const createStoreLoadByIdWithRefsBatchLoader = <TOpts extends object>(
   context: AuthContext,

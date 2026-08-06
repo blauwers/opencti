@@ -77,7 +77,7 @@ import {
   isAbstract,
   REL_INDEX_PREFIX,
 } from '../schema/general';
-import { isModifiedObject, isUpdatedAtObject } from '../schema/fieldDataAdapter';
+import { extractNotFuzzyHashValues, isModifiedObject, isUpdatedAtObject } from '../schema/fieldDataAdapter';
 import { generateInternalType, getParentTypes } from '../schema/schemaUtils';
 import {
   ATTRIBUTE_ABSTRACT,
@@ -2141,6 +2141,8 @@ const getBufferedWriteInvalidationIds = (elements: BasicStoreBase[]): string[] =
   };
   elements.forEach((element) => {
     getInstanceIds(element).forEach((id) => addId(id));
+    const hashes = (element as BasicStoreBase & { hashes?: Record<string, string> }).hashes ?? {};
+    extractNotFuzzyHashValues(hashes).forEach((hash) => addId(hash));
     if (element.base_type === BASE_TYPE_RELATION) {
       const relation = element as BasicStoreRelation;
       addId(relation.fromId);
