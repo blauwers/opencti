@@ -3,6 +3,7 @@ import json
 from unittest.mock import MagicMock
 
 from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
+from requests import ConnectionError
 
 from src import push_handler
 from src.push_handler import (
@@ -230,6 +231,12 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
         handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs["wait_until"]
         == "COMMITTED"
     )
+    assert (
+        handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs[
+            "split_oversized_batch_plan"
+        ]
+        is False
+    )
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
 
 
@@ -241,20 +248,26 @@ def test_batch_payload_too_large_detection_handles_typed_and_backend_errors():
     assert is_batch_payload_too_large_error(ValueError("unrelated")) is False
 
 
-def test_handler_falls_back_to_split_transport_for_oversized_batch_plan(monkeypatch):
+def test_handler_requeues_durable_batch_chunks_for_oversized_batch_plan(monkeypatch):
     handler = build_handler()
     handler.send_bundle_to_specific_queue = MagicMock()
     handler.api.stix2.import_bundle_from_json_batch.side_effect = (
         BatchMutationPlanTooLarge(200, 100)
     )
-    split_bundles = [
-        {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
-        {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--2"}]},
+    batch_chunks = [
+        (
+            {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
+            {"version": 1, "ordered_object_ids": ["indicator--1"]},
+        ),
+        (
+            {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--2"}]},
+            {"version": 1, "ordered_object_ids": ["indicator--2"]},
+        ),
     ]
     monkeypatch.setattr(
-        push_handler.OpenCTIStix2Splitter,
-        "split_bundle_with_expectations",
-        lambda *args, **kwargs: (2, [], split_bundles),
+        push_handler.OpenCTIStix2,
+        "build_oversized_batch_plan_chunks",
+        lambda *args, **kwargs: batch_chunks,
     )
 
     channel = MagicMock()
@@ -277,10 +290,30 @@ def test_handler_falls_back_to_split_transport_for_oversized_batch_plan(monkeypa
     handler.api.work.add_expectations.assert_called_once_with("work--1", 2)
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
     assert handler.send_bundle_to_specific_queue.call_count == 2
-    split_data = handler.send_bundle_to_specific_queue.call_args.args[3]
-    assert split_data["split_bundles"] is True
-    assert split_data["no_split"] is False
-    assert "batch_plan" not in split_data
+    first_chunk_data = handler.send_bundle_to_specific_queue.call_args_list[0].args[3]
+    second_chunk_data = handler.send_bundle_to_specific_queue.call_args_list[1].args[3]
+    assert first_chunk_data["split_bundles"] is False
+    assert first_chunk_data["no_split"] is True
+    assert first_chunk_data["batch_plan"] == batch_chunks[0][1]
+    assert second_chunk_data["batch_plan"] == batch_chunks[1][1]
+
+
+def test_handler_requeues_transient_api_connection_failures(monkeypatch):
+    handler = build_handler()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = ConnectionError(
+        "remote disconnected"
+    )
+    sleep = MagicMock()
+    monkeypatch.setattr(push_handler.time, "sleep", sleep)
+    monkeypatch.setattr(push_handler.random, "uniform", lambda *_: 12.34)
+
+    result = handler.handle_message(build_message(split_bundles=False))
+
+    assert result == "requeue"
+    sleep.assert_called_once_with(12.34)
+    handler.logger.error.assert_called_once_with(
+        "Error executing data handling, a connection error or timeout occurred"
+    )
 
 
 def test_handler_republishes_intact_bundle_for_retryable_batch_failures(monkeypatch):
@@ -429,6 +462,12 @@ def test_handler_forwards_backend_batch_plan_to_batch_importer():
             "backend_batch_plan"
         ]
         == backend_batch_plan
+    )
+    assert (
+        handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs[
+            "split_oversized_batch_plan"
+        ]
+        is False
     )
 
 

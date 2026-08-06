@@ -377,6 +377,40 @@ describe('batch entity create coordinator', () => {
     expect(internalFindByIds).toHaveBeenCalledTimes(3);
   });
 
+  it('serializes parallel same-group nested lookups instead of rejecting the later lookup', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0]);
+    let heldParticipantIds: string[] = [];
+    await Promise.race([
+      runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+        await Promise.all([
+          resolveBatchEntityCreateLookup({
+            finderIds: ['external-reference--one'],
+            participantIds: ['external-reference--one'],
+            type: 'External-Reference',
+          }),
+          resolveBatchEntityCreateLookup({
+            finderIds: ['course-of-action--one'],
+            participantIds: ['course-of-action--one'],
+            type: 'Course-Of-Action',
+          }),
+        ]);
+        heldParticipantIds = getBatchEntityCreateCoordinatorHeldParticipantIds().sort();
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('same-group nested lookup deadlocked')), 1000);
+      }),
+    ]);
+    await coordinator.close();
+
+    expect(internalFindByIds).toHaveBeenCalledTimes(2);
+    expect(lockResources).toHaveBeenCalledTimes(2);
+    expect(lockResources).toHaveBeenNthCalledWith(1, ['external-reference--one'], { draftId: undefined });
+    expect(lockResources).toHaveBeenNthCalledWith(2, ['course-of-action--one'], { draftId: undefined });
+    expect(heldParticipantIds).toEqual(['course-of-action--one', 'external-reference--one']);
+  });
+
   it('retains earlier group-owned ids for nested writes after later lookups', async () => {
     vi.mocked(internalFindByIds).mockResolvedValue([] as any);
 
@@ -431,6 +465,8 @@ describe('batch entity create coordinator', () => {
         expect(lockResources).toHaveBeenCalledWith(['identity--one'], {
           draftId: undefined,
           retryCount: Number(conf.get('app:concurrency:batch_retry_count')),
+          extensionRetryCount: Number(conf.get('app:concurrency:retry_count')),
+          releaseRetryCount: 0,
         });
         return null;
       },
@@ -776,5 +812,4 @@ describe('batch entity create coordinator', () => {
     expect(lockResources).toHaveBeenNthCalledWith(3, ['relationship--internal-two'], { draftId: undefined });
     expect(lockResources).toHaveBeenNthCalledWith(4, ['relationship--internal-one'], { draftId: undefined });
   });
-
 });

@@ -400,6 +400,8 @@ export const redisFetchLatestDeletions = async () => {
 interface LockOptions {
   automaticExtension?: boolean;
   retryCount?: number;
+  extensionRetryCount?: number;
+  releaseRetryCount?: number;
   draftId?: string;
   child_operation?: string;
 }
@@ -412,7 +414,13 @@ const getStackTrace = () => {
 export const lockResource = async (resources: Array<string>, opts: LockOptions = defaultLockOpts) => {
   let timeout: NodeJS.Timeout | undefined;
   let extension: undefined | Promise<void>;
-  const { retryCount = defaultLockOpts.retryCount, automaticExtension = defaultLockOpts.automaticExtension, draftId = defaultLockOpts.draftId } = opts;
+  const {
+    retryCount = defaultLockOpts.retryCount,
+    extensionRetryCount = retryCount,
+    releaseRetryCount = retryCount,
+    automaticExtension = defaultLockOpts.automaticExtension,
+    draftId = defaultLockOpts.draftId,
+  } = opts;
   const initialCallStack = getStackTrace();
   const resourcesId = R.uniq(resources).map((id) => `${id}${draftId}`);
   const locks = R.uniq(resourcesId).map((id) => `{locks}:${id}${draftId}`);
@@ -438,7 +446,7 @@ export const lockResource = async (resources: Array<string>, opts: LockOptions =
       if (retryCount !== 0) {
         logApp.info('Extending resources for long processing task', { locks, stack: initialCallStack });
       }
-      lock = await lock.extend(maxTtl);
+      lock = await redlock.extend(lock, maxTtl, { retryCount: extensionRetryCount });
       queue();
     } catch {
       logApp.error('Execution timeout, error extending resources', { locks });
@@ -482,7 +490,7 @@ export const lockResource = async (resources: Array<string>, opts: LockOptions =
       // Last, unlock in redis
       try {
         // Finally try to unlock
-        await lock.release();
+        await redlock.release(lock, { retryCount: releaseRetryCount });
       } catch {
         // Nothing to do here
       }

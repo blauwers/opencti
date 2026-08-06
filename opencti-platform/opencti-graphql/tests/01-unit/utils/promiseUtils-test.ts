@@ -1,5 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { callWithTimeout, TimeoutError } from '../../../src/utils/promiseUtils';
+import { callWithTimeout, promiseMap, TimeoutError } from '../../../src/utils/promiseUtils';
+
+describe('Promise utilities: promiseMap', () => {
+  it('fills available concurrency slots as soon as an item settles while preserving result order', async () => {
+    const started: number[] = [];
+    const resolveByIndex: Array<((value: string) => void) | undefined> = [];
+    const values = [0, 1, 2, 3];
+
+    const promise = promiseMap(values, async (value, index) => {
+      started.push(value);
+      return new Promise<string>((resolve) => {
+        resolveByIndex[index] = resolve;
+      });
+    }, 2);
+
+    await Promise.resolve();
+    expect(started).toEqual([0, 1]);
+
+    resolveByIndex[1]?.('one');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(started).toEqual([0, 1, 2]);
+
+    resolveByIndex[0]?.('zero');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(started).toEqual([0, 1, 2, 3]);
+
+    resolveByIndex[2]?.('two');
+    resolveByIndex[3]?.('three');
+
+    await expect(promise).resolves.toEqual(['zero', 'one', 'two', 'three']);
+  });
+
+  it('rejects invalid concurrency values', async () => {
+    await expect(promiseMap([], async () => 'unused', 0)).rejects.toThrow('Promise map concurrency must be a positive integer');
+  });
+});
 
 describe('Promise utilities: callWithTimeout', () => {
   beforeEach(() => {

@@ -30,6 +30,8 @@ class BatchMutationPlanTooLarge(Exception):
 class BatchMutationPlan:
     operations: List[Dict[str, Any]] = field(default_factory=list)
     max_serialized_operations_size: Optional[int] = None
+    serialized_request_overhead_size: int = 0
+    max_serialized_request_size: Optional[int] = None
     _next_execution_group: int = field(default=0, init=False, repr=False)
     _active_execution_group: Optional[int] = field(default=None, init=False, repr=False)
     _active_execution_phase: Optional[int] = field(default=None, init=False, repr=False)
@@ -72,7 +74,12 @@ class BatchMutationPlan:
             and next_serialized_operations_size > self.max_serialized_operations_size
         ):
             raise BatchMutationPlanTooLarge(
-                next_serialized_operations_size, self.max_serialized_operations_size
+                next_serialized_operations_size + self.serialized_request_overhead_size,
+                (
+                    self.max_serialized_request_size
+                    if isinstance(self.max_serialized_request_size, int)
+                    else self.max_serialized_operations_size
+                ),
             )
         self._serialized_operations_size = next_serialized_operations_size
         self.operations.append(operation)

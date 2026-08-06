@@ -242,6 +242,216 @@ describe('batch executor', () => {
     expect(calls).toEqual(['write', 'commit', 'finalizer', 'side-effect']);
   });
 
+  it('materializes ordered side effects before bounded auto enrichment and keeps nested effects inline', async () => {
+    const calls: string[] = [];
+
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'first-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push('first-side-effect:start');
+            await registerBatchSideEffect({
+              kind: BatchSideEffectKind.WorkLifecycle,
+              execute: async () => {
+                calls.push('nested-side-effect');
+              },
+            });
+            calls.push('first-side-effect:end');
+          },
+        }],
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => 'second-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.StreamPublication,
+          execute: async () => {
+            calls.push('second-side-effect');
+          },
+        }],
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'second-side-effect',
+      'first-side-effect:start',
+      'nested-side-effect',
+      'first-side-effect:end',
+    ]);
+    expect(execution.sideEffectKinds).toEqual([
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.StreamPublication,
+      BatchSideEffectKind.WorkLifecycle,
+    ]);
+  });
+
+  it('materializes nested mutation side effects inline during active materialization', async () => {
+    const calls: string[] = [];
+
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'first-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push('first-side-effect:start');
+            await executeSingleBatchMutation({
+              kind: BatchMutationKind.UpdateAttribute,
+              executeWrite: async () => {
+                calls.push('nested-write');
+                return 'nested-result';
+              },
+              sideEffects: () => [{
+                kind: BatchSideEffectKind.ConnectorDispatch,
+                execute: async () => {
+                  calls.push('nested-side-effect');
+                },
+              }],
+            });
+            calls.push('first-side-effect:end');
+          },
+        }],
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => 'second-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.StreamPublication,
+          execute: async () => {
+            calls.push('second-side-effect');
+          },
+        }],
+      },
+    ]);
+
+    expect(calls).toEqual([
+      'second-side-effect',
+      'first-side-effect:start',
+      'nested-write',
+      'nested-side-effect',
+      'first-side-effect:end',
+    ]);
+    expect(execution.sideEffectKinds).toEqual([
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.StreamPublication,
+      BatchSideEffectKind.ConnectorDispatch,
+    ]);
+  });
+
+  it('materializes top-level auto enrichments concurrently inside the bounded lane', async () => {
+    const calls: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    let markBothStarted: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    const recordStart = (value: string) => {
+      calls.push(value);
+      if (calls.length === 2) {
+        markBothStarted?.();
+      }
+    };
+
+    const executionPromise = executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'first-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            recordStart('first-side-effect:start');
+            await firstGate;
+            calls.push('first-side-effect:end');
+          },
+        }],
+      },
+      {
+        kind: BatchMutationKind.CreateRelation,
+        executeWrite: async () => 'second-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            recordStart('second-side-effect:start');
+            await secondGate;
+            calls.push('second-side-effect:end');
+          },
+        }],
+      },
+    ]);
+
+    await bothStarted;
+    expect(calls).toEqual(['first-side-effect:start', 'second-side-effect:start']);
+
+    releaseFirst?.();
+    releaseSecond?.();
+    await executionPromise;
+
+    expect(calls.slice(0, 2)).toEqual([
+      'first-side-effect:start',
+      'second-side-effect:start',
+    ]);
+    expect(calls.slice(2).sort()).toEqual([
+      'first-side-effect:end',
+      'second-side-effect:end',
+    ].sort());
+  });
+
+  it('keeps side effects registered by committers and finalizers queued until materialization starts', async () => {
+    const calls: string[] = [];
+
+    const execution = await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        calls.push('write');
+        registerBatchCommitter({
+          key: 'committer-side-effect',
+          execute: async () => {
+            calls.push('commit');
+            await registerBatchSideEffect({
+              kind: BatchSideEffectKind.WorkLifecycle,
+              execute: async () => {
+                calls.push('commit-side-effect');
+              },
+            });
+          },
+        });
+        registerBatchFinalizer({
+          key: 'finalizer-side-effect',
+          execute: async () => {
+            calls.push('finalizer');
+            await registerBatchSideEffect({
+              kind: BatchSideEffectKind.ConnectorDispatch,
+              execute: async () => {
+                calls.push('finalizer-side-effect');
+              },
+            });
+          },
+        });
+        return 'result';
+      },
+    });
+
+    expect(execution).toBe('result');
+    expect(calls).toEqual([
+      'write',
+      'commit',
+      'finalizer',
+      'commit-side-effect',
+      'finalizer-side-effect',
+    ]);
+  });
+
   it('runs finalizers when a buffered write fails before commit', async () => {
     const finalizer = vi.fn().mockResolvedValue(undefined);
 

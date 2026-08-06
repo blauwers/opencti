@@ -109,6 +109,7 @@
       "retry_count": 100,
       "batch_retry_count": 3600,
       "batch_max_active_executions": 4,
+      "batch_max_active_auto_enrichments": 4,
       "batch_max_active_groups": 64,
       "batch_max_coordinated_groups_per_wave": 1024,
       "retry_delay": 250,

@@ -1,4 +1,3 @@
-import { pushAll } from './arrayUtil';
 /**
  * Execute async operations with concurrency control.
  * Modern native alternative to Bluebird's Promise.map with concurrency.
@@ -20,16 +19,31 @@ export const promiseMap = async <T, R>(
   mapper: (item: T, index: number) => Promise<R>,
   concurrency: number,
 ): Promise<R[]> => {
-  const results: R[] = [];
-
-  for (let i = 0; i < items.length; i += concurrency) {
-    const chunk = items.slice(i, i + concurrency);
-    const chunkResults = await Promise.all(
-      chunk.map((item, chunkIndex) => mapper(item, i + chunkIndex)),
-    );
-    pushAll(results, chunkResults);
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error('Promise map concurrency must be a positive integer');
   }
 
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed) {
+      const index = nextIndex;
+      if (index >= items.length) {
+        return;
+      }
+      nextIndex += 1;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (cause) {
+        failed = true;
+        throw cause;
+      }
+    }
+  };
+
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return results;
 };
 

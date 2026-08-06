@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -189,6 +190,38 @@ def test_batch_mutation_plan_preserves_explicit_batch_request_timeout():
 
     assert client.session_batch_requests_timeout == 4200
     assert client.query.call_args.kwargs["request_timeout"] == 4200
+    assert client.query.call_args.kwargs["fresh_session"] is True
+
+
+def test_batch_mutation_plan_uses_one_shot_http_session(monkeypatch):
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    shared_session = MagicMock()
+    client.session = shared_session
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"data": {"batchMutationsExecute": {}}}
+    fresh_session = MagicMock()
+    fresh_session.post.return_value = response
+    monkeypatch.setattr(
+        "pycti.api.opencti_api_client.requests.session", lambda: fresh_session
+    )
+    plan = BatchMutationPlan()
+    plan.capture(
+        "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+        {"input": {"stix_id": "indicator--1"}},
+        [],
+    )
+
+    result = client.execute_batch_mutation_plan(plan)
+
+    assert result == {"data": {"batchMutationsExecute": {}}}
+    shared_session.post.assert_not_called()
+    fresh_session.post.assert_called_once()
+    fresh_session.close.assert_called_once()
 
 
 def test_batch_mutation_plan_rejects_oversized_serialized_request_before_query():
@@ -211,3 +244,61 @@ def test_batch_mutation_plan_rejects_oversized_serialized_request_before_query()
 
     assert raised.value.actual_size > raised.value.max_size
     client.query.assert_not_called()
+
+
+def test_batch_mutation_plan_reserves_request_envelope_before_capture():
+    query = "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }"
+    variables = {"input": {"stix_id": "indicator--1"}}
+    probe_client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    probe_client.query = MagicMock(return_value={"data": {"batchMutationsExecute": {}}})
+    probe_plan = BatchMutationPlan()
+    probe_plan.capture(query, variables, [])
+    probe_client.execute_batch_mutation_plan(
+        probe_plan,
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+        backend_batch_plan={"version": 1, "execution_phases": []},
+    )
+    mutation, payload_variables = probe_client.query.call_args.args[:2]
+    exact_request_size = len(
+        json.dumps({"query": mutation, "variables": payload_variables}).encode("utf-8")
+    )
+
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        batch_requests_max_payload_size=exact_request_size,
+    )
+    client.query = MagicMock(return_value={"data": {"batchMutationsExecute": {}}})
+    with client.batch_mutation_plan(
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+        backend_batch_plan={"version": 1, "execution_phases": []},
+    ) as plan:
+        plan.capture(query, variables, [])
+    client.execute_batch_mutation_plan(
+        plan,
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+        backend_batch_plan={"version": 1, "execution_phases": []},
+    )
+    client.query.assert_called_once()
+
+    too_small_client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        batch_requests_max_payload_size=exact_request_size - 1,
+    )
+    with too_small_client.batch_mutation_plan(
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+        backend_batch_plan={"version": 1, "execution_phases": []},
+    ) as plan:
+        with pytest.raises(BatchMutationPlanTooLarge):
+            plan.capture(query, variables, [])

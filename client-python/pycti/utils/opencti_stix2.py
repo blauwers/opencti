@@ -25,6 +25,7 @@ from typing_extensions import deprecated
 from pycti.api.opencti_api_batch import (
     BATCH_RESULT_TOKEN_PREFIX,
     BatchMutationPlan,
+    BatchMutationPlanTooLarge,
     BatchMutationPlanUnsupported,
 )
 from pycti.entities.opencti_identity import Identity
@@ -523,11 +524,59 @@ class OpenCTIStix2:
         execution_mode: str = None,
         wait_until: str = None,
         backend_batch_plan: Optional[Dict] = None,
+        split_oversized_batch_plan: bool = False,
     ) -> Tuple[list, list]:
         """Import a STIX2 bundle through one backend mutation-plan request."""
         data = json.loads(json_data)
+        try:
+            return self._import_bundle_from_json_batch_once(
+                data,
+                update,
+                types,
+                work_id,
+                objects_max_refs,
+                cleanup_inconsistent_bundle,
+                report_expectations,
+                execution_mode,
+                wait_until,
+                backend_batch_plan,
+            )
+        except BatchMutationPlanTooLarge as error:
+            if not split_oversized_batch_plan or report_expectations:
+                raise
+            return self._import_oversized_batch_plan_chunks(
+                json_data,
+                error,
+                update,
+                types,
+                work_id,
+                objects_max_refs,
+                cleanup_inconsistent_bundle,
+                report_expectations,
+                execution_mode,
+                wait_until,
+                backend_batch_plan,
+            )
+
+    def _import_bundle_from_json_batch_once(
+        self,
+        data: Dict,
+        update: bool,
+        types: List,
+        work_id: str,
+        objects_max_refs: int,
+        cleanup_inconsistent_bundle: bool,
+        report_expectations: bool,
+        execution_mode: str,
+        wait_until: str,
+        backend_batch_plan: Optional[Dict],
+    ) -> Tuple[list, list]:
         with self.batch_mapping_cache():
-            with self.opencti.batch_mutation_plan() as plan:
+            with self.opencti.batch_mutation_plan(
+                execution_mode=execution_mode,
+                wait_until=wait_until,
+                backend_batch_plan=backend_batch_plan,
+            ) as plan:
                 imported, rejected = self.import_bundle(
                     data,
                     update,
@@ -571,10 +620,8 @@ class OpenCTIStix2:
                     "reject_reason": (
                         BATCH_RETRYABLE_REJECTION_REASON
                         if retryable
-                        and operation_error_code
-                        in (None, ERROR_TYPE_MISSING_REFERENCE)
-                        else operation_error_code
-                        or BATCH_OPERATION_REJECTION_REASON
+                        and operation_error_code in (None, ERROR_TYPE_MISSING_REFERENCE)
+                        else operation_error_code or BATCH_OPERATION_REJECTION_REASON
                     ),
                     "retryable": retryable,
                 }
@@ -583,6 +630,132 @@ class OpenCTIStix2:
                 failed_item["rejection_info"] = rejection_info
                 failed_items.append(failed_item)
         return successful_imports, [*rejected, *failed_items]
+
+    def _import_oversized_batch_plan_chunks(
+        self,
+        json_data: Union[str, bytes],
+        error: BatchMutationPlanTooLarge,
+        update: bool,
+        types: List,
+        work_id: str,
+        objects_max_refs: int,
+        cleanup_inconsistent_bundle: bool,
+        report_expectations: bool,
+        execution_mode: str,
+        wait_until: str,
+        backend_batch_plan: Optional[Dict],
+    ) -> Tuple[list, list]:
+        data = json.loads(json_data)
+        chunks = self.build_oversized_batch_plan_chunks(
+            data, cleanup_inconsistent_bundle, backend_batch_plan
+        )
+        if chunks is None:
+            raise error
+
+        worker_logger = self.opencti.logger_class("worker")
+        worker_logger.warning(
+            "Splitting oversized batch mutation plan into sequential chunks",
+            {
+                "bundle_id": data.get("id"),
+                "object_count": len(data.get("objects", [])),
+                "chunk_object_counts": [
+                    len(chunk_bundle["objects"]) for chunk_bundle, _ in chunks
+                ],
+                "actual_size": error.actual_size,
+                "max_size": error.max_size,
+            },
+        )
+        imported_items = []
+        rejected_items = []
+        for chunk_bundle, chunk_backend_batch_plan in chunks:
+            imported_chunk, rejected_chunk = self.import_bundle_from_json_batch(
+                json.dumps(chunk_bundle),
+                update,
+                types,
+                work_id,
+                objects_max_refs,
+                cleanup_inconsistent_bundle,
+                report_expectations,
+                execution_mode,
+                wait_until,
+                chunk_backend_batch_plan,
+                split_oversized_batch_plan=True,
+            )
+            imported_items.extend(imported_chunk)
+            rejected_items.extend(rejected_chunk)
+        return imported_items, rejected_items
+
+    @classmethod
+    def build_oversized_batch_plan_chunks(
+        cls,
+        stix_bundle: Dict,
+        cleanup_inconsistent_bundle: bool,
+        backend_batch_plan: Optional[Dict],
+    ) -> Optional[List[Tuple[Dict, Dict]]]:
+        backend_preparation = cls._prepare_bundle_from_backend_plan(
+            stix_bundle, backend_batch_plan
+        )
+        if backend_preparation is None:
+            stix2_splitter = OpenCTIStix2Splitter()
+            _, _, ordered_elements = stix2_splitter.prepare_bundle_for_import(
+                stix_bundle,
+                False,
+                cleanup_inconsistent_bundle,
+            )
+        else:
+            _, _, ordered_elements = backend_preparation
+        if len(ordered_elements) <= 1:
+            return None
+
+        split_index = len(ordered_elements) // 2
+        return [
+            (
+                cls._build_oversized_batch_plan_chunk_bundle(
+                    stix_bundle, chunk_elements
+                ),
+                cls._build_oversized_batch_plan_chunk_backend_plan(
+                    chunk_elements, backend_batch_plan
+                ),
+            )
+            for chunk_elements in (
+                ordered_elements[:split_index],
+                ordered_elements[split_index:],
+            )
+        ]
+
+    @staticmethod
+    def _build_oversized_batch_plan_chunk_bundle(
+        stix_bundle: Dict, chunk_elements: List[Dict]
+    ) -> Dict:
+        chunk_bundle = deepcopy(stix_bundle)
+        chunk_bundle["objects"] = deepcopy(chunk_elements)
+        return chunk_bundle
+
+    @classmethod
+    def _build_oversized_batch_plan_chunk_backend_plan(
+        cls, chunk_elements: List[Dict], backend_batch_plan: Optional[Dict]
+    ) -> Dict:
+        backend_execution_phases = cls._build_backend_execution_phases(
+            backend_batch_plan
+        )
+        object_ids_by_phase = {}
+        for item in chunk_elements:
+            object_id = item["id"]
+            phase = backend_execution_phases.get(object_id, item.get("nb_deps", 0))
+            if not isinstance(phase, int) or phase < 0:
+                phase = 0
+            object_ids_by_phase.setdefault(phase, []).append(object_id)
+        return {
+            "version": 1,
+            "ordered_object_ids": [item["id"] for item in chunk_elements],
+            "incompatible_object_ids": [],
+            "ignored_object_count": 0,
+            "object_normalizations": [],
+            "execution_phases": [
+                {"phase": phase, "object_ids": object_ids}
+                for phase, object_ids in sorted(object_ids_by_phase.items())
+            ],
+        }
 
     @staticmethod
     def _batch_operation_failures(execution_result: Any) -> Dict[str, Dict[str, Any]]:
@@ -3764,7 +3937,7 @@ class OpenCTIStix2:
                 sleep_jitter = round(random.uniform(10, 30), 2)
                 time.sleep(sleep_jitter)
                 processing_count += 1
-            except BatchMutationPlanUnsupported:
+            except (BatchMutationPlanTooLarge, BatchMutationPlanUnsupported):
                 raise
             except Exception as ex:  # pylint: disable=broad-except
                 error = str(ex)

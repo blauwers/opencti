@@ -5,7 +5,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pycti.api.opencti_api_batch import BatchMutationPlan, build_batch_result_token
+from pycti.api.opencti_api_batch import (
+    BatchMutationPlan,
+    BatchMutationPlanTooLarge,
+    build_batch_result_token,
+)
 from pycti.utils.opencti_stix2 import OpenCTIStix2
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
@@ -326,7 +330,7 @@ def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
     plan = MagicMock()
 
     @contextmanager
-    def batch_mutation_plan():
+    def batch_mutation_plan(*args, **kwargs):
         yield plan
 
     opencti.batch_mutation_plan.side_effect = batch_mutation_plan
@@ -351,6 +355,93 @@ def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
     )
 
 
+def test_import_item_with_retries_propagates_batch_plan_size_failures() -> None:
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+    opencti_stix2.import_item = MagicMock(side_effect=BatchMutationPlanTooLarge(2, 1))
+
+    with pytest.raises(BatchMutationPlanTooLarge):
+        opencti_stix2.import_item_with_retries(
+            {"id": "indicator--1", "type": "indicator"},
+        )
+
+
+def test_import_bundle_batch_splits_oversized_plan_into_sequential_chunks(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    executed_object_ids = []
+    executed_backend_plans = []
+
+    @contextmanager
+    def batch_mutation_plan(*args, **kwargs):
+        yield BatchMutationPlan()
+
+    def fake_import_bundle(stix_bundle, *args, **kwargs):
+        batch_plan = kwargs["batch_plan"]
+        imported = []
+        for item in stix_bundle["objects"]:
+            with batch_plan.execution_group(0, item["id"]):
+                batch_plan.capture(
+                    "mutation Record($value: String!) { record(value: $value) }",
+                    {"value": item["id"]},
+                    [],
+                )
+            imported.append({"id": item["id"], "type": item["type"]})
+        return imported, []
+
+    def execute_batch_mutation_plan(plan, **kwargs):
+        object_ids = [operation["object_id"] for operation in plan.operations]
+        executed_object_ids.append(object_ids)
+        executed_backend_plans.append(kwargs.get("backend_batch_plan"))
+        if len(object_ids) > 2:
+            raise BatchMutationPlanTooLarge(200, 100)
+        return {"data": {"batchMutationsExecute": {"operation_errors": []}}}
+
+    object_ids = [f"indicator--{index}" for index in range(4)]
+    backend_batch_plan = {
+        "version": 1,
+        "ordered_object_ids": object_ids,
+        "incompatible_object_ids": [],
+        "ignored_object_count": 0,
+        "object_normalizations": [],
+        "execution_phases": [{"phase": 0, "object_ids": object_ids}],
+    }
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    opencti.execute_batch_mutation_plan.side_effect = execute_batch_mutation_plan
+    monkeypatch.setattr(opencti_stix2, "import_bundle", fake_import_bundle)
+
+    imported, rejected = opencti_stix2.import_bundle_from_json_batch(
+        json.dumps(
+            {
+                "type": "bundle",
+                "id": "bundle--1",
+                "objects": [
+                    {"type": "indicator", "id": object_id} for object_id in object_ids
+                ],
+            }
+        ),
+        report_expectations=False,
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+        backend_batch_plan=backend_batch_plan,
+        split_oversized_batch_plan=True,
+    )
+
+    assert imported == [
+        {"id": object_id, "type": "indicator"} for object_id in object_ids
+    ]
+    assert rejected == []
+    assert executed_object_ids == [
+        object_ids,
+        object_ids[:2],
+        object_ids[2:],
+    ]
+    assert executed_backend_plans[1]["ordered_object_ids"] == object_ids[:2]
+    assert executed_backend_plans[2]["ordered_object_ids"] == object_ids[2:]
+    opencti.logger_class.return_value.warning.assert_called_once()
+
+
 def test_import_bundle_batch_returns_retryable_missing_reference_items(
     monkeypatch,
 ) -> None:
@@ -359,7 +450,7 @@ def test_import_bundle_batch_returns_retryable_missing_reference_items(
     plan = BatchMutationPlan()
 
     @contextmanager
-    def batch_mutation_plan():
+    def batch_mutation_plan(*args, **kwargs):
         yield plan
 
     def fake_import_bundle(*args, **kwargs):
@@ -414,7 +505,7 @@ def test_import_bundle_batch_returns_nonretryable_operation_failures(
     plan = BatchMutationPlan()
 
     @contextmanager
-    def batch_mutation_plan():
+    def batch_mutation_plan(*args, **kwargs):
         yield plan
 
     def fake_import_bundle(*args, **kwargs):
@@ -471,7 +562,7 @@ def test_import_bundle_batch_does_not_reuse_synthetic_cache_entries_between_plan
     plans = []
 
     @contextmanager
-    def batch_mutation_plan():
+    def batch_mutation_plan(*args, **kwargs):
         yield BatchMutationPlan()
 
     def execute_batch_mutation_plan(plan, **kwargs):

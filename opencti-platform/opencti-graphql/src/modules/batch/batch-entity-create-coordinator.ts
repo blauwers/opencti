@@ -116,6 +116,8 @@ export class BatchEntityCreateCoordinator {
 
   private readonly pendingLookups = new Map<number, PendingBatchEntityCreateLookup>();
 
+  private readonly lookupTailsByGroup = new Map<number, Promise<BatchEntityCreateLookupResolution>>();
+
   private readonly readyActivations: ReadyBatchEntityCreateActivation[] = [];
 
   private readonly sharedAbortController = new AbortController();
@@ -174,6 +176,31 @@ export class BatchEntityCreateCoordinator {
     groupId: number,
     input: BatchEntityCreateLookupInput,
     retention: BatchEntityCreateLookupRetention = 'group',
+  ): Promise<BatchEntityCreateLookupResolution> {
+    const priorLookupTail = this.lookupTailsByGroup.get(groupId);
+    const lookupPromise = priorLookupTail
+      ? priorLookupTail.then(() => this.registerLookupImmediately(groupId, input, retention))
+      : this.registerLookupImmediately(groupId, input, retention);
+    this.lookupTailsByGroup.set(groupId, lookupPromise);
+    void lookupPromise.then(
+      () => {
+        if (this.lookupTailsByGroup.get(groupId) === lookupPromise) {
+          this.lookupTailsByGroup.delete(groupId);
+        }
+      },
+      () => {
+        if (this.lookupTailsByGroup.get(groupId) === lookupPromise) {
+          this.lookupTailsByGroup.delete(groupId);
+        }
+      },
+    );
+    return lookupPromise;
+  }
+
+  private registerLookupImmediately(
+    groupId: number,
+    input: BatchEntityCreateLookupInput,
+    retention: BatchEntityCreateLookupRetention,
   ): Promise<BatchEntityCreateLookupResolution> {
     if (this.closed) {
       return Promise.reject(new Error('Batch entity create coordinator is closed'));

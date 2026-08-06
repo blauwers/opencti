@@ -1,6 +1,7 @@
 import base64
 import datetime
 import json
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -8,8 +9,9 @@ from typing import Any, Dict, List, Literal, Optional, Union
 import pika
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.exceptions import NackError, UnroutableError
-from pycti import OpenCTIApiClient, OpenCTIStix2Splitter, __version__
+from pycti import OpenCTIApiClient, OpenCTIStix2, OpenCTIStix2Splitter, __version__
 from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
+from requests import RequestException, Timeout
 
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
 BATCH_REPLAY_LIMIT = 4
@@ -208,6 +210,62 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     self.api.work.report_expectation(work_id, None)
         return "ack"
 
+    def split_and_requeue_batch_chunks(
+        self,
+        data: Dict[str, Any],
+        content: Dict[str, Any],
+        work_id: Optional[str],
+        error: Exception,
+    ) -> Optional[Literal["ack"]]:
+        chunks = OpenCTIStix2.build_oversized_batch_plan_chunks(
+            content,
+            data.get("cleanup_inconsistent_bundle", False),
+            data.get("batch_plan"),
+        )
+        if chunks is None:
+            return None
+
+        log_context = {
+            "bundle_id": content.get("id"),
+            "object_count": len(content["objects"]),
+            "chunk_object_counts": [
+                len(chunk_bundle["objects"]) for chunk_bundle, _ in chunks
+            ],
+        }
+        if isinstance(error, BatchMutationPlanTooLarge):
+            log_context["actual_size"] = error.actual_size
+            log_context["max_size"] = error.max_size
+        self.logger.warning(
+            "Splitting oversized batch mutation plan into durable child batches",
+            log_context,
+        )
+
+        with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
+            with push_pika_connection.channel() as push_channel:
+                try:
+                    push_channel.confirm_delivery()
+                except Exception as err:  # pylint: disable=broad-except
+                    self.logger.warning(str(err))
+                if work_id is not None:
+                    work_alive = self.api.work.add_expectations(work_id, len(chunks))
+                    if not work_alive:
+                        return "ack"
+                for chunk_bundle, chunk_backend_batch_plan in chunks:
+                    chunk_data = dict(data)
+                    chunk_data["split_bundles"] = False
+                    chunk_data["no_split"] = True
+                    chunk_data["batch_plan"] = chunk_backend_batch_plan
+                    self.send_bundle_to_specific_queue(
+                        push_channel,
+                        self.push_exchange,
+                        self.push_routing,
+                        chunk_data,
+                        chunk_bundle,
+                    )
+                if work_id is not None:
+                    self.api.work.report_expectation(work_id, None)
+        return "ack"
+
     def handle_message(
         self,
         body: str,
@@ -281,6 +339,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         )
                         import_kwargs["wait_until"] = data.get("batch_wait_until")
                         import_kwargs["backend_batch_plan"] = data.get("batch_plan")
+                        import_kwargs["split_oversized_batch_plan"] = False
                     try:
                         imported_items, too_large_items_bundles = import_bundle(
                             raw_content,
@@ -295,6 +354,17 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         if data.get(
                             "split_bundles"
                         ) is not True and is_batch_payload_too_large_error(err):
+                            if data.get("split_bundles") is False:
+                                durable_batch_split_result = (
+                                    self.split_and_requeue_batch_chunks(
+                                        data,
+                                        content,
+                                        work_id,
+                                        err,
+                                    )
+                                )
+                                if durable_batch_split_result is not None:
+                                    return durable_batch_split_result
                             log_context = {
                                 "bundle_id": content.get("id"),
                                 "object_count": len(content["objects"]),
@@ -464,6 +534,13 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 raise ValueError("Unsupported event type", {"event_type": event_type})
 
             return "ack"
+        except (RequestException, Timeout):
+            self.logger.error(
+                "Error executing data handling, a connection error or timeout occurred"
+            )
+            sleep_jitter = round(random.uniform(10, 30), 2)
+            time.sleep(sleep_jitter)
+            return "requeue"
         except Exception as ex:
             # Technical unmanaged exception
             self.logger.error("Error executing data handling", {"reason": str(ex)})

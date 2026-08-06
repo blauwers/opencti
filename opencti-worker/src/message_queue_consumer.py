@@ -26,11 +26,14 @@ class MessageQueueConsumer:  # pylint: disable=too-many-instance-attributes
 
     def nack_message(self, delivery_tag: int, requeue: bool) -> None:
         if self.channel.is_open:
-            self.logger.info("Message rejected", {"tag": delivery_tag})
+            self.logger.info(
+                "Message rejected", {"tag": delivery_tag, "requeue": requeue}
+            )
             self.channel.basic_nack(delivery_tag, requeue=requeue)
         else:
             self.logger.info(
-                "Message NOT rejected (channel closed)", {"tag": delivery_tag}
+                "Message NOT rejected (channel closed)",
+                {"tag": delivery_tag, "requeue": requeue},
             )
 
     def ack_message(self, delivery_tag: int) -> None:

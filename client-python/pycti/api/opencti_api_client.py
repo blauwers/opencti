@@ -94,6 +94,24 @@ from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 # allow a complete admitted batch work item to survive the queue plus execution.
 DEFAULT_BATCH_REQUESTS_TIMEOUT = 3600
 DEFAULT_BATCH_REQUESTS_MAX_PAYLOAD_SIZE = 48 * 1024 * 1024
+BATCH_MUTATION_EXECUTE_QUERY = """
+            mutation BatchMutationsExecute($operations: [BatchGraphqlOperationInput!]!, $options: BatchExecuteOptionsInput) {
+                batchMutationsExecute(operations: $operations, options: $options) {
+                    operation_count
+                    operation_errors {
+                        operation_index
+                        object_id
+                        code
+                        message
+                        retryable
+                    }
+                    execution_mode
+                    wait_until
+                    side_effect_kinds
+                    materialized
+                }
+            }
+        """
 
 # Global singleton variables for proxy certificate management
 _PROXY_CERT_BUNDLE = None
@@ -671,6 +689,7 @@ class OpenCTIApiClient:
         variables=None,
         disable_impersonate=False,
         request_timeout: Optional[int] = None,
+        fresh_session: bool = False,
     ):
         """Submit a query to the OpenCTI GraphQL API.
 
@@ -682,6 +701,9 @@ class OpenCTIApiClient:
         :type disable_impersonate: bool, optional
         :param request_timeout: timeout override for this request in seconds
         :type request_timeout: int, optional
+        :param fresh_session: send this request through a one-shot HTTP session
+            instead of the shared keep-alive pool
+        :type fresh_session: bool, optional
         :return: returns the response JSON content
         :rtype: dict
         :raises ValueError: if the API returns an error or non-200 status code
@@ -706,121 +728,206 @@ class OpenCTIApiClient:
         )
         if disable_impersonate and "opencti-applicant-id" in query_headers:
             del query_headers["opencti-applicant-id"]
-        # If yes, transform variable (file to null) and create multipart query
-        if len(files_vars) > 0:
-            multipart_data = {
-                "operations": json.dumps({"query": query, "variables": query_var})
-            }
-            # Build the multipart map
-            map_index = 0
-            file_vars = {}
-            for file_var_item in files_vars:
-                is_multiple_files = file_var_item["multiple"]
-                var_name = "variables." + file_var_item["key"]
-                if is_multiple_files:
-                    # [(var_name + "." + i)] if is_multiple_files else
-                    for _ in file_var_item["file"]:
-                        file_vars[str(map_index)] = [var_name + "." + str(map_index)]
+        request_session = requests.session() if fresh_session else self.session
+        try:
+            # If yes, transform variable (file to null) and create multipart query
+            if len(files_vars) > 0:
+                multipart_data = {
+                    "operations": json.dumps({"query": query, "variables": query_var})
+                }
+                # Build the multipart map
+                map_index = 0
+                file_vars = {}
+                for file_var_item in files_vars:
+                    is_multiple_files = file_var_item["multiple"]
+                    var_name = "variables." + file_var_item["key"]
+                    if is_multiple_files:
+                        # [(var_name + "." + i)] if is_multiple_files else
+                        for _ in file_var_item["file"]:
+                            file_vars[str(map_index)] = [
+                                var_name + "." + str(map_index)
+                            ]
+                            map_index += 1
+                    else:
+                        file_vars[str(map_index)] = [var_name]
                         map_index += 1
-                else:
-                    file_vars[str(map_index)] = [var_name]
-                    map_index += 1
-            multipart_data["map"] = json.dumps(file_vars)
-            # Add the files
-            file_index = 0
-            multipart_files = []
-            for file_var_item in files_vars:
-                files = file_var_item["file"]
-                is_multiple_files = file_var_item["multiple"]
-                if is_multiple_files:
-                    for file in files:
-                        if isinstance(file.data, str):
+                multipart_data["map"] = json.dumps(file_vars)
+                # Add the files
+                file_index = 0
+                multipart_files = []
+                for file_var_item in files_vars:
+                    files = file_var_item["file"]
+                    is_multiple_files = file_var_item["multiple"]
+                    if is_multiple_files:
+                        for file in files:
+                            if isinstance(file.data, str):
+                                file_multi = (
+                                    str(file_index),
+                                    (
+                                        file.name,
+                                        io.BytesIO(
+                                            file.data.encode("utf-8", "replace")
+                                        ),
+                                        file.mime,
+                                    ),
+                                )
+                            else:
+                                file_multi = (
+                                    str(file_index),
+                                    (file.name, file.data, file.mime),
+                                )
+                            multipart_files.append(file_multi)
+                            file_index += 1
+                    else:
+                        if isinstance(files.data, str):
                             file_multi = (
                                 str(file_index),
                                 (
-                                    file.name,
-                                    io.BytesIO(file.data.encode("utf-8", "replace")),
-                                    file.mime,
+                                    files.name,
+                                    io.BytesIO(files.data.encode("utf-8", "replace")),
+                                    files.mime,
                                 ),
                             )
                         else:
                             file_multi = (
                                 str(file_index),
-                                (file.name, file.data, file.mime),
+                                (files.name, files.data, files.mime),
                             )
                         multipart_files.append(file_multi)
                         file_index += 1
-                else:
-                    if isinstance(files.data, str):
-                        file_multi = (
-                            str(file_index),
-                            (
-                                files.name,
-                                io.BytesIO(files.data.encode("utf-8", "replace")),
-                                files.mime,
-                            ),
-                        )
-                    else:
-                        file_multi = (
-                            str(file_index),
-                            (files.name, files.data, files.mime),
-                        )
-                    multipart_files.append(file_multi)
-                    file_index += 1
-            # Send the multipart request
-            r = self.session.post(
-                self.api_url,
-                data=multipart_data,
-                files=multipart_files,
-                headers=query_headers,
-                verify=self.ssl_verify,
-                cert=self.cert,
-                proxies=self.proxies,
-                timeout=effective_request_timeout,
-            )
-        # If no
-        else:
-            r = self.session.post(
-                self.api_url,
-                json={"query": query, "variables": variables},
-                headers=query_headers,
-                verify=self.ssl_verify,
-                cert=self.cert,
-                proxies=self.proxies,
-                timeout=effective_request_timeout,
-            )
-        # Build response
-        if r.status_code == 200:
-            result = r.json()
-            if "errors" in result:
-                main_error = result["errors"][0]
-                error_name = (
-                    main_error["name"]
-                    if "name" in main_error
-                    else main_error["message"]
+                # Send the multipart request
+                r = request_session.post(
+                    self.api_url,
+                    data=multipart_data,
+                    files=multipart_files,
+                    headers=query_headers,
+                    verify=self.ssl_verify,
+                    cert=self.cert,
+                    proxies=self.proxies,
+                    timeout=effective_request_timeout,
                 )
-                error_detail = {
-                    "name": error_name,
-                    "error_message": main_error["message"],
-                }
-                meta_data = main_error["data"] if "data" in main_error else {}
-                # Prevent logging of input as bundle is logged differently
-                if meta_data.get("input") is not None:
-                    del meta_data["input"]
-                value_error = {**error_detail, **meta_data}
-                raise ValueError(value_error)
+            # If no
             else:
-                return result
-        else:
-            raise ValueError(r.text)
+                r = request_session.post(
+                    self.api_url,
+                    json={"query": query, "variables": variables},
+                    headers=query_headers,
+                    verify=self.ssl_verify,
+                    cert=self.cert,
+                    proxies=self.proxies,
+                    timeout=effective_request_timeout,
+                )
+            # Build response
+            if r.status_code == 200:
+                result = r.json()
+                if "errors" in result:
+                    main_error = result["errors"][0]
+                    error_name = (
+                        main_error["name"]
+                        if "name" in main_error
+                        else main_error["message"]
+                    )
+                    error_detail = {
+                        "name": error_name,
+                        "error_message": main_error["message"],
+                    }
+                    meta_data = main_error["data"] if "data" in main_error else {}
+                    # Prevent logging of input as bundle is logged differently
+                    if meta_data.get("input") is not None:
+                        del meta_data["input"]
+                    value_error = {**error_detail, **meta_data}
+                    raise ValueError(value_error)
+                else:
+                    return result
+            else:
+                raise ValueError(r.text)
+        finally:
+            if fresh_session:
+                request_session.close()
+
+    @staticmethod
+    def _build_batch_mutation_options(
+        execution_mode: Optional[str] = None,
+        wait_until: Optional[str] = None,
+        backend_batch_plan: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        options = {}
+        if execution_mode is not None:
+            options["execution_mode"] = execution_mode
+        if wait_until is not None:
+            options["wait_until"] = wait_until
+        if isinstance(backend_batch_plan, dict):
+            options["batch_plan"] = {
+                "version": backend_batch_plan.get("version"),
+                "execution_phases": backend_batch_plan.get("execution_phases"),
+            }
+        return options or None
+
+    @classmethod
+    def _build_batch_mutation_request_payload(
+        cls,
+        operations: list,
+        execution_mode: Optional[str] = None,
+        wait_until: Optional[str] = None,
+        backend_batch_plan: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "query": BATCH_MUTATION_EXECUTE_QUERY,
+            "variables": {
+                "operations": operations,
+                "options": cls._build_batch_mutation_options(
+                    execution_mode, wait_until, backend_batch_plan
+                ),
+            },
+        }
+
+    @classmethod
+    def _batch_mutation_request_payload_size(
+        cls,
+        operations: list,
+        execution_mode: Optional[str] = None,
+        wait_until: Optional[str] = None,
+        backend_batch_plan: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        return len(
+            json.dumps(
+                cls._build_batch_mutation_request_payload(
+                    operations, execution_mode, wait_until, backend_batch_plan
+                )
+            ).encode("utf-8")
+        )
 
     @contextmanager
-    def batch_mutation_plan(self):
+    def batch_mutation_plan(
+        self,
+        execution_mode: Optional[str] = None,
+        wait_until: Optional[str] = None,
+        backend_batch_plan: Optional[Dict[str, Any]] = None,
+    ):
         """Capture GraphQL mutations so they can be executed in one backend batch."""
         if self._batch_mutation_plan is not None:
             raise ValueError("A batch mutation plan is already active")
+        serialized_request_overhead_size = (
+            self._batch_mutation_request_payload_size(
+                [], execution_mode, wait_until, backend_batch_plan
+            )
+            - 2
+        )
+        max_serialized_operations_size = None
+        if (
+            isinstance(self.session_batch_requests_max_payload_size, int)
+            and not isinstance(self.session_batch_requests_max_payload_size, bool)
+            and self.session_batch_requests_max_payload_size > 0
+        ):
+            max_serialized_operations_size = max(
+                self.session_batch_requests_max_payload_size
+                - serialized_request_overhead_size,
+                1,
+            )
         plan = BatchMutationPlan(
-            max_serialized_operations_size=self.session_batch_requests_max_payload_size
+            max_serialized_operations_size=max_serialized_operations_size,
+            serialized_request_overhead_size=serialized_request_overhead_size,
+            max_serialized_request_size=self.session_batch_requests_max_payload_size,
         )
         self._batch_mutation_plan = plan
         try:
@@ -838,41 +945,11 @@ class OpenCTIApiClient:
         """Execute a captured mutation plan through the backend batch endpoint."""
         if len(plan.operations) == 0:
             return None
-        mutation = """
-            mutation BatchMutationsExecute($operations: [BatchGraphqlOperationInput!]!, $options: BatchExecuteOptionsInput) {
-                batchMutationsExecute(operations: $operations, options: $options) {
-                    operation_count
-                    operation_errors {
-                        operation_index
-                        object_id
-                        code
-                        message
-                        retryable
-                    }
-                    execution_mode
-                    wait_until
-                    side_effect_kinds
-                    materialized
-                }
-            }
-        """
-        options = {}
-        if execution_mode is not None:
-            options["execution_mode"] = execution_mode
-        if wait_until is not None:
-            options["wait_until"] = wait_until
-        if isinstance(backend_batch_plan, dict):
-            options["batch_plan"] = {
-                "version": backend_batch_plan.get("version"),
-                "execution_phases": backend_batch_plan.get("execution_phases"),
-            }
-        variables = {
-            "operations": plan.operations,
-            "options": options or None,
-        }
-        request_payload_size = len(
-            json.dumps({"query": mutation, "variables": variables}).encode("utf-8")
+        request_payload = self._build_batch_mutation_request_payload(
+            plan.operations, execution_mode, wait_until, backend_batch_plan
         )
+        variables = request_payload["variables"]
+        request_payload_size = len(json.dumps(request_payload).encode("utf-8"))
         if (
             isinstance(self.session_batch_requests_max_payload_size, int)
             and not isinstance(self.session_batch_requests_max_payload_size, bool)
@@ -883,9 +960,10 @@ class OpenCTIApiClient:
                 request_payload_size, self.session_batch_requests_max_payload_size
             )
         return self.query(
-            mutation,
+            BATCH_MUTATION_EXECUTE_QUERY,
             variables,
             request_timeout=self.session_batch_requests_timeout,
+            fresh_session=True,
         )
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
