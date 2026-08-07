@@ -1,9 +1,17 @@
-export type BatchExecutionAdmissionRelease = () => void;
+export interface BatchExecutionAdmissionRelease {
+  (): void;
+  downgrade: (weight: number) => void;
+}
 
 type BatchExecutionAdmissionWaiter = {
   resolve: (release: BatchExecutionAdmissionRelease) => void;
   sequence: number;
   weight: number;
+};
+
+type BatchExecutionAdmissionReservation = {
+  currentWeight: number;
+  initialWeight: number;
 };
 
 export interface BatchExecutionAdmissionSnapshot {
@@ -28,7 +36,7 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
   let activeExecutions = 0;
   let activeWeight = 0;
   let nextSequence = 0;
-  const activeWeightsBySequence = new Map<number, number>();
+  const activeReservationsBySequence = new Map<number, BatchExecutionAdmissionReservation>();
   const waiters: BatchExecutionAdmissionWaiter[] = [];
 
   const validateWeight = (weight: number): void => {
@@ -37,24 +45,45 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
     }
   };
 
-  const buildRelease = (sequence: number, weight: number): BatchExecutionAdmissionRelease => {
+  const buildRelease = (sequence: number, initialWeight: number): BatchExecutionAdmissionRelease => {
     let released = false;
-    return () => {
+    let weight = initialWeight;
+    const release = (() => {
       if (released) {
         return;
       }
       released = true;
       activeExecutions -= 1;
       activeWeight -= weight;
-      activeWeightsBySequence.delete(sequence);
+      activeReservationsBySequence.delete(sequence);
+      drainWaiters();
+    }) as BatchExecutionAdmissionRelease;
+    release.downgrade = (nextWeight: number) => {
+      validateWeight(nextWeight);
+      if (released || nextWeight === weight) {
+        return;
+      }
+      if (nextWeight > weight) {
+        throw new Error('Batch execution admission weight can only be downgraded');
+      }
+      activeWeight -= weight - nextWeight;
+      weight = nextWeight;
+      const reservation = activeReservationsBySequence.get(sequence);
+      if (reservation) {
+        reservation.currentWeight = weight;
+      }
       drainWaiters();
     };
+    return release;
   };
 
   const admitExecution = (sequence: number, weight: number): BatchExecutionAdmissionRelease => {
     activeExecutions += 1;
     activeWeight += weight;
-    activeWeightsBySequence.set(sequence, weight);
+    activeReservationsBySequence.set(sequence, {
+      currentWeight: weight,
+      initialWeight: weight,
+    });
     return buildRelease(sequence, weight);
   };
 
@@ -65,12 +94,22 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
 
   const getActiveBypassWeight = (headSequence: number): number => {
     let activeBypassWeight = 0;
-    for (const [sequence, weight] of activeWeightsBySequence.entries()) {
+    for (const [sequence, reservation] of activeReservationsBySequence.entries()) {
       if (sequence > headSequence) {
-        activeBypassWeight += weight;
+        activeBypassWeight += reservation.currentWeight;
       }
     }
     return activeBypassWeight;
+  };
+
+  const getOlderReleasedWeight = (headSequence: number): number => {
+    let olderReleasedWeight = 0;
+    for (const [sequence, reservation] of activeReservationsBySequence.entries()) {
+      if (sequence < headSequence) {
+        olderReleasedWeight += reservation.initialWeight - reservation.currentWeight;
+      }
+    }
+    return olderReleasedWeight;
   };
 
   const findNextWaiterIndex = (): number => {
@@ -83,11 +122,14 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
       return 0;
     }
 
-    // A blocked head may allow younger work through only while enough capacity
-    // stays reserved for it once all older active work finishes. Only active
-    // bypassed work consumes that reserve, so short requests can keep flowing
-    // without starving the oldest heavy batch.
-    const remainingBypassWeight = maxActiveExecutions - headWaiter.weight - getActiveBypassWeight(headWaiter.sequence);
+    // A blocked head may allow younger work through only when it would have
+    // fit beside the head after older work finishes, plus capacity explicitly
+    // released by older downgraded executions. This keeps the materialization
+    // lane flowing without letting ordinary idle capacity delay a full head.
+    const remainingBypassWeight = maxActiveExecutions
+      - headWaiter.weight
+      + getOlderReleasedWeight(headWaiter.sequence)
+      - getActiveBypassWeight(headWaiter.sequence);
     if (remainingBypassWeight < 1) {
       return -1;
     }

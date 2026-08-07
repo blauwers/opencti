@@ -96,6 +96,7 @@ const BATCH_GRAPHQL_DEFAULT_MAX_ACTIVE_GROUPS = 64;
 const BATCH_GRAPHQL_DEFAULT_MAX_COORDINATED_GROUPS_PER_WAVE = 1024;
 const BATCH_GRAPHQL_ADMISSION_OPERATIONS_PER_WEIGHT = 2000;
 const BATCH_GRAPHQL_ADMISSION_BYTES_PER_WEIGHT = 5 * 1024 * 1024;
+const BATCH_GRAPHQL_MATERIALIZATION_RELEASED_WEIGHT = 1;
 const BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE = '[BATCH] GraphQL execution admission';
 const BATCH_GRAPHQL_PHASE_LOG_MESSAGE = '[BATCH] GraphQL operation phase';
 const BATCH_GRAPHQL_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
@@ -1189,6 +1190,7 @@ export const executeBatchGraphqlOperations = async (
   }
   const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(admissionStats.weight);
   const admittedAt = Date.now();
+  const materializationAdmissionWeight = Math.max(1, admissionStats.weight - BATCH_GRAPHQL_MATERIALIZATION_RELEASED_WEIGHT);
   if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
     logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
       event: 'admitted',
@@ -1217,6 +1219,26 @@ export const executeBatchGraphqlOperations = async (
       ),
     }], {
       ...options,
+      onMaterializationStarted: async () => {
+        await options.onMaterializationStarted?.();
+        if (materializationAdmissionWeight >= admissionStats.weight) {
+          return;
+        }
+        releaseAdmission.downgrade(materializationAdmissionWeight);
+        if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+          logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+            event: 'downgraded',
+            ...admissionMetadata,
+            operation_count: admissionStats.operationCount,
+            encoded_bytes: admissionStats.encodedBytes,
+            admission_weight: admissionStats.weight,
+            materialization_admission_weight: materializationAdmissionWeight,
+            admission_wait_ms: admittedAt - admissionRequestedAt,
+            execution_time_ms: Date.now() - admittedAt,
+            admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+          });
+        }
+      },
       performanceTraceId: executionId,
     });
     return {

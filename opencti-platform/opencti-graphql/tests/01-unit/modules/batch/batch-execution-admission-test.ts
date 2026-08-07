@@ -266,6 +266,108 @@ describe('batch execution admission gate', () => {
     releaseThird();
   });
 
+  it('limits downgraded bypass to explicitly released weight', async () => {
+    const gate = createBatchExecutionAdmissionGate(4);
+    const releaseFirst = await gate.acquire(3);
+    const admitted: string[] = [];
+    const secondReleasePromise = gate.acquire(4).then((release) => {
+      admitted.push('second');
+      return release;
+    });
+    const thirdReleasePromise = gate.acquire(2).then((release) => {
+      admitted.push('third');
+      return release;
+    });
+    const fourthReleasePromise = gate.acquire(1).then((release) => {
+      admitted.push('fourth');
+      return release;
+    });
+
+    releaseFirst.downgrade(2);
+    const releaseFourth = await fourthReleasePromise;
+    expect(admitted).toEqual(['fourth']);
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 2,
+      activeWeight: 3,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 2,
+      waitingWeight: 6,
+    });
+
+    releaseFirst();
+    await Promise.resolve();
+    expect(admitted).toEqual(['fourth']);
+
+    releaseFourth();
+    const releaseSecond = await secondReleasePromise;
+    expect(admitted).toEqual(['fourth', 'second']);
+
+    releaseSecond();
+    const releaseThird = await thirdReleasePromise;
+    expect(admitted).toEqual(['fourth', 'second', 'third']);
+
+    releaseThird();
+  });
+
+  it('keeps one unit of small work flowing after an active execution downgrades', async () => {
+    const gate = createBatchExecutionAdmissionGate(4);
+    const releaseFirst = await gate.acquire(4);
+    const admitted: string[] = [];
+    const secondReleasePromise = gate.acquire(4).then((release) => {
+      admitted.push('second');
+      return release;
+    });
+    const thirdReleasePromise = gate.acquire(1).then((release) => {
+      admitted.push('third');
+      return release;
+    });
+
+    await Promise.resolve();
+    expect(admitted).toEqual([]);
+
+    releaseFirst.downgrade(3);
+    const releaseThird = await thirdReleasePromise;
+    expect(admitted).toEqual(['third']);
+    expect(gate.snapshot()).toEqual({
+      activeExecutions: 2,
+      activeWeight: 4,
+      maxActiveExecutions: 4,
+      maxActiveWeight: 4,
+      waitingExecutions: 1,
+      waitingWeight: 4,
+    });
+
+    releaseThird();
+    const fourthReleasePromise = gate.acquire(1).then((release) => {
+      admitted.push('fourth');
+      return release;
+    });
+    const releaseFourth = await fourthReleasePromise;
+    expect(admitted).toEqual(['third', 'fourth']);
+
+    releaseFirst();
+    await Promise.resolve();
+    expect(admitted).toEqual(['third', 'fourth']);
+
+    releaseFourth();
+    const releaseSecond = await secondReleasePromise;
+    expect(admitted).toEqual(['third', 'fourth', 'second']);
+
+    releaseSecond();
+  });
+
+  it('rejects admission weight increases after a downgrade', async () => {
+    const gate = createBatchExecutionAdmissionGate(4);
+    const release = await gate.acquire(3);
+
+    release.downgrade(2);
+    expect(gate.snapshot().activeWeight).toBe(2);
+    expect(() => release.downgrade(3)).toThrow('Batch execution admission weight can only be downgraded');
+
+    release();
+  });
+
   it('rejects weights that can never fit in the gate', async () => {
     const gate = createBatchExecutionAdmissionGate(2);
 

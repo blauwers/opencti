@@ -45,6 +45,7 @@ export interface BatchMutation<T> {
 
 export interface BatchExecutionOptions {
   executionMode?: BatchExecutionMode;
+  onMaterializationStarted?: () => Promise<void> | void;
   performanceTraceId?: string;
   waitUntil?: BatchWaitUntil | string;
 }
@@ -474,10 +475,13 @@ export const executeBatchMutations = async <T>(
       const finalizersStartedAt = Date.now();
       await runFinalizers(state);
       logBatchExecutionPhase(state, 'run_finalizers', Date.now() - finalizersStartedAt);
+      const hasSideEffects = state.sideEffects.length > 0;
+      if (hasSideEffects) {
+        await options.onMaterializationStarted?.();
+      }
       const materializationStartedAt = Date.now();
       const materialization = runWithBatchExecutionState(state, () => materializeSideEffects(state))
         .finally(() => logBatchExecutionPhase(state, 'materialize_side_effects', Date.now() - materializationStartedAt));
-      const hasSideEffects = state.sideEffects.length > 0;
       if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
         await materialization;
       } else {

@@ -532,6 +532,32 @@ describe('batch executor', () => {
     expect(calls).toEqual(['write', 'side-effect-started', 'side-effect-complete']);
   });
 
+  it('notifies callers when side-effect materialization starts', async () => {
+    const calls: string[] = [];
+
+    await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          calls.push('write');
+          return 'result';
+        },
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push('side-effect');
+          },
+        }],
+      },
+    ], {
+      onMaterializationStarted: () => {
+        calls.push('materialization-started');
+      },
+    });
+
+    expect(calls).toEqual(['write', 'materialization-started', 'side-effect']);
+  });
+
   it('does not reuse a completed batch scope in detached work', async () => {
     let releaseDetached: (() => void) | undefined;
     const detachedGate = new Promise<void>((resolve) => {
