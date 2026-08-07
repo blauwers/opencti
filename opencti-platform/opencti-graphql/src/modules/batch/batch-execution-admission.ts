@@ -1,8 +1,8 @@
 export type BatchExecutionAdmissionRelease = () => void;
 
 type BatchExecutionAdmissionWaiter = {
-  bypassedWeight: number;
   resolve: (release: BatchExecutionAdmissionRelease) => void;
+  sequence: number;
   weight: number;
 };
 
@@ -27,6 +27,8 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
 
   let activeExecutions = 0;
   let activeWeight = 0;
+  let nextSequence = 0;
+  const activeWeightsBySequence = new Map<number, number>();
   const waiters: BatchExecutionAdmissionWaiter[] = [];
 
   const validateWeight = (weight: number): void => {
@@ -35,7 +37,7 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
     }
   };
 
-  const buildRelease = (weight: number): BatchExecutionAdmissionRelease => {
+  const buildRelease = (sequence: number, weight: number): BatchExecutionAdmissionRelease => {
     let released = false;
     return () => {
       if (released) {
@@ -44,15 +46,31 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
       released = true;
       activeExecutions -= 1;
       activeWeight -= weight;
+      activeWeightsBySequence.delete(sequence);
       drainWaiters();
     };
   };
 
+  const admitExecution = (sequence: number, weight: number): BatchExecutionAdmissionRelease => {
+    activeExecutions += 1;
+    activeWeight += weight;
+    activeWeightsBySequence.set(sequence, weight);
+    return buildRelease(sequence, weight);
+  };
+
   const admitWaiter = (waiterIndex: number): void => {
     const [waiter] = waiters.splice(waiterIndex, 1);
-    activeExecutions += 1;
-    activeWeight += waiter.weight;
-    waiter.resolve(buildRelease(waiter.weight));
+    waiter.resolve(admitExecution(waiter.sequence, waiter.weight));
+  };
+
+  const getActiveBypassWeight = (headSequence: number): number => {
+    let activeBypassWeight = 0;
+    for (const [sequence, weight] of activeWeightsBySequence.entries()) {
+      if (sequence > headSequence) {
+        activeBypassWeight += weight;
+      }
+    }
+    return activeBypassWeight;
   };
 
   const findNextWaiterIndex = (): number => {
@@ -65,11 +83,11 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
       return 0;
     }
 
-    // A blocked heavy head may allow a bounded amount of smaller work through
-    // so the gate does not leave capacity idle indefinitely. The budget stays
-    // attached to the head waiter, which prevents continuous small requests
-    // from starving the oldest heavy batch.
-    const remainingBypassWeight = headWaiter.weight - headWaiter.bypassedWeight;
+    // A blocked head may allow younger work through only while enough capacity
+    // stays reserved for it once all older active work finishes. Only active
+    // bypassed work consumes that reserve, so short requests can keep flowing
+    // without starving the oldest heavy batch.
+    const remainingBypassWeight = maxActiveExecutions - headWaiter.weight - getActiveBypassWeight(headWaiter.sequence);
     if (remainingBypassWeight < 1) {
       return -1;
     }
@@ -86,9 +104,6 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
       if (waiterIndex < 0) {
         return;
       }
-      if (waiterIndex > 0) {
-        waiters[0].bypassedWeight += waiters[waiterIndex].weight;
-      }
       admitWaiter(waiterIndex);
     }
   };
@@ -96,13 +111,13 @@ export const createBatchExecutionAdmissionGate = (maxActiveExecutions: number): 
   return {
     acquire: async (weight = 1) => {
       validateWeight(weight);
+      nextSequence += 1;
+      const sequence = nextSequence;
       if (waiters.length === 0 && activeWeight + weight <= maxActiveExecutions) {
-        activeExecutions += 1;
-        activeWeight += weight;
-        return buildRelease(weight);
+        return admitExecution(sequence, weight);
       }
       return new Promise<BatchExecutionAdmissionRelease>((resolve) => {
-        waiters.push({ bypassedWeight: 0, resolve, weight });
+        waiters.push({ resolve, sequence, weight });
         drainWaiters();
       });
     },
