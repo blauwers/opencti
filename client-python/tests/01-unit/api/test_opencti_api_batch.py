@@ -220,6 +220,7 @@ def test_batch_mutation_plan_uses_one_shot_http_session(monkeypatch):
 
     assert result == {"data": {"batchMutationsExecute": {}}}
     shared_session.post.assert_not_called()
+    shared_session.close.assert_called_once()
     fresh_session.post.assert_called_once()
     fresh_session.close.assert_called_once()
 

@@ -959,12 +959,17 @@ class OpenCTIApiClient:
             raise BatchMutationPlanTooLarge(
                 request_payload_size, self.session_batch_requests_max_payload_size
             )
-        return self.query(
-            BATCH_MUTATION_EXECUTE_QUERY,
-            variables,
-            request_timeout=self.session_batch_requests_timeout,
-            fresh_session=True,
-        )
+        try:
+            return self.query(
+                BATCH_MUTATION_EXECUTE_QUERY,
+                variables,
+                request_timeout=self.session_batch_requests_timeout,
+                fresh_session=True,
+            )
+        finally:
+            # A long batch can leave the shared keep-alive pool idle past the
+            # server timeout. Clear it before follow-up work/report mutations.
+            self.session.close()
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
         """Get file from the OpenCTI API.
