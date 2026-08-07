@@ -73,6 +73,7 @@ type PendingBatchEntityCreatePhysicalLock = {
 };
 
 type BatchEntityCreateCoordinatorScope = {
+  active: boolean;
   coordinator: BatchEntityCreateCoordinator;
   groupId: number;
 };
@@ -1001,39 +1002,50 @@ export const runWithBatchEntityCreateCoordinator = async <T>(
   groupId: number,
   execute: () => Promise<T>,
 ): Promise<T> => {
-  return batchEntityCreateCoordinatorStorage.run({ coordinator, groupId }, async () => {
+  const scope: BatchEntityCreateCoordinatorScope = {
+    active: true,
+    coordinator,
+    groupId,
+  };
+  return batchEntityCreateCoordinatorStorage.run(scope, async () => {
     try {
       return await execute();
     } finally {
+      scope.active = false;
       coordinator.completeGroup(groupId);
     }
   });
 };
 
+const getActiveBatchEntityCreateCoordinatorScope = (): BatchEntityCreateCoordinatorScope | undefined => {
+  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  return scope?.active ? scope : undefined;
+};
+
 export const resolveBatchEntityCreateLookup = (
   input: BatchEntityCreateLookupInput,
 ): Promise<BatchEntityCreateLookupResolution> | undefined => {
-  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  const scope = getActiveBatchEntityCreateCoordinatorScope();
   return scope?.coordinator.registerLookup(scope.groupId, input);
 };
 
 export const resolveBatchParticipantLock = (
   input: BatchParticipantLockInput,
 ): Promise<BatchEntityCreateLock> | undefined => {
-  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  const scope = getActiveBatchEntityCreateCoordinatorScope();
   return scope?.coordinator.acquireParticipantLock(scope.groupId, input);
 };
 
 export const getBatchEntityCreateCoordinatorGroupId = (): number | undefined => {
-  return batchEntityCreateCoordinatorStorage.getStore()?.groupId;
+  return getActiveBatchEntityCreateCoordinatorScope()?.groupId;
 };
 
 export const waitForBatchEntityCreateCoordinatorPromise = <T>(promise: Promise<T>): Promise<T> | undefined => {
-  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  const scope = getActiveBatchEntityCreateCoordinatorScope();
   return scope?.coordinator.waitForPromise(scope.groupId, promise);
 };
 
 export const getBatchEntityCreateCoordinatorHeldParticipantIds = (draftId?: string): string[] => {
-  const scope = batchEntityCreateCoordinatorStorage.getStore();
+  const scope = getActiveBatchEntityCreateCoordinatorScope();
   return scope?.coordinator.getHeldParticipantIds(scope.groupId, draftId) ?? [];
 };

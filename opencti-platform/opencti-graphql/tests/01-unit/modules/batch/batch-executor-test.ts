@@ -531,4 +531,91 @@ describe('batch executor', () => {
 
     expect(calls).toEqual(['write', 'side-effect-started', 'side-effect-complete']);
   });
+
+  it('does not reuse a completed batch scope in detached work', async () => {
+    let releaseDetached: (() => void) | undefined;
+    const detachedGate = new Promise<void>((resolve) => {
+      releaseDetached = resolve;
+    });
+    let resolveDetached: ((value: { committed: boolean; writeBoundaryOpen: boolean }) => void) | undefined;
+    const detachedResult = new Promise<{ committed: boolean; writeBoundaryOpen: boolean }>((resolve) => {
+      resolveDetached = resolve;
+    });
+
+    await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        void detachedGate.then(async () => {
+          let committed = false;
+          const writeBoundaryOpen = await executeSingleBatchMutation({
+            kind: BatchMutationKind.UpdateAttribute,
+            executeWrite: async () => {
+              registerBatchCommitter({
+                key: 'detached-commit',
+                execute: async () => {
+                  committed = true;
+                },
+              });
+              return isBatchWriteBoundaryOpen();
+            },
+          });
+          resolveDetached?.({ committed, writeBoundaryOpen });
+        });
+        return 'outer-result';
+      },
+    });
+
+    releaseDetached?.();
+    await expect(detachedResult).resolves.toEqual({
+      committed: true,
+      writeBoundaryOpen: true,
+    });
+  });
+
+  it('keeps deferred materialization in an active batch scope', async () => {
+    const calls: string[] = [];
+    let releaseMaterialization: (() => void) | undefined;
+    const materializationGate = new Promise<void>((resolve) => {
+      releaseMaterialization = resolve;
+    });
+
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push(`side-effect:${isBatchWriteBoundaryOpen()}`);
+            await materializationGate;
+            await executeSingleBatchMutation({
+              kind: BatchMutationKind.UpdateAttribute,
+              executeWrite: async () => {
+                calls.push(`nested-write:${isBatchWriteBoundaryOpen()}`);
+                return 'nested-result';
+              },
+              sideEffects: () => [{
+                kind: BatchSideEffectKind.WorkLifecycle,
+                execute: async () => {
+                  calls.push('nested-side-effect');
+                },
+              }],
+            });
+          },
+        }],
+      },
+    ], { waitUntil: BatchWaitUntil.Committed });
+
+    expect(execution.materialized).toBe(false);
+    expect(calls).toEqual(['side-effect:false']);
+
+    releaseMaterialization?.();
+    await waitForPendingBatchMaterializations();
+
+    expect(calls).toEqual([
+      'side-effect:false',
+      'nested-write:false',
+      'nested-side-effect',
+    ]);
+  });
 });

@@ -73,6 +73,11 @@ interface BatchExecutionState {
   writeBoundaryOpen: boolean;
 }
 
+interface BatchExecutionScope {
+  active: boolean;
+  state: BatchExecutionState;
+}
+
 interface BatchSideEffectMaterializationState {
   active: boolean;
   activeExecutionsByKind: Map<BatchSideEffectKind, Set<BatchSideEffectActiveExecution>>;
@@ -93,7 +98,7 @@ interface BatchSideEffectActiveExecution {
 
 type BatchSideEffectMaterializationStage = 'ordered' | 'auto_enrichment' | 'complete';
 
-const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionState>();
+const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionScope>();
 const pendingMaterializations = new Set<Promise<void>>();
 const BATCH_EXECUTION_PERFORMANCE_LOG = booleanConf('app:performance_logger', false);
 const BATCH_EXECUTION_LOG_MESSAGE = '[BATCH] Execution phase';
@@ -106,6 +111,28 @@ const BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS = Number.isInteger(configure
   ? configuredBatchMaxActiveAutoEnrichments
   : BATCH_SIDE_EFFECT_DEFAULT_MAX_ACTIVE_AUTO_ENRICHMENTS;
 const batchAutoEnrichmentMaterializationGate = createBatchExecutionAdmissionGate(BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS);
+
+const getActiveBatchExecutionState = (): BatchExecutionState | undefined => {
+  const scope = batchExecutionStorage.getStore();
+  return scope?.active ? scope.state : undefined;
+};
+
+const runWithBatchExecutionState = async <T>(
+  state: BatchExecutionState,
+  execute: () => Promise<T>,
+): Promise<T> => {
+  const scope: BatchExecutionScope = {
+    active: true,
+    state,
+  };
+  return batchExecutionStorage.run(scope, async () => {
+    try {
+      return await execute();
+    } finally {
+      scope.active = false;
+    }
+  });
+};
 
 const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
   executionMode: options.executionMode ?? BatchExecutionMode.Bulk,
@@ -306,23 +333,23 @@ const runFinalizers = async (state: BatchExecutionState) => {
 };
 
 export const hasActiveBatchExecution = (): boolean => {
-  return batchExecutionStorage.getStore() !== undefined;
+  return getActiveBatchExecutionState() !== undefined;
 };
 
 export const getBatchExecutionScope = (): object | undefined => {
-  return batchExecutionStorage.getStore();
+  return getActiveBatchExecutionState();
 };
 
 export const isBatchWriteBoundaryOpen = (): boolean => {
-  return batchExecutionStorage.getStore()?.writeBoundaryOpen === true;
+  return getActiveBatchExecutionState()?.writeBoundaryOpen === true;
 };
 
 export const getBatchExecutionMetadata = <T>(key: string): T | undefined => {
-  return batchExecutionStorage.getStore()?.metadata.get(key) as T | undefined;
+  return getActiveBatchExecutionState()?.metadata.get(key) as T | undefined;
 };
 
 export const setBatchExecutionMetadata = <T>(key: string, value: T): void => {
-  const state = batchExecutionStorage.getStore();
+  const state = getActiveBatchExecutionState();
   if (state) {
     state.metadata.set(key, value);
   }
@@ -367,7 +394,7 @@ const logBatchExecutionPhase = (
 };
 
 export const registerBatchCommitter = (committer: BatchCommitter): boolean => {
-  const state = batchExecutionStorage.getStore();
+  const state = getActiveBatchExecutionState();
   if (!state) {
     return false;
   }
@@ -376,7 +403,7 @@ export const registerBatchCommitter = (committer: BatchCommitter): boolean => {
 };
 
 export const registerBatchFinalizer = (finalizer: BatchFinalizer): boolean => {
-  const state = batchExecutionStorage.getStore();
+  const state = getActiveBatchExecutionState();
   if (!state) {
     return false;
   }
@@ -385,7 +412,7 @@ export const registerBatchFinalizer = (finalizer: BatchFinalizer): boolean => {
 };
 
 export const registerBatchSideEffect = async (sideEffect: BatchSideEffect): Promise<void> => {
-  const state = batchExecutionStorage.getStore();
+  const state = getActiveBatchExecutionState();
   if (state) {
     await scheduleBatchSideEffect(state, sideEffect);
     return;
@@ -409,7 +436,7 @@ export const executeBatchMutations = async <T>(
   options: BatchExecutionOptions = {},
 ): Promise<BatchExecutionResult<T>> => {
   const normalizedOptions = normalizeBatchExecutionOptions(options);
-  const existingState = batchExecutionStorage.getStore();
+  const existingState = getActiveBatchExecutionState();
   if (existingState) {
     const results = await executeWrites(mutations, existingState);
     return {
@@ -432,7 +459,7 @@ export const executeBatchMutations = async <T>(
   if (options.performanceTraceId) {
     state.metadata.set(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY, options.performanceTraceId);
   }
-  return batchExecutionStorage.run(state, async () => {
+  return runWithBatchExecutionState(state, async () => {
     const executionStartedAt = Date.now();
     try {
       const writesStartedAt = Date.now();
@@ -448,7 +475,7 @@ export const executeBatchMutations = async <T>(
       await runFinalizers(state);
       logBatchExecutionPhase(state, 'run_finalizers', Date.now() - finalizersStartedAt);
       const materializationStartedAt = Date.now();
-      const materialization = materializeSideEffects(state)
+      const materialization = runWithBatchExecutionState(state, () => materializeSideEffects(state))
         .finally(() => logBatchExecutionPhase(state, 'materialize_side_effects', Date.now() - materializationStartedAt));
       const hasSideEffects = state.sideEffects.length > 0;
       if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {

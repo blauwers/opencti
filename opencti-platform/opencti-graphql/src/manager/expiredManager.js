@@ -1,5 +1,4 @@
 import { clearIntervalAsync, setIntervalAsync } from 'set-interval-async/fixed';
-import { Promise } from 'bluebird';
 import { lockResources } from '../lock/master-lock';
 import { elList, ES_MAX_CONCURRENCY } from '../database/engine';
 import { READ_DATA_INDICES, READ_INDEX_INTERNAL_OBJECTS } from '../database/utils';
@@ -11,6 +10,7 @@ import { TYPE_LOCK_ERROR } from '../config/errors';
 import { ENTITY_TYPE_USER } from '../schema/internalObject';
 import { userEditField } from '../domain/user';
 import { ENTITY_TYPE_INDICATOR } from '../modules/indicator/indicator-types';
+import { promiseMap } from '../utils/promiseUtils';
 
 // Expired manager responsible to monitor expired elements
 // In order to change the revoked attribute to true
@@ -36,7 +36,7 @@ const revokedInstances = async (context) => {
       }
       await patchAttribute(context, EXPIRATION_MANAGER_USER, element.id, element.entity_type, patch);
     };
-    await Promise.map(elements, concurrentUpdate, { concurrency: ES_MAX_CONCURRENCY });
+    await promiseMap(elements, concurrentUpdate, ES_MAX_CONCURRENCY);
   };
   const filters = {
     mode: 'and',
@@ -58,7 +58,7 @@ const expiredAccounts = async (context) => {
       const inputs = [{ key: 'account_status', value: [ACCOUNT_STATUS_EXPIRED] }];
       await userEditField(context, EXPIRATION_MANAGER_USER, element.internal_id, inputs);
     };
-    await Promise.map(elements, concurrentUpdate, { concurrency: ES_MAX_CONCURRENCY });
+    await promiseMap(elements, concurrentUpdate, ES_MAX_CONCURRENCY);
   };
   const filters = {
     mode: 'and',

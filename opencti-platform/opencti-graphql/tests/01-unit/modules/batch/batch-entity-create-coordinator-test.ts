@@ -6,6 +6,7 @@ import { executeBatchCoalescedEntityCreate } from '../../../../src/modules/batch
 import { getBatchRetainedLockIds } from '../../../../src/modules/batch/batch-lock-retention';
 import {
   BatchEntityCreateCoordinator,
+  getBatchEntityCreateCoordinatorGroupId,
   getBatchEntityCreateCoordinatorHeldParticipantIds,
   resolveBatchEntityCreateLookup,
   resolveBatchParticipantLock,
@@ -853,5 +854,47 @@ describe('batch entity create coordinator', () => {
     expect(lockResources).toHaveBeenNthCalledWith(2, ['relationship--internal-two'], { draftId: undefined });
     expect(lockResources).toHaveBeenNthCalledWith(3, ['relationship--internal-two'], { draftId: undefined });
     expect(lockResources).toHaveBeenNthCalledWith(4, ['relationship--internal-one'], { draftId: undefined });
+  });
+
+  it('ignores coordinator context inherited by detached work after a group completes', async () => {
+    vi.mocked(internalFindByIds).mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0]);
+    let releaseDetached: (() => void) | undefined;
+    const detachedGate = new Promise<void>((resolve) => {
+      releaseDetached = resolve;
+    });
+    let resolveDetached: ((value: {
+      groupId: number | undefined;
+      lockPromise: ReturnType<typeof resolveBatchParticipantLock>;
+    }) => void) | undefined;
+    const detachedResult = new Promise<{
+      groupId: number | undefined;
+      lockPromise: ReturnType<typeof resolveBatchParticipantLock>;
+    }>((resolve) => {
+      resolveDetached = resolve;
+    });
+
+    await runWithBatchEntityCreateCoordinator(coordinator, 0, async () => {
+      void detachedGate.then(() => {
+        resolveDetached?.({
+          groupId: getBatchEntityCreateCoordinatorGroupId(),
+          lockPromise: resolveBatchParticipantLock({
+            participantIds: ['relationship--detached'],
+          }),
+        });
+      });
+    });
+
+    releaseDetached?.();
+    const { groupId, lockPromise } = await detachedResult;
+    if (lockPromise) {
+      const lock = await lockPromise;
+      await lock.unlock();
+    }
+    await coordinator.close();
+
+    expect(groupId).toBeUndefined();
+    expect(lockPromise).toBeUndefined();
   });
 });
