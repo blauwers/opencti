@@ -283,11 +283,18 @@ export class BatchEntityCreateCoordinator {
   }
 
   async close(): Promise<void> {
-    this.closed = true;
     if (this.snapshotTimer) {
       clearInterval(this.snapshotTimer);
     }
-    await this.flushPromise?.catch(() => undefined);
+    // Lookup tails can enqueue another ready flush while the previous flush is
+    // settling. Let already-admitted work drain before closing the coordinator,
+    // otherwise a later tail is rejected even though its parent group completed.
+    this.scheduleFlushIfReady();
+    while (this.flushPromise) {
+      await this.flushPromise.catch(() => undefined);
+      this.scheduleFlushIfReady();
+    }
+    this.closed = true;
     const pending = Array.from(this.pendingLookups.values());
     this.pendingLookups.clear();
     pending.forEach((lookup) => lookup.reject(new Error('Batch entity create phase ended before lookup resolution')));

@@ -411,6 +411,48 @@ describe('batch entity create coordinator', () => {
     expect(heldParticipantIds).toEqual(['course-of-action--one', 'external-reference--one']);
   });
 
+  it('drains queued same-group lookup tails before closing', async () => {
+    let releaseFirstLookup: (() => void) | undefined;
+    const firstLookupGate = new Promise<void>((resolve) => {
+      releaseFirstLookup = resolve;
+    });
+    vi.mocked(internalFindByIds)
+      .mockImplementationOnce(async () => {
+        await firstLookupGate;
+        return [] as any;
+      })
+      .mockResolvedValue([] as any);
+
+    const coordinator = new BatchEntityCreateCoordinator(context, [0]);
+    const firstLookup = coordinator.registerLookup(0, {
+      finderIds: ['external-reference--one'],
+      participantIds: ['external-reference--one'],
+      type: 'External-Reference',
+    });
+    const secondLookup = coordinator.registerLookup(0, {
+      finderIds: ['course-of-action--one'],
+      participantIds: ['course-of-action--one'],
+      type: 'Course-Of-Action',
+    });
+    const thirdLookup = coordinator.registerLookup(0, {
+      finderIds: ['identity--one'],
+      participantIds: ['identity--one'],
+      type: 'Identity',
+    });
+
+    for (let tick = 0; tick < 10 && vi.mocked(internalFindByIds).mock.calls.length === 0; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(internalFindByIds).toHaveBeenCalledTimes(1);
+
+    coordinator.completeGroup(0);
+    const closePromise = coordinator.close();
+    releaseFirstLookup?.();
+
+    await expect(Promise.all([firstLookup, secondLookup, thirdLookup, closePromise])).resolves.toBeDefined();
+    expect(internalFindByIds).toHaveBeenCalledTimes(3);
+  });
+
   it('retains earlier group-owned ids for nested writes after later lookups', async () => {
     vi.mocked(internalFindByIds).mockResolvedValue([] as any);
 
