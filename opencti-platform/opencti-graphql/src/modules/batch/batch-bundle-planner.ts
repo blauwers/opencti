@@ -113,11 +113,15 @@ const indexBundleObjects = (objects: Record<string, any>[]) => {
 
 const buildEmbeddedReferenceKey = (value: Record<string, any>, kind: 'external_references' | 'kill_chain_phases'): string | null => {
   if (kind === 'external_references') {
-    if (value.url !== undefined && value.url !== null) {
+    const hasIdentityValue = (fieldValue: unknown): boolean => (
+      fieldValue !== undefined
+      && fieldValue !== null
+      && (typeof fieldValue !== 'string' || fieldValue.length > 0)
+    );
+    if (hasIdentityValue(value.url)) {
       return JSON.stringify({ url: value.url });
     }
-    if (value.source_name !== undefined && value.source_name !== null
-      && value.external_id !== undefined && value.external_id !== null) {
+    if (hasIdentityValue(value.source_name) && hasIdentityValue(value.external_id)) {
       return JSON.stringify({ source_name: value.source_name, external_id: value.external_id });
     }
     return null;

@@ -161,6 +161,26 @@ describe('batch bundle planner', () => {
     });
   });
 
+  it('drops blank external reference identities and falls back to source plus external id', () => {
+    const indicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
+    const plan = planStixBundleObjects([{
+      type: 'indicator',
+      id: indicatorId,
+      external_references: [
+        { source_name: 'Unknown', url: '' },
+        { source_name: 'feed', external_id: '1', url: '' },
+        { url: 'https://example.test/a' },
+      ],
+    }]);
+
+    expect(plan.objects[0]).toMatchObject({
+      id: indicatorId,
+      normalization: {
+        externalReferenceIndexes: [1, 2],
+      },
+    });
+  });
+
   it('keeps missing external references outside the local dependency graph by default', () => {
     const indicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
     const plan = planStixBundleObjects([

@@ -92,9 +92,14 @@ class ExternalReference:
         :return: STIX ID for the external reference, or None if insufficient parameters
         :rtype: str or None
         """
-        if url is not None:
+        def has_identity_value(value):
+            return value is not None and (
+                not isinstance(value, str) or len(value) > 0
+            )
+
+        if has_identity_value(url):
             data = {"url": url}
-        elif source_name is not None and external_id is not None:
+        elif has_identity_value(source_name) and has_identity_value(external_id):
             data = {"source_name": source_name, "external_id": external_id}
         else:
             return None
