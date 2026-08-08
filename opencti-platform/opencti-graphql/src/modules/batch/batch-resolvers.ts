@@ -1,6 +1,7 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
 import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, reserveBatchDeliveryChildren } from './batch-delivery-domain';
+import { loadBatchExecutionReconciliation } from './batch-execution-reconciliation-domain';
 import { loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';
 import { executeBatchGraphqlOperations } from './batch-operation-executor';
 import type {
@@ -92,6 +93,11 @@ const batchResolvers = {
       { delivery_id }: { delivery_id: string },
       context: any,
     ) => loadBatchExecutionReceipt(context, delivery_id),
+    batchExecutionReconciliation: (
+      _: unknown,
+      { delivery_id }: { delivery_id: string },
+      context: any,
+    ) => loadBatchExecutionReconciliation(context, delivery_id),
   },
   Mutation: {
     stixBundleSubmit: (
@@ -219,6 +225,9 @@ const batchResolvers = {
   BatchExecutionReceipt: {
     receipt_id: (receipt: any) => receipt.internal_id,
     result_operation_errors: (receipt: any) => readBatchExecutionReceiptResultMetadata(receipt)?.operationErrors ?? null,
+  },
+  BatchExecutionReconciliation: {
+    reconciliation_id: (reconciliation: any) => reconciliation.internal_id,
   },
 };
 

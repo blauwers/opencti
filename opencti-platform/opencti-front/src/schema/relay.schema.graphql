@@ -9831,6 +9831,7 @@ type Query {
   dataSanityOperationDryRun(operation_name: String!): DataSanityDryRunOutput!
   batchDeliveryHandoff(parent_delivery_id: ID!): BatchDeliveryHandoff!
   batchExecutionReceipt(delivery_id: ID!): BatchExecutionReceipt
+  batchExecutionReconciliation(delivery_id: ID!): BatchExecutionReconciliation
 }
 
 type Subscription {
@@ -17046,6 +17047,36 @@ enum BatchExecutionReceiptFailureProof {
   NO_EFFECT_TERMINAL
 }
 
+enum BatchExecutionReconciliationState {
+  OPEN
+  RUNNING_OBSERVED
+  MATERIALIZATION_PENDING
+  AMBIGUOUS
+  RESOLVED_COMPLETED
+  RESOLVED_FAILED_TERMINAL
+}
+
+enum BatchExecutionReconciliationOpenedReason {
+  COMMITTED_WITHOUT_DURABLE_MATERIALIZATION
+  POST_START_ERROR
+  EXPLICIT_STARTED_RECEIPT
+  EXPLICIT_REQUIRES_RECONCILIATION_RECEIPT
+}
+
+enum BatchExecutionReconciliationEvidenceClass {
+  EXISTING_TERMINAL_RECEIPT
+  MATERIALIZATION_TERMINAL
+  NO_EFFECT_TERMINAL
+  ACTIVE_ATTEMPT
+  MATERIALIZATION_HANDOFF
+}
+
+enum BatchExecutionReconciliationEvidenceRefType {
+  BATCH_EXECUTION_RECEIPT
+  BATCH_MATERIALIZATION_HANDOFF
+  BACKEND_ATTEMPT_OBSERVATION
+}
+
 input BatchSubmitOptionsInput {
   wait_until: BatchWaitUntil
   execution_preference: BatchExecutionPreference
@@ -17188,6 +17219,34 @@ type BatchExecutionReceipt {
   failure_proof: BatchExecutionReceiptFailureProof
   failed_at: DateTime
   reconciliation_required_at: DateTime
+  created_at: DateTime!
+  updated_at: DateTime!
+  last_error: String
+}
+
+type BatchExecutionReconciliation {
+  reconciliation_id: ID!
+  receipt_id: ID!
+  delivery_id: ID!
+  submission_id: ID!
+  request_fingerprint: String!
+  request_contract_version: Int!
+  opened_from_receipt_state: BatchExecutionReceiptState!
+  opened_reason: BatchExecutionReconciliationOpenedReason!
+  state: BatchExecutionReconciliationState!
+  evidence_class: BatchExecutionReconciliationEvidenceClass
+  evidence_ref_type: BatchExecutionReconciliationEvidenceRefType
+  evidence_ref_id: ID
+  evidence_fingerprint: String
+  attempt_observation_id: ID
+  attempt_observed_at: DateTime
+  attempt_expires_at: DateTime
+  materialization_handoff_id: ID
+  materialization_handoff_state: String
+  resolved_receipt_state: BatchExecutionReceiptState
+  opened_at: DateTime!
+  last_observed_at: DateTime
+  resolved_at: DateTime
   created_at: DateTime!
   updated_at: DateTime!
   last_error: String

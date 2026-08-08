@@ -39,7 +39,7 @@ import {
 } from '../../schema/internalObject';
 import { schemaAttributesDefinition } from '../../schema/schema-attributes';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../../schema/stixMetaObject';
-import { ENTITY_TYPE_BATCH_DELIVERY, ENTITY_TYPE_BATCH_EXECUTION_RECEIPT, ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
+import { ENTITY_TYPE_BATCH_DELIVERY, ENTITY_TYPE_BATCH_EXECUTION_RECEIPT, ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION, ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
 import { ENTITY_TYPE_PIR } from '../pir/pir-types';
 
@@ -600,6 +600,32 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
     { name: 'failure_proof', label: 'Failure proof', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { name: 'failed_at', label: 'Failed at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { name: 'reconciliation_required_at', label: 'Reconciliation required at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { ...createdAt, isFilterable: false },
+    { ...updatedAt, isFilterable: false },
+    { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+  ],
+  [ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION]: [
+    { name: 'receipt_id', label: 'Receipt ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'delivery_id', label: 'Delivery ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'submission_id', label: 'Submission ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'request_fingerprint', label: 'Request fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'request_contract_version', label: 'Request contract version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'opened_from_receipt_state', label: 'Opened from receipt state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'opened_reason', label: 'Opened reason', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'state', label: 'Reconciliation state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'evidence_class', label: 'Evidence class', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: true },
+    { name: 'evidence_ref_type', label: 'Evidence reference type', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'evidence_ref_id', label: 'Evidence reference ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'evidence_fingerprint', label: 'Evidence fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'attempt_observation_id', label: 'Attempt observation ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'attempt_observed_at', label: 'Attempt observed at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'attempt_expires_at', label: 'Attempt expires at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'materialization_handoff_id', label: 'Materialization handoff ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'materialization_handoff_state', label: 'Materialization handoff state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'resolved_receipt_state', label: 'Resolved receipt state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: true },
+    { name: 'opened_at', label: 'Opened at', type: 'date', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'last_observed_at', label: 'Last observed at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'resolved_at', label: 'Resolved at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { ...createdAt, isFilterable: false },
     { ...updatedAt, isFilterable: false },
     { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },

@@ -27,6 +27,13 @@ import {
 } from './batch-entity-create-coordinator';
 import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
 import {
+  ensureBatchExecutionReconciliationBeforeRequiresReconciliation,
+  ensureBatchExecutionReconciliationForRequiresReconciliation,
+  loadBatchExecutionReconciliation,
+  recordBatchExecutionReconciliationResolvedCompleted,
+  recordBatchExecutionReconciliationResolvedFailedTerminal,
+} from './batch-execution-reconciliation-domain';
+import {
   assertBatchDirectDeliveryContext,
   buildBatchExecutionReceiptLockId,
   buildBatchExecutionReceiptRequestMetadata,
@@ -46,6 +53,8 @@ import {
   BatchAdmissionErrorCode,
   type BatchDirectDeliveryContext,
   BatchExecutionMode,
+  BatchExecutionReconciliationEvidenceClass,
+  BatchExecutionReconciliationOpenedReason,
   BatchExecutionReceiptFailureProof,
   BatchExecutionReceiptState,
   type BatchExecutionReceipt,
@@ -1257,6 +1266,44 @@ const readBatchExecutionReceiptReplay = (
   }
 };
 
+const reconcileTerminalBatchExecutionReceiptIfNeeded = async (
+  context: AuthContext,
+  receipt: BatchExecutionReceipt,
+): Promise<void> => {
+  if (
+    receipt.state !== BatchExecutionReceiptState.Completed
+    && receipt.state !== BatchExecutionReceiptState.FailedTerminal
+  ) {
+    return;
+  }
+  try {
+    const reconciliation = await loadBatchExecutionReconciliation(context, receipt.delivery_id);
+    if (!reconciliation) {
+      return;
+    }
+    if (receipt.state === BatchExecutionReceiptState.Completed) {
+      await recordBatchExecutionReconciliationResolvedCompleted(context, reconciliation, {
+        evidenceClass: BatchExecutionReconciliationEvidenceClass.ExistingTerminalReceipt,
+        receipt,
+      });
+      return;
+    }
+    if (receipt.failure_proof === BatchExecutionReceiptFailureProof.NoEffectTerminal) {
+      await recordBatchExecutionReconciliationResolvedFailedTerminal(context, reconciliation, {
+        evidenceClass: BatchExecutionReconciliationEvidenceClass.ExistingTerminalReceipt,
+        receipt,
+      });
+    }
+  } catch (error) {
+    logApp.error('Failed to persist batch execution reconciliation terminal state', {
+      cause: error,
+      delivery_id: receipt.delivery_id,
+      receipt_id: receipt.internal_id,
+      receipt_state: receipt.state,
+    });
+  }
+};
+
 const withBatchExecutionReceiptLock = async <T>(
   deliveryId: string,
   executeWithLock: () => Promise<T>,
@@ -1275,6 +1322,7 @@ const reservePreparedBatchExecutionReceipt = async (
 ): Promise<{ receipt: BatchExecutionReceipt; replay: BatchGraphqlExecutionResult | null }> => {
   return withBatchExecutionReceiptLock(input.deliveryId, async () => {
     const receipt = await reserveBatchExecutionReceipt(context, input);
+    await reconcileTerminalBatchExecutionReceiptIfNeeded(context, receipt);
     return {
       receipt,
       replay: readBatchExecutionReceiptReplay(receipt),
@@ -1288,6 +1336,7 @@ const startPreparedBatchExecutionReceipt = async (
 ): Promise<{ receipt: BatchExecutionReceipt; replay: BatchGraphqlExecutionResult | null }> => {
   return withBatchExecutionReceiptLock(input.deliveryId, async () => {
     const receipt = await reserveBatchExecutionReceipt(context, input);
+    await reconcileTerminalBatchExecutionReceiptIfNeeded(context, receipt);
     const replay = readBatchExecutionReceiptReplay(receipt);
     if (replay) {
       return { receipt, replay };
@@ -1330,7 +1379,7 @@ const recordStartedBatchExecutionReceiptResult = async (
       return;
     }
     if (execution.materialized) {
-      await recordBatchExecutionReceiptCompletion(context, currentReceipt, {
+      const completedReceipt = await recordBatchExecutionReceiptCompletion(context, currentReceipt, {
         operationCount: execution.results.length,
         operationErrors: execution.operationErrors,
         executionMode: execution.executionMode,
@@ -1338,8 +1387,15 @@ const recordStartedBatchExecutionReceiptResult = async (
         sideEffectKinds: execution.sideEffectKinds,
         materialized: true,
       });
+      await reconcileTerminalBatchExecutionReceiptIfNeeded(context, completedReceipt);
       return;
     }
+    await ensureBatchExecutionReconciliationBeforeRequiresReconciliation(
+      context,
+      currentReceipt,
+      BatchExecutionReconciliationOpenedReason.CommittedWithoutDurableMaterialization,
+      new Error('Batch execution committed before durable materialization evidence existed'),
+    );
     await recordBatchExecutionReceiptRequiresReconciliation(
       context,
       currentReceipt,
@@ -1358,11 +1414,31 @@ const recordStartedBatchExecutionReceiptError = async (
     if (
       currentReceipt.state === BatchExecutionReceiptState.Completed
       || currentReceipt.state === BatchExecutionReceiptState.FailedTerminal
-      || currentReceipt.state === BatchExecutionReceiptState.RequiresReconciliation
     ) {
       return;
     }
-    await recordBatchExecutionReceiptRequiresReconciliation(context, currentReceipt, error);
+    if (currentReceipt.state === BatchExecutionReceiptState.RequiresReconciliation) {
+      await ensureBatchExecutionReconciliationForRequiresReconciliation(
+        context,
+        currentReceipt,
+        BatchExecutionReconciliationOpenedReason.PostStartError,
+        error,
+      );
+      return;
+    }
+    await ensureBatchExecutionReconciliationBeforeRequiresReconciliation(
+      context,
+      currentReceipt,
+      BatchExecutionReconciliationOpenedReason.PostStartError,
+      error,
+    );
+    const reconciliationReceipt = await recordBatchExecutionReceiptRequiresReconciliation(context, currentReceipt, error);
+    await ensureBatchExecutionReconciliationForRequiresReconciliation(
+      context,
+      reconciliationReceipt,
+      BatchExecutionReconciliationOpenedReason.PostStartError,
+      error,
+    );
   });
 };
 
@@ -1453,6 +1529,7 @@ export const executeBatchGraphqlOperations = async (
       startedReceipt = started.receipt;
     }
     const resultBindings: BatchGraphqlResultBindings = new Map();
+    let result: BatchGraphqlExecutionResult;
     try {
       const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
         kind: BatchMutationKind.GraphqlOperation,
@@ -1489,15 +1566,11 @@ export const executeBatchGraphqlOperations = async (
         },
         performanceTraceId: executionId,
       });
-      const result = {
+      result = {
         ...execution,
         operationErrors: execution.results[0].operationErrors,
         results: execution.results[0].results,
       };
-      if (startedReceipt) {
-        await recordStartedBatchExecutionReceiptResult(context, startedReceipt, result);
-      }
-      return result;
     } catch (error) {
       if (startedReceipt) {
         try {
@@ -1512,6 +1585,25 @@ export const executeBatchGraphqlOperations = async (
       }
       throw error;
     }
+    if (startedReceipt) {
+      try {
+        await recordStartedBatchExecutionReceiptResult(context, startedReceipt, result);
+      } catch (error) {
+        if (result.materialized) {
+          try {
+            await recordStartedBatchExecutionReceiptError(context, startedReceipt, error);
+          } catch (receiptError) {
+            logApp.error('Failed to persist batch execution receipt reconciliation state', {
+              cause: receiptError,
+              delivery_id: startedReceipt.delivery_id,
+              original_error: error,
+            });
+          }
+        }
+        throw error;
+      }
+    }
+    return result;
   } finally {
     const completedAt = Date.now();
     releaseAdmission();

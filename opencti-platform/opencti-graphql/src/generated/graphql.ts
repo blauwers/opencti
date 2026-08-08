@@ -2273,6 +2273,65 @@ export enum BatchExecutionReceiptState {
   Started = 'STARTED'
 }
 
+export type BatchExecutionReconciliation = {
+  __typename?: 'BatchExecutionReconciliation';
+  attempt_expires_at?: Maybe<Scalars['DateTime']['output']>;
+  attempt_observation_id?: Maybe<Scalars['ID']['output']>;
+  attempt_observed_at?: Maybe<Scalars['DateTime']['output']>;
+  created_at: Scalars['DateTime']['output'];
+  delivery_id: Scalars['ID']['output'];
+  evidence_class?: Maybe<BatchExecutionReconciliationEvidenceClass>;
+  evidence_fingerprint?: Maybe<Scalars['String']['output']>;
+  evidence_ref_id?: Maybe<Scalars['ID']['output']>;
+  evidence_ref_type?: Maybe<BatchExecutionReconciliationEvidenceRefType>;
+  last_error?: Maybe<Scalars['String']['output']>;
+  last_observed_at?: Maybe<Scalars['DateTime']['output']>;
+  materialization_handoff_id?: Maybe<Scalars['ID']['output']>;
+  materialization_handoff_state?: Maybe<Scalars['String']['output']>;
+  opened_at: Scalars['DateTime']['output'];
+  opened_from_receipt_state: BatchExecutionReceiptState;
+  opened_reason: BatchExecutionReconciliationOpenedReason;
+  receipt_id: Scalars['ID']['output'];
+  reconciliation_id: Scalars['ID']['output'];
+  request_contract_version: Scalars['Int']['output'];
+  request_fingerprint: Scalars['String']['output'];
+  resolved_at?: Maybe<Scalars['DateTime']['output']>;
+  resolved_receipt_state?: Maybe<BatchExecutionReceiptState>;
+  state: BatchExecutionReconciliationState;
+  submission_id: Scalars['ID']['output'];
+  updated_at: Scalars['DateTime']['output'];
+};
+
+export enum BatchExecutionReconciliationEvidenceClass {
+  ActiveAttempt = 'ACTIVE_ATTEMPT',
+  ExistingTerminalReceipt = 'EXISTING_TERMINAL_RECEIPT',
+  MaterializationHandoff = 'MATERIALIZATION_HANDOFF',
+  MaterializationTerminal = 'MATERIALIZATION_TERMINAL',
+  NoEffectTerminal = 'NO_EFFECT_TERMINAL'
+}
+
+export enum BatchExecutionReconciliationEvidenceRefType {
+  BackendAttemptObservation = 'BACKEND_ATTEMPT_OBSERVATION',
+  BatchExecutionReceipt = 'BATCH_EXECUTION_RECEIPT',
+  BatchMaterializationHandoff = 'BATCH_MATERIALIZATION_HANDOFF'
+}
+
+export enum BatchExecutionReconciliationOpenedReason {
+  CommittedWithoutDurableMaterialization = 'COMMITTED_WITHOUT_DURABLE_MATERIALIZATION',
+  ExplicitRequiresReconciliationReceipt = 'EXPLICIT_REQUIRES_RECONCILIATION_RECEIPT',
+  ExplicitStartedReceipt = 'EXPLICIT_STARTED_RECEIPT',
+  PostStartError = 'POST_START_ERROR'
+}
+
+export enum BatchExecutionReconciliationState {
+  Ambiguous = 'AMBIGUOUS',
+  MaterializationPending = 'MATERIALIZATION_PENDING',
+  Open = 'OPEN',
+  ResolvedCompleted = 'RESOLVED_COMPLETED',
+  ResolvedFailedTerminal = 'RESOLVED_FAILED_TERMINAL',
+  RunningObserved = 'RUNNING_OBSERVED'
+}
+
 export type BatchGraphqlExecutionPhaseInput = {
   object_ids: Array<Scalars['String']['input']>;
   phase: Scalars['Int']['input'];
@@ -24734,6 +24793,7 @@ export type Query = {
   backgroundTasks?: Maybe<BackgroundTaskConnection>;
   batchDeliveryHandoff: BatchDeliveryHandoff;
   batchExecutionReceipt?: Maybe<BatchExecutionReceipt>;
+  batchExecutionReconciliation?: Maybe<BatchExecutionReconciliation>;
   bookmarks?: Maybe<StixDomainObjectConnection>;
   campaign?: Maybe<Campaign>;
   campaigns?: Maybe<CampaignConnection>;
@@ -25289,6 +25349,11 @@ export type QueryBatchDeliveryHandoffArgs = {
 
 
 export type QueryBatchExecutionReceiptArgs = {
+  delivery_id: Scalars['ID']['input'];
+};
+
+
+export type QueryBatchExecutionReconciliationArgs = {
   delivery_id: Scalars['ID']['input'];
 };
 
@@ -39976,6 +40041,11 @@ export type ResolversTypes = ResolversObject<{
   BatchExecutionReceiptCompletionBoundary: BatchExecutionReceiptCompletionBoundary;
   BatchExecutionReceiptFailureProof: BatchExecutionReceiptFailureProof;
   BatchExecutionReceiptState: BatchExecutionReceiptState;
+  BatchExecutionReconciliation: ResolverTypeWrapper<BatchExecutionReconciliation>;
+  BatchExecutionReconciliationEvidenceClass: BatchExecutionReconciliationEvidenceClass;
+  BatchExecutionReconciliationEvidenceRefType: BatchExecutionReconciliationEvidenceRefType;
+  BatchExecutionReconciliationOpenedReason: BatchExecutionReconciliationOpenedReason;
+  BatchExecutionReconciliationState: BatchExecutionReconciliationState;
   BatchGraphqlExecutionPhaseInput: BatchGraphqlExecutionPhaseInput;
   BatchGraphqlExecutionPlanInput: BatchGraphqlExecutionPlanInput;
   BatchGraphqlFileInput: BatchGraphqlFileInput;
@@ -41137,6 +41207,7 @@ export type ResolversParentTypes = ResolversObject<{
   BatchDirectDeliveryContextInput: BatchDirectDeliveryContextInput;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
   BatchExecutionReceipt: BatchExecutionReceipt;
+  BatchExecutionReconciliation: BatchExecutionReconciliation;
   BatchGraphqlExecutionPhaseInput: BatchGraphqlExecutionPhaseInput;
   BatchGraphqlExecutionPlanInput: BatchGraphqlExecutionPlanInput;
   BatchGraphqlFileInput: BatchGraphqlFileInput;
@@ -42865,6 +42936,34 @@ export type BatchExecutionReceiptResolvers<ContextType = any, ParentType extends
   submission_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
   updated_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
   wait_until?: Resolver<ResolversTypes['BatchWaitUntil'], ParentType, ContextType>;
+}>;
+
+export type BatchExecutionReconciliationResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchExecutionReconciliation'] = ResolversParentTypes['BatchExecutionReconciliation']> = ResolversObject<{
+  attempt_expires_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  attempt_observation_id?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
+  attempt_observed_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  created_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  delivery_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  evidence_class?: Resolver<Maybe<ResolversTypes['BatchExecutionReconciliationEvidenceClass']>, ParentType, ContextType>;
+  evidence_fingerprint?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  evidence_ref_id?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
+  evidence_ref_type?: Resolver<Maybe<ResolversTypes['BatchExecutionReconciliationEvidenceRefType']>, ParentType, ContextType>;
+  last_error?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  last_observed_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  materialization_handoff_id?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
+  materialization_handoff_state?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  opened_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  opened_from_receipt_state?: Resolver<ResolversTypes['BatchExecutionReceiptState'], ParentType, ContextType>;
+  opened_reason?: Resolver<ResolversTypes['BatchExecutionReconciliationOpenedReason'], ParentType, ContextType>;
+  receipt_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  reconciliation_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  request_contract_version?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  request_fingerprint?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  resolved_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  resolved_receipt_state?: Resolver<Maybe<ResolversTypes['BatchExecutionReceiptState']>, ParentType, ContextType>;
+  state?: Resolver<ResolversTypes['BatchExecutionReconciliationState'], ParentType, ContextType>;
+  submission_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  updated_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
 }>;
 
 export type BatchMutationExecutionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchMutationExecution'] = ResolversParentTypes['BatchMutationExecution']> = ResolversObject<{
@@ -49908,6 +50007,7 @@ export type QueryResolvers<ContextType = any, ParentType extends ResolversParent
   backgroundTasks?: Resolver<Maybe<ResolversTypes['BackgroundTaskConnection']>, ParentType, ContextType, Partial<QueryBackgroundTasksArgs>>;
   batchDeliveryHandoff?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<QueryBatchDeliveryHandoffArgs, 'parent_delivery_id'>>;
   batchExecutionReceipt?: Resolver<Maybe<ResolversTypes['BatchExecutionReceipt']>, ParentType, ContextType, RequireFields<QueryBatchExecutionReceiptArgs, 'delivery_id'>>;
+  batchExecutionReconciliation?: Resolver<Maybe<ResolversTypes['BatchExecutionReconciliation']>, ParentType, ContextType, RequireFields<QueryBatchExecutionReconciliationArgs, 'delivery_id'>>;
   bookmarks?: Resolver<Maybe<ResolversTypes['StixDomainObjectConnection']>, ParentType, ContextType, Partial<QueryBookmarksArgs>>;
   campaign?: Resolver<Maybe<ResolversTypes['Campaign']>, ParentType, ContextType, Partial<QueryCampaignArgs>>;
   campaigns?: Resolver<Maybe<ResolversTypes['CampaignConnection']>, ParentType, ContextType, Partial<QueryCampaignsArgs>>;
@@ -53967,6 +54067,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   BatchDeliveryChild?: BatchDeliveryChildResolvers<ContextType>;
   BatchDeliveryHandoff?: BatchDeliveryHandoffResolvers<ContextType>;
   BatchExecutionReceipt?: BatchExecutionReceiptResolvers<ContextType>;
+  BatchExecutionReconciliation?: BatchExecutionReconciliationResolvers<ContextType>;
   BatchMutationExecution?: BatchMutationExecutionResolvers<ContextType>;
   BatchMutationOperationError?: BatchMutationOperationErrorResolvers<ContextType>;
   CSVFeedAddInputFromImport?: CsvFeedAddInputFromImportResolvers<ContextType>;

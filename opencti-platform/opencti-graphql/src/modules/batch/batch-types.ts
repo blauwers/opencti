@@ -3,6 +3,7 @@ import type { BatchBundlePlan } from './batch-bundle-planner';
 export const ENTITY_TYPE_BATCH_SUBMISSION = 'BatchSubmission';
 export const ENTITY_TYPE_BATCH_DELIVERY = 'BatchDelivery';
 export const ENTITY_TYPE_BATCH_EXECUTION_RECEIPT = 'BatchExecutionReceipt';
+export const ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION = 'BatchExecutionReconciliation';
 
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
@@ -95,6 +96,36 @@ export enum BatchExecutionReceiptFailureProof {
   NoEffectTerminal = 'NO_EFFECT_TERMINAL',
 }
 
+export enum BatchExecutionReconciliationState {
+  Open = 'OPEN',
+  RunningObserved = 'RUNNING_OBSERVED',
+  MaterializationPending = 'MATERIALIZATION_PENDING',
+  Ambiguous = 'AMBIGUOUS',
+  ResolvedCompleted = 'RESOLVED_COMPLETED',
+  ResolvedFailedTerminal = 'RESOLVED_FAILED_TERMINAL',
+}
+
+export enum BatchExecutionReconciliationOpenedReason {
+  CommittedWithoutDurableMaterialization = 'COMMITTED_WITHOUT_DURABLE_MATERIALIZATION',
+  PostStartError = 'POST_START_ERROR',
+  ExplicitStartedReceipt = 'EXPLICIT_STARTED_RECEIPT',
+  ExplicitRequiresReconciliationReceipt = 'EXPLICIT_REQUIRES_RECONCILIATION_RECEIPT',
+}
+
+export enum BatchExecutionReconciliationEvidenceClass {
+  ExistingTerminalReceipt = 'EXISTING_TERMINAL_RECEIPT',
+  MaterializationTerminal = 'MATERIALIZATION_TERMINAL',
+  NoEffectTerminal = 'NO_EFFECT_TERMINAL',
+  ActiveAttempt = 'ACTIVE_ATTEMPT',
+  MaterializationHandoff = 'MATERIALIZATION_HANDOFF',
+}
+
+export enum BatchExecutionReconciliationEvidenceRefType {
+  BatchExecutionReceipt = 'BATCH_EXECUTION_RECEIPT',
+  BatchMaterializationHandoff = 'BATCH_MATERIALIZATION_HANDOFF',
+  BackendAttemptObservation = 'BACKEND_ATTEMPT_OBSERVATION',
+}
+
 export enum BatchAdmissionErrorCode {
   InvalidBundle = 'INVALID_BUNDLE',
   InvalidBundleId = 'INVALID_BUNDLE_ID',
@@ -103,6 +134,7 @@ export enum BatchAdmissionErrorCode {
   IdempotencyKeyConflict = 'IDEMPOTENCY_KEY_CONFLICT',
   DeliveryIdentityConflict = 'DELIVERY_IDENTITY_CONFLICT',
   ExecutionReceiptConflict = 'EXECUTION_RECEIPT_CONFLICT',
+  ExecutionReconciliationConflict = 'EXECUTION_RECONCILIATION_CONFLICT',
   ExecutionRequiresReconciliation = 'EXECUTION_REQUIRES_RECONCILIATION',
   ExecutionFailedTerminal = 'EXECUTION_FAILED_TERMINAL',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
@@ -325,6 +357,40 @@ export interface BatchExecutionReceipt {
   last_error: string | null;
 }
 
+export interface BatchExecutionReconciliation {
+  id: string;
+  internal_id: string;
+  _index?: string;
+  standard_id: string;
+  entity_type: typeof ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION;
+  base_type: 'ENTITY';
+  parent_types: string[];
+  receipt_id: string;
+  delivery_id: string;
+  submission_id: string;
+  request_fingerprint: string;
+  request_contract_version: number;
+  opened_from_receipt_state: BatchExecutionReceiptState;
+  opened_reason: BatchExecutionReconciliationOpenedReason;
+  state: BatchExecutionReconciliationState;
+  evidence_class: BatchExecutionReconciliationEvidenceClass | null;
+  evidence_ref_type: BatchExecutionReconciliationEvidenceRefType | null;
+  evidence_ref_id: string | null;
+  evidence_fingerprint: string | null;
+  attempt_observation_id: string | null;
+  attempt_observed_at: string | null;
+  attempt_expires_at: string | null;
+  materialization_handoff_id: string | null;
+  materialization_handoff_state: string | null;
+  resolved_receipt_state: BatchExecutionReceiptState | null;
+  opened_at: string;
+  last_observed_at: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+  last_error: string | null;
+}
+
 export interface BatchDeliveryChildReservationInput {
   branchKind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
   branchSequence: number;
@@ -428,4 +494,15 @@ export interface BatchExecutionReceiptTerminalFailure {
   code?: string;
   message: string;
   proof: BatchExecutionReceiptFailureProof;
+}
+
+export interface BatchExecutionReconciliationTerminalEvidence {
+  evidenceClass: BatchExecutionReconciliationEvidenceClass | string;
+  evidenceRefType?: BatchExecutionReconciliationEvidenceRefType | string | null;
+  evidenceRefId?: string | null;
+  evidenceFingerprint?: string | null;
+  receipt?: BatchExecutionReceipt | null;
+  requestFingerprint?: string | null;
+  resultMetadata?: BatchExecutionReceiptResultMetadata | null;
+  materialized?: boolean | null;
 }

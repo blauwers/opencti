@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { elIndex, elLoadById, elUpdate } from '../../../../src/database/engine';
 import { lockResources } from '../../../../src/lock/master-lock';
 import { loadBatchDelivery, readBatchDeliveryQueueMessage } from '../../../../src/modules/batch/batch-delivery-domain';
+import { buildBatchExecutionReconciliationId, openBatchExecutionReconciliation } from '../../../../src/modules/batch/batch-execution-reconciliation-domain';
 import {
+  buildBatchExecutionReceiptId,
   buildBatchExecutionReceiptRequestMetadata,
   recordBatchExecutionReceiptStarted,
   reserveBatchExecutionReceipt,
@@ -21,6 +23,8 @@ import {
   BatchDeliveryProtocol,
   BatchDeliveryState,
   BatchExecutionMode,
+  BatchExecutionReconciliationOpenedReason,
+  BatchExecutionReconciliationState,
   BatchExecutionReceiptState,
   BatchWaitUntil,
   type BatchDelivery,
@@ -90,7 +94,12 @@ const operation = {
   objectId: 'indicator--1',
 };
 
-const buildSchema = (calls: string[], withSideEffect = false) => makeExecutableSchema({
+const buildSchema = (
+  calls: string[],
+  withSideEffect = false,
+  failAfterWrite = false,
+  openReconciliationDuringWrite = false,
+) => makeExecutableSchema({
   typeDefs: `
     type Query {
       status: String!
@@ -107,6 +116,9 @@ const buildSchema = (calls: string[], withSideEffect = false) => makeExecutableS
     Mutation: {
       record: async (_: unknown, { value }: { value: string }) => {
         calls.push(`write:${value}`);
+        if (openReconciliationDuringWrite) {
+          await openBatchExecutionReconciliation(testContext, delivery.internal_id);
+        }
         if (withSideEffect) {
           await registerBatchSideEffect({
             kind: BatchSideEffectKind.StreamPublication,
@@ -114,6 +126,9 @@ const buildSchema = (calls: string[], withSideEffect = false) => makeExecutableS
               calls.push(`side-effect:${value}`);
             },
           });
+        }
+        if (failAfterWrite) {
+          throw new Error('resolver failed after write');
         }
         return value;
       },
@@ -204,6 +219,7 @@ describe('batch GraphQL execution receipt boundary', () => {
       }),
     }));
     expect(calls).toEqual([]);
+    expect(receipts.has(buildBatchExecutionReconciliationId(delivery.internal_id))).toBe(false);
   });
 
   it('returns cached materialized metadata on duplicate delivery without rerunning the mutation', async () => {
@@ -230,6 +246,93 @@ describe('batch GraphQL execution receipt boundary', () => {
     expect(calls).toEqual(['write:one']);
   });
 
+  it('resolves a pre-opened STARTED reconciliation when the live attempt completes materially', async () => {
+    const calls: string[] = [];
+
+    const execution = await executeBatchGraphqlOperations(buildSchema(calls, false, false, true), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    expect(execution.materialized).toBe(true);
+    expect(receipts.get(buildBatchExecutionReconciliationId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReconciliationState.ResolvedCompleted,
+      resolved_receipt_state: BatchExecutionReceiptState.Completed,
+      evidence_ref_id: buildBatchExecutionReceiptId(delivery.internal_id),
+    });
+    expect(calls).toEqual(['write:one']);
+  });
+
+  it('heals an OPEN reconciliation on duplicate read after terminal receipt persistence won the race', async () => {
+    const calls: string[] = [];
+    const reconciliationId = buildBatchExecutionReconciliationId(delivery.internal_id);
+    let failTerminalUpdate = true;
+    vi.mocked(elUpdate).mockImplementation(async (_context, _index, id, update) => {
+      if (
+        id === reconciliationId
+        && (update as any).doc.state === BatchExecutionReconciliationState.ResolvedCompleted
+        && failTerminalUpdate
+      ) {
+        failTerminalUpdate = false;
+        throw new Error('terminal reconciliation update failed');
+      }
+      const current = receipts.get(id);
+      const next = {
+        ...current,
+        ...(update as any).doc,
+      };
+      receipts.set(id, next);
+      return next;
+    });
+
+    const first = await executeBatchGraphqlOperations(buildSchema(calls, false, false, true), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+    const second = await executeBatchGraphqlOperations(buildSchema(calls), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    expect(first.materialized).toBe(true);
+    expect(second.materialized).toBe(true);
+    expect(receipts.get(reconciliationId)).toMatchObject({
+      state: BatchExecutionReconciliationState.ResolvedCompleted,
+      resolved_receipt_state: BatchExecutionReceiptState.Completed,
+    });
+    expect(calls).toEqual(['write:one']);
+  });
+
+  it('classifies materialized terminal receipt persistence failures as ambiguous', async () => {
+    const calls: string[] = [];
+    const receiptId = buildBatchExecutionReceiptId(delivery.internal_id);
+    vi.mocked(elUpdate).mockImplementation(async (_context, _index, id, update) => {
+      if (id === receiptId && (update as any).doc.state === BatchExecutionReceiptState.Completed) {
+        throw new Error('terminal receipt update failed');
+      }
+      const current = receipts.get(id);
+      const next = {
+        ...current,
+        ...(update as any).doc,
+      };
+      receipts.set(id, next);
+      return next;
+    });
+
+    await expect(executeBatchGraphqlOperations(buildSchema(calls), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    })).rejects.toThrow('terminal receipt update failed');
+
+    expect(receipts.get(receiptId)).toMatchObject({
+      state: BatchExecutionReceiptState.RequiresReconciliation,
+    });
+    expect(receipts.get(buildBatchExecutionReconciliationId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReconciliationState.Ambiguous,
+      opened_reason: BatchExecutionReconciliationOpenedReason.PostStartError,
+    });
+  });
+
   it('never completes a COMMITTED non-materialized receipt and fails closed on replay', async () => {
     const calls: string[] = [];
     const schema = buildSchema(calls, true);
@@ -244,6 +347,12 @@ describe('batch GraphQL execution receipt boundary', () => {
       state: BatchExecutionReceiptState.RequiresReconciliation,
       result_materialized: null,
     });
+    expect(receipts.get(buildBatchExecutionReconciliationId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReconciliationState.Open,
+      receipt_id: buildBatchExecutionReceiptId(delivery.internal_id),
+      opened_from_receipt_state: BatchExecutionReceiptState.Started,
+      opened_reason: BatchExecutionReconciliationOpenedReason.CommittedWithoutDurableMaterialization,
+    });
     await expect(executeBatchGraphqlOperations(schema, testContext, [operation], {
       directDeliveryContext,
       waitUntil: BatchWaitUntil.Committed,
@@ -255,6 +364,85 @@ describe('batch GraphQL execution receipt boundary', () => {
       }),
     }));
     expect(calls.filter((call) => call === 'write:one')).toHaveLength(1);
+  });
+
+  it('keeps COMMITTED non-materialized persistence failures at OPEN instead of relabeling them ambiguous', async () => {
+    const calls: string[] = [];
+    const receiptId = buildBatchExecutionReceiptId(delivery.internal_id);
+    vi.mocked(elUpdate).mockImplementation(async (_context, _index, id, update) => {
+      if (id === receiptId && (update as any).doc.state === BatchExecutionReceiptState.RequiresReconciliation) {
+        throw new Error('receipt reconciliation update failed');
+      }
+      const current = receipts.get(id);
+      const next = {
+        ...current,
+        ...(update as any).doc,
+      };
+      receipts.set(id, next);
+      return next;
+    });
+
+    await expect(executeBatchGraphqlOperations(buildSchema(calls, true), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Committed,
+    })).rejects.toThrow('receipt reconciliation update failed');
+
+    expect(receipts.get(receiptId)).toMatchObject({
+      state: BatchExecutionReceiptState.Started,
+    });
+    expect(receipts.get(buildBatchExecutionReconciliationId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReconciliationState.Open,
+      opened_reason: BatchExecutionReconciliationOpenedReason.CommittedWithoutDurableMaterialization,
+    });
+  });
+
+  it('opens reconciliation for an active post-start execution failure', async () => {
+    const calls: string[] = [];
+
+    await expect(executeBatchGraphqlOperations(buildSchema(calls, false, true), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    })).rejects.toThrow('Batch GraphQL operation failed');
+
+    expect(receipts.get(buildBatchExecutionReceiptId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReceiptState.RequiresReconciliation,
+      last_error: 'Batch GraphQL operation failed',
+    });
+    expect(receipts.get(buildBatchExecutionReconciliationId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReconciliationState.Ambiguous,
+      last_error: 'Batch GraphQL operation failed',
+    });
+    expect(calls).toEqual(['write:one']);
+  });
+
+  it('keeps an OPEN reconciliation row when ambiguity persistence fails after the receipt transition', async () => {
+    const calls: string[] = [];
+    const reconciliationId = buildBatchExecutionReconciliationId(delivery.internal_id);
+    vi.mocked(elUpdate).mockImplementation(async (_context, _index, id, update) => {
+      if (id === reconciliationId && (update as any).doc.state === BatchExecutionReconciliationState.Ambiguous) {
+        throw new Error('reconciliation update failed');
+      }
+      const current = receipts.get(id);
+      const next = {
+        ...current,
+        ...(update as any).doc,
+      };
+      receipts.set(id, next);
+      return next;
+    });
+
+    await expect(executeBatchGraphqlOperations(buildSchema(calls, false, true), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    })).rejects.toThrow('Batch GraphQL operation failed');
+
+    expect(receipts.get(buildBatchExecutionReceiptId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReceiptState.RequiresReconciliation,
+    });
+    expect(receipts.get(reconciliationId)).toMatchObject({
+      state: BatchExecutionReconciliationState.Open,
+      receipt_id: buildBatchExecutionReceiptId(delivery.internal_id),
+    });
   });
 
   it('rejects conflicting request reuse before execution and records pre-start terminal grouping failures', async () => {
