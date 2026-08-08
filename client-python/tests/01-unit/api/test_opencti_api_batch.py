@@ -303,3 +303,61 @@ def test_batch_mutation_plan_reserves_request_envelope_before_capture():
     ) as plan:
         with pytest.raises(BatchMutationPlanTooLarge):
             plan.capture(query, variables, [])
+
+
+def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    client.query = MagicMock(
+        side_effect=[
+            {"data": {"batchDeliveryHandoff": {"handoff_evidence": "NONE"}}},
+            {
+                "data": {
+                    "batchDeliveryReserveChildren": {
+                        "handoff_evidence": "CHILDREN_RESERVED"
+                    }
+                }
+            },
+            {
+                "data": {
+                    "batchDeliveryMarkChildrenPublished": {
+                        "handoff_evidence": "CHILDREN_PUBLISHED"
+                    }
+                }
+            },
+        ]
+    )
+    children = [
+        {
+            "branch_kind": "LEGACY_SPLIT",
+            "branch_sequence": 0,
+            "branch_ordinal": 0,
+            "queue_payload": "{}",
+        }
+    ]
+
+    handoff = client.batch_delivery_handoff("batch-delivery--parent")
+    reserved = client.reserve_batch_delivery_children(
+        "batch-delivery--parent", children
+    )
+    published = client.mark_batch_delivery_children_published(
+        "batch-delivery--parent", ["batch-delivery--child"]
+    )
+
+    assert handoff == {"handoff_evidence": "NONE"}
+    assert reserved == {"handoff_evidence": "CHILDREN_RESERVED"}
+    assert published == {"handoff_evidence": "CHILDREN_PUBLISHED"}
+    assert client.query.call_args_list[0].args[1] == {
+        "parentDeliveryId": "batch-delivery--parent"
+    }
+    assert client.query.call_args_list[1].args[1] == {
+        "parentDeliveryId": "batch-delivery--parent",
+        "children": children,
+    }
+    assert client.query.call_args_list[2].args[1] == {
+        "parentDeliveryId": "batch-delivery--parent",
+        "childDeliveryIds": ["batch-delivery--child"],
+    }

@@ -2148,6 +2148,11 @@ input ConnectorInfoInput {
   last_run_datetime: DateTime
 }
 
+input WorkerRuntimeCapabilityInput {
+  worker_id: String
+  batch_delivery_protocol_max: Int
+}
+
 type ConnectorInfo {
   run_and_terminate: Boolean!
   buffering: Boolean!
@@ -9451,7 +9456,7 @@ type Query {
   connectorManager(managerId: ID!): ConnectorManager!
   connectorManagers: [ConnectorManager!]!
   connectorsForManagers: [ManagedConnector!]
-  connectorsForWorker: [Connector]
+  connectorsForWorker(workerRuntime: WorkerRuntimeCapabilityInput): [Connector]
   connectorsForExport: [Connector]
   connectorsForImport: [Connector]
   connectorsForAnalysis: [Connector]
@@ -9824,6 +9829,7 @@ type Query {
   dataSanityOperations: [DataSanityOperation!]!
   dataSanityExecutions: [DataSanityExecution!]!
   dataSanityOperationDryRun(operation_name: String!): DataSanityDryRunOutput!
+  batchDeliveryHandoff(parent_delivery_id: ID!): BatchDeliveryHandoff!
 }
 
 type Subscription {
@@ -10798,6 +10804,8 @@ type Mutation {
   dataSanityOperationRequestRun(operation_name: String!): ID
   stixBundleSubmit(connectorId: String!, bundle: String!, work_id: String, options: BatchSubmitOptionsInput): BatchAdmission!
   batchMutationsExecute(operations: [BatchGraphqlOperationInput!]!, options: BatchExecuteOptionsInput): BatchMutationExecution!
+  batchDeliveryReserveChildren(parent_delivery_id: ID!, children: [BatchDeliveryChildReservationInput!]!): BatchDeliveryHandoff!
+  batchDeliveryMarkChildrenPublished(parent_delivery_id: ID!, child_delivery_ids: [ID!]!): BatchDeliveryHandoff!
 }
 
 enum WorkflowExecutionStatus {
@@ -16995,6 +17003,26 @@ enum BatchWaitUntil {
   MATERIALIZED
 }
 
+enum BatchDeliveryBranchKind {
+  ROOT
+  LEGACY_SPLIT
+  OVERSIZED_CHUNK
+  INTACT_REPLAY
+  TERMINAL_DEAD_LETTER
+}
+
+enum BatchDeliveryState {
+  READY
+  PUBLISHED
+}
+
+enum BatchDeliveryHandoffEvidence {
+  NONE
+  PLANNED
+  CHILDREN_RESERVED
+  CHILDREN_PUBLISHED
+}
+
 input BatchSubmitOptionsInput {
   wait_until: BatchWaitUntil
   execution_preference: BatchExecutionPreference
@@ -17036,6 +17064,13 @@ input BatchGraphqlExecutionPlanInput {
   execution_phases: [BatchGraphqlExecutionPhaseInput!]!
 }
 
+input BatchDeliveryChildReservationInput {
+  branch_kind: BatchDeliveryBranchKind!
+  branch_sequence: Int!
+  branch_ordinal: Int!
+  queue_payload: String!
+}
+
 type BatchAdmission {
   batch_id: ID!
   bundle_id: ID!
@@ -17066,4 +17101,19 @@ type BatchMutationOperationError {
   code: String
   message: String!
   retryable: Boolean!
+}
+
+type BatchDeliveryChild {
+  delivery_id: ID!
+  state: BatchDeliveryState!
+  queue_payload: String!
+}
+
+type BatchDeliveryHandoff {
+  parent_delivery_id: ID!
+  handoff_evidence: BatchDeliveryHandoffEvidence!
+  child_set_fingerprint: String
+  child_count: Int!
+  children: [BatchDeliveryChild!]!
+  pending_children: [BatchDeliveryChild!]!
 }

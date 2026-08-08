@@ -70,6 +70,13 @@ export enum BatchDeliveryState {
   Published = 'PUBLISHED',
 }
 
+export enum BatchDeliveryHandoffEvidence {
+  None = 'NONE',
+  Planned = 'PLANNED',
+  ChildrenReserved = 'CHILDREN_RESERVED',
+  ChildrenPublished = 'CHILDREN_PUBLISHED',
+}
+
 export enum BatchAdmissionErrorCode {
   InvalidBundle = 'INVALID_BUNDLE',
   InvalidBundleId = 'INVALID_BUNDLE_ID',
@@ -235,10 +242,29 @@ export interface BatchDelivery {
   queue_payload: string;
   required_worker_protocol: BatchDeliveryProtocol;
   state: BatchDeliveryState;
+  handoff_evidence: BatchDeliveryHandoffEvidence;
+  child_set_fingerprint: string | null;
+  child_count: number;
+  child_delivery_ids: string[];
   created_at: string;
   updated_at: string;
   published_at: string | null;
+  children_reserved_at: string | null;
+  children_published_at: string | null;
   last_error: string | null;
+}
+
+export interface BatchDeliveryChildReservationInput {
+  branchKind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
+  branchSequence: number;
+  branchOrdinal: number;
+  queueMessage: BatchQueueMessage;
+}
+
+export interface BatchDeliveryHandoff {
+  parentDelivery: BatchDelivery;
+  children: BatchDelivery[];
+  pendingChildren: BatchDelivery[];
 }
 
 export interface BatchWorkerRuntimeCapabilityInput {

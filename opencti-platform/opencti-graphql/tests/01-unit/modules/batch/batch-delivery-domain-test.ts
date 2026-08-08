@@ -6,23 +6,34 @@ import {
   buildChildBatchDeliveryId,
   buildRootBatchDeliveryEnvelope,
   buildRootBatchDeliveryId,
+  loadBatchDeliveryHandoff,
+  markBatchDeliveryChildrenPublished,
   reserveBatchDelivery,
+  reserveBatchDeliveryChildren,
 } from '../../../../src/modules/batch/batch-delivery-domain';
 import {
   BatchAdmissionErrorCode,
   BatchDeliveryBranchKind,
+  BatchDeliveryHandoffEvidence,
   BatchDeliveryKind,
   BatchDeliveryProtocol,
   BatchDeliveryState,
+  type BatchDeliveryChildReservationInput,
   type BatchQueueMessage,
 } from '../../../../src/modules/batch/batch-types';
-import { elIndex, elLoadById } from '../../../../src/database/engine';
+import { elFindByIds, elIndex, elLoadById, elUpdate } from '../../../../src/database/engine';
+import { lockResources } from '../../../../src/lock/master-lock';
 import { testContext } from '../../../utils/testQuery';
 
 vi.mock('../../../../src/database/engine', () => ({
+  elFindByIds: vi.fn(),
   elIndex: vi.fn(),
   elLoadById: vi.fn(),
   elUpdate: vi.fn(),
+}));
+
+vi.mock('../../../../src/lock/master-lock', () => ({
+  lockResources: vi.fn(),
 }));
 
 const queueMessage = {
@@ -60,10 +71,25 @@ describe('batch delivery domain', () => {
     vi.clearAllMocks();
     deliveries = new Map();
     vi.mocked(elLoadById).mockImplementation(async (_context, _user, id) => deliveries.get(id) ?? null);
+    vi.mocked(elFindByIds).mockImplementation(async (_context, _user, ids) => {
+      return (Array.isArray(ids) ? ids : [ids])
+        .map((id) => deliveries.get(id))
+        .filter((delivery) => delivery !== undefined);
+    });
     vi.mocked(elIndex).mockImplementation(async (_index, document) => {
       deliveries.set(document.internal_id, document);
       return document;
     });
+    vi.mocked(elUpdate).mockImplementation(async (_context, _index, id, update) => {
+      const current = deliveries.get(id);
+      const next = {
+        ...current,
+        ...(update as any).doc,
+      };
+      deliveries.set(id, next);
+      return next;
+    });
+    vi.mocked(lockResources).mockResolvedValue({ unlock: vi.fn() } as any);
   });
 
   it('builds deterministic root and child delivery ids without sibling or replay collisions', () => {
@@ -178,7 +204,10 @@ describe('batch delivery domain', () => {
       branchSequence: 0,
       branchOrdinal: 0,
       payloadFingerprint: 'fingerprint-1',
-      queueMessage,
+      queueMessage: {
+        ...queueMessage,
+        ...rootEnvelope,
+      },
       requiredWorkerProtocol: BatchDeliveryProtocol.V2,
     };
     const root = await reserveBatchDelivery(testContext, rootInput);
@@ -215,5 +244,246 @@ describe('batch delivery domain', () => {
           }),
         }),
       }));
+  });
+
+  it('reserves one immutable child set before publication and reuses it on replay', async () => {
+    const rootEnvelope = buildRootBatchDeliveryEnvelope('batch-submission--1');
+    const root = await reserveBatchDelivery(testContext, {
+      deliveryId: rootEnvelope.delivery_id,
+      submissionId: 'batch-submission--1',
+      parentDeliveryId: null,
+      deliveryKind: BatchDeliveryKind.Root,
+      branchKind: BatchDeliveryBranchKind.Root,
+      branchSequence: 0,
+      branchOrdinal: 0,
+      payloadFingerprint: buildBatchDeliveryPayloadFingerprint({ type: 'bundle', id: 'bundle--1' }),
+      queueMessage: {
+        ...queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1' })).toString('base64'),
+        ...rootEnvelope,
+      },
+      requiredWorkerProtocol: BatchDeliveryProtocol.V2,
+    });
+    const childInputs: BatchDeliveryChildReservationInput[] = [
+      {
+        branchKind: BatchDeliveryBranchKind.LegacySplit,
+        branchSequence: 0,
+        branchOrdinal: 0,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--1' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.LegacySplit, 0, 0),
+        },
+      },
+      {
+        branchKind: BatchDeliveryBranchKind.LegacySplit,
+        branchSequence: 0,
+        branchOrdinal: 1,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--2' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.LegacySplit, 0, 1),
+        },
+      },
+    ];
+
+    const first = await reserveBatchDeliveryChildren(testContext, root.internal_id, childInputs);
+    const replay = await reserveBatchDeliveryChildren(testContext, root.internal_id, childInputs);
+
+    expect(first.parentDelivery).toMatchObject({
+      internal_id: root.internal_id,
+      handoff_evidence: BatchDeliveryHandoffEvidence.ChildrenReserved,
+      child_count: 2,
+      child_delivery_ids: [
+        buildChildBatchDeliveryId(root.internal_id, BatchDeliveryBranchKind.LegacySplit, 0, 0),
+        buildChildBatchDeliveryId(root.internal_id, BatchDeliveryBranchKind.LegacySplit, 0, 1),
+      ],
+    });
+    expect(first.pendingChildren.map((child) => child.internal_id)).toEqual(first.parentDelivery.child_delivery_ids);
+    expect(replay.parentDelivery.child_set_fingerprint).toBe(first.parentDelivery.child_set_fingerprint);
+    expect(replay.children.map((child) => child.internal_id)).toEqual(first.children.map((child) => child.internal_id));
+    expect(elIndex).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails closed when an already planned child set changes membership or payload', async () => {
+    const rootEnvelope = buildRootBatchDeliveryEnvelope('batch-submission--1');
+    const root = await reserveBatchDelivery(testContext, {
+      deliveryId: rootEnvelope.delivery_id,
+      submissionId: 'batch-submission--1',
+      parentDeliveryId: null,
+      deliveryKind: BatchDeliveryKind.Root,
+      branchKind: BatchDeliveryBranchKind.Root,
+      branchSequence: 0,
+      branchOrdinal: 0,
+      payloadFingerprint: buildBatchDeliveryPayloadFingerprint({ type: 'bundle', id: 'bundle--1' }),
+      queueMessage: {
+        ...queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1' })).toString('base64'),
+        ...rootEnvelope,
+      },
+      requiredWorkerProtocol: BatchDeliveryProtocol.V2,
+    });
+    const child: BatchDeliveryChildReservationInput = {
+      branchKind: BatchDeliveryBranchKind.IntactReplay,
+      branchSequence: 1,
+      branchOrdinal: 0,
+      queueMessage: {
+        ...queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--1' }] })).toString('base64'),
+        ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.IntactReplay, 1, 0),
+      },
+    };
+    await reserveBatchDeliveryChildren(testContext, root.internal_id, [child]);
+
+    await expect(reserveBatchDeliveryChildren(testContext, root.internal_id, [{
+      ...child,
+      queueMessage: {
+        ...child.queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--2' }] })).toString('base64'),
+      },
+    }])).rejects.toThrowError(expect.objectContaining({
+      extensions: expect.objectContaining({
+        data: expect.objectContaining({
+          batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+        }),
+      }),
+    }));
+    await expect(reserveBatchDeliveryChildren(testContext, root.internal_id, [{
+      ...child,
+      branchSequence: 2,
+      queueMessage: {
+        ...child.queueMessage,
+        ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.IntactReplay, 2, 0),
+      },
+    }])).rejects.toThrowError(expect.objectContaining({
+      extensions: expect.objectContaining({
+        data: expect.objectContaining({
+          batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+        }),
+      }),
+    }));
+    await expect(reserveBatchDeliveryChildren(testContext, root.internal_id, [
+      child,
+      {
+        branchKind: BatchDeliveryBranchKind.IntactReplay,
+        branchSequence: 2,
+        branchOrdinal: 0,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--3' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.IntactReplay, 2, 0),
+        },
+      },
+    ])).rejects.toThrowError(expect.objectContaining({
+      extensions: expect.objectContaining({
+        data: expect.objectContaining({
+          batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+        }),
+      }),
+    }));
+  });
+
+  it('fails closed when a planned child set changes queue metadata before child inserts complete', async () => {
+    const rootEnvelope = buildRootBatchDeliveryEnvelope('batch-submission--1');
+    const root = await reserveBatchDelivery(testContext, {
+      deliveryId: rootEnvelope.delivery_id,
+      submissionId: 'batch-submission--1',
+      parentDeliveryId: null,
+      deliveryKind: BatchDeliveryKind.Root,
+      branchKind: BatchDeliveryBranchKind.Root,
+      branchSequence: 0,
+      branchOrdinal: 0,
+      payloadFingerprint: buildBatchDeliveryPayloadFingerprint({ type: 'bundle', id: 'bundle--1' }),
+      queueMessage: {
+        ...queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1' })).toString('base64'),
+        ...rootEnvelope,
+      },
+      requiredWorkerProtocol: BatchDeliveryProtocol.V2,
+    });
+    const child: BatchDeliveryChildReservationInput = {
+      branchKind: BatchDeliveryBranchKind.IntactReplay,
+      branchSequence: 1,
+      branchOrdinal: 0,
+      queueMessage: {
+        ...queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--1' }] })).toString('base64'),
+        ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.IntactReplay, 1, 0),
+      },
+    };
+    vi.mocked(elIndex).mockRejectedValueOnce(new Error('child storage unavailable'));
+
+    await expect(reserveBatchDeliveryChildren(testContext, root.internal_id, [child]))
+      .rejects.toThrowError('child storage unavailable');
+
+    await expect(reserveBatchDeliveryChildren(testContext, root.internal_id, [{
+      ...child,
+      queueMessage: {
+        ...child.queueMessage,
+        no_split: false,
+      },
+    }])).rejects.toThrowError(expect.objectContaining({
+      extensions: expect.objectContaining({
+        data: expect.objectContaining({
+          batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+        }),
+      }),
+    }));
+  });
+
+  it('advances handoff evidence monotonically and returns only missing published children', async () => {
+    const rootEnvelope = buildRootBatchDeliveryEnvelope('batch-submission--1');
+    const root = await reserveBatchDelivery(testContext, {
+      deliveryId: rootEnvelope.delivery_id,
+      submissionId: 'batch-submission--1',
+      parentDeliveryId: null,
+      deliveryKind: BatchDeliveryKind.Root,
+      branchKind: BatchDeliveryBranchKind.Root,
+      branchSequence: 0,
+      branchOrdinal: 0,
+      payloadFingerprint: buildBatchDeliveryPayloadFingerprint({ type: 'bundle', id: 'bundle--1' }),
+      queueMessage: {
+        ...queueMessage,
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1' })).toString('base64'),
+        ...rootEnvelope,
+      },
+      requiredWorkerProtocol: BatchDeliveryProtocol.V2,
+    });
+    const reservation = await reserveBatchDeliveryChildren(testContext, root.internal_id, [
+      {
+        branchKind: BatchDeliveryBranchKind.OversizedChunk,
+        branchSequence: 0,
+        branchOrdinal: 0,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--1' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.OversizedChunk, 0, 0),
+        },
+      },
+      {
+        branchKind: BatchDeliveryBranchKind.OversizedChunk,
+        branchSequence: 0,
+        branchOrdinal: 1,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--2' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.OversizedChunk, 0, 1),
+        },
+      },
+    ]);
+    const [firstChild, secondChild] = reservation.children;
+
+    const afterFirst = await markBatchDeliveryChildrenPublished(testContext, root.internal_id, [firstChild.internal_id]);
+    const afterSecond = await markBatchDeliveryChildrenPublished(testContext, root.internal_id, [secondChild.internal_id]);
+    const afterReplay = await markBatchDeliveryChildrenPublished(testContext, root.internal_id, [firstChild.internal_id]);
+    const replay = await loadBatchDeliveryHandoff(testContext, root.internal_id);
+
+    expect(afterFirst.parentDelivery.handoff_evidence).toBe(BatchDeliveryHandoffEvidence.ChildrenReserved);
+    expect(afterFirst.pendingChildren.map((child) => child.internal_id)).toEqual([secondChild.internal_id]);
+    expect(afterSecond.parentDelivery.handoff_evidence).toBe(BatchDeliveryHandoffEvidence.ChildrenPublished);
+    expect(afterSecond.pendingChildren).toEqual([]);
+    expect(afterReplay.parentDelivery.handoff_evidence).toBe(BatchDeliveryHandoffEvidence.ChildrenPublished);
+    expect(replay.parentDelivery.handoff_evidence).toBe(BatchDeliveryHandoffEvidence.ChildrenPublished);
+    expect(replay.pendingChildren).toEqual([]);
   });
 });

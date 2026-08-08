@@ -11,7 +11,7 @@ import signal
 import tempfile
 import threading
 from contextlib import contextmanager
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import magic
 import requests
@@ -109,6 +109,66 @@ BATCH_MUTATION_EXECUTE_QUERY = """
                     wait_until
                     side_effect_kinds
                     materialized
+                }
+            }
+        """
+BATCH_DELIVERY_HANDOFF_QUERY = """
+            query BatchDeliveryHandoff($parentDeliveryId: ID!) {
+                batchDeliveryHandoff(parent_delivery_id: $parentDeliveryId) {
+                    parent_delivery_id
+                    handoff_evidence
+                    child_set_fingerprint
+                    child_count
+                    children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                    pending_children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                }
+            }
+        """
+BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION = """
+            mutation BatchDeliveryReserveChildren($parentDeliveryId: ID!, $children: [BatchDeliveryChildReservationInput!]!) {
+                batchDeliveryReserveChildren(parent_delivery_id: $parentDeliveryId, children: $children) {
+                    parent_delivery_id
+                    handoff_evidence
+                    child_set_fingerprint
+                    child_count
+                    children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                    pending_children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                }
+            }
+        """
+BATCH_DELIVERY_MARK_CHILDREN_PUBLISHED_MUTATION = """
+            mutation BatchDeliveryMarkChildrenPublished($parentDeliveryId: ID!, $childDeliveryIds: [ID!]!) {
+                batchDeliveryMarkChildrenPublished(parent_delivery_id: $parentDeliveryId, child_delivery_ids: $childDeliveryIds) {
+                    parent_delivery_id
+                    handoff_evidence
+                    child_set_fingerprint
+                    child_count
+                    children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                    pending_children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
                 }
             }
         """
@@ -970,6 +1030,44 @@ class OpenCTIApiClient:
             # A long batch can leave the shared keep-alive pool idle past the
             # server timeout. Clear it before follow-up work/report mutations.
             self.session.close()
+
+    def batch_delivery_handoff(self, parent_delivery_id: str) -> Dict[str, Any]:
+        """Read durable child handoff state for one logical parent delivery."""
+        result = self.query(
+            BATCH_DELIVERY_HANDOFF_QUERY,
+            {"parentDeliveryId": parent_delivery_id},
+        )
+        return result["data"]["batchDeliveryHandoff"]
+
+    def reserve_batch_delivery_children(
+        self,
+        parent_delivery_id: str,
+        children: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Reserve an immutable child set before worker publication."""
+        result = self.query(
+            BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION,
+            {
+                "parentDeliveryId": parent_delivery_id,
+                "children": children,
+            },
+        )
+        return result["data"]["batchDeliveryReserveChildren"]
+
+    def mark_batch_delivery_children_published(
+        self,
+        parent_delivery_id: str,
+        child_delivery_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Record broker-confirmed child publication for a reserved parent handoff."""
+        result = self.query(
+            BATCH_DELIVERY_MARK_CHILDREN_PUBLISHED_MUTATION,
+            {
+                "parentDeliveryId": parent_delivery_id,
+                "childDeliveryIds": child_delivery_ids,
+            },
+        )
+        return result["data"]["batchDeliveryMarkChildrenPublished"]
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
         """Get file from the OpenCTI API.

@@ -1,12 +1,16 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
+import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, reserveBatchDeliveryChildren } from './batch-delivery-domain';
 import { executeBatchGraphqlOperations } from './batch-operation-executor';
 import type {
+  BatchDeliveryBranchKind,
+  BatchDeliveryChildReservationInput,
   BatchExecutionMode,
   BatchExecutionPreference,
   BatchGraphqlExecutionPlanInput,
   BatchGraphqlFileInput,
   BatchGraphqlOperationInput,
+  BatchQueueMessage,
   BatchWaitUntil,
 } from './batch-types';
 
@@ -49,7 +53,25 @@ interface BatchGraphqlExecutionPlanInputValue {
   }>;
 }
 
+interface BatchDeliveryChildReservationInputValue {
+  branch_kind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
+  branch_sequence: number;
+  branch_ordinal: number;
+  queue_payload: string;
+}
+
+const parseBatchDeliveryQueuePayload = (queuePayload: string): BatchQueueMessage => {
+  return JSON.parse(queuePayload) as BatchQueueMessage;
+};
+
 const batchResolvers = {
+  Query: {
+    batchDeliveryHandoff: (
+      _: unknown,
+      { parent_delivery_id }: { parent_delivery_id: string },
+      context: any,
+    ) => loadBatchDeliveryHandoff(context, parent_delivery_id),
+  },
   Mutation: {
     stixBundleSubmit: (
       _: unknown,
@@ -102,6 +124,27 @@ const batchResolvers = {
         } satisfies BatchGraphqlExecutionPlanInput
         : undefined,
     }),
+    batchDeliveryReserveChildren: (
+      _: unknown,
+      {
+        parent_delivery_id,
+        children,
+      }: { parent_delivery_id: string; children: BatchDeliveryChildReservationInputValue[] },
+      context: any,
+    ) => reserveBatchDeliveryChildren(context, parent_delivery_id, children.map((child): BatchDeliveryChildReservationInput => ({
+      branchKind: child.branch_kind,
+      branchSequence: child.branch_sequence,
+      branchOrdinal: child.branch_ordinal,
+      queueMessage: parseBatchDeliveryQueuePayload(child.queue_payload),
+    }))),
+    batchDeliveryMarkChildrenPublished: (
+      _: unknown,
+      {
+        parent_delivery_id,
+        child_delivery_ids,
+      }: { parent_delivery_id: string; child_delivery_ids: string[] },
+      context: any,
+    ) => markBatchDeliveryChildrenPublished(context, parent_delivery_id, child_delivery_ids),
   },
   BatchAdmission: {
     batch_id: (admission: any) => admission.batchId,
@@ -126,6 +169,19 @@ const batchResolvers = {
   BatchMutationOperationError: {
     operation_index: (operationError: any) => operationError.operationIndex,
     object_id: (operationError: any) => operationError.objectId,
+  },
+  BatchDeliveryHandoff: {
+    parent_delivery_id: (handoff: any) => handoff.parentDelivery.internal_id,
+    handoff_evidence: (handoff: any) => handoff.parentDelivery.handoff_evidence,
+    child_set_fingerprint: (handoff: any) => handoff.parentDelivery.child_set_fingerprint,
+    child_count: (handoff: any) => handoff.parentDelivery.child_count,
+    children: (handoff: any) => handoff.children,
+    pending_children: (handoff: any) => handoff.pendingChildren,
+  },
+  BatchDeliveryChild: {
+    delivery_id: (delivery: any) => delivery.internal_id,
+    state: (delivery: any) => delivery.state,
+    queue_payload: (delivery: any) => delivery.queue_payload,
   },
 };
 

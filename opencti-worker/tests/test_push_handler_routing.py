@@ -10,6 +10,10 @@ from src import push_handler
 from src.push_handler import (
     BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
     BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+    BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+    BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+    BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED,
+    BATCH_DELIVERY_HANDOFF_NONE,
     BATCH_DELIVERY_KIND_CHILD,
     BATCH_DELIVERY_KIND_ROOT,
     BATCH_DELIVERY_PROTOCOL_V2,
@@ -35,6 +39,19 @@ def build_handler():
     handler.api.work.add_expectations.return_value = True
     handler.api.stix2.import_bundle_from_json.return_value = ([], [])
     handler.api.stix2.import_bundle_from_json_batch.return_value = ([], [])
+    handler.api.batch_delivery_handoff.return_value = {
+        "parent_delivery_id": "batch-delivery--unused",
+        "handoff_evidence": BATCH_DELIVERY_HANDOFF_NONE,
+        "child_set_fingerprint": None,
+        "child_count": 0,
+        "pending_children": [],
+    }
+    handler.api.reserve_batch_delivery_children.side_effect = (
+        lambda parent_delivery_id, children: build_reserved_handoff(
+            parent_delivery_id,
+            [child["queue_payload"] for child in children],
+        )
+    )
     handler.logger = MagicMock()
     handler.connector_id = "connector--1"
     handler.push_exchange = "push-exchange"
@@ -46,6 +63,27 @@ def build_handler():
     handler.bundles_processing_time_gauge = MagicMock()
     handler.objects_max_refs = 0
     return handler
+
+
+def build_reserved_handoff(parent_delivery_id, queue_payloads, evidence=None):
+    pending_children = []
+    for queue_payload in queue_payloads:
+        child = json.loads(queue_payload)
+        pending_children.append(
+            {
+                "delivery_id": child["delivery_id"],
+                "state": "READY",
+                "queue_payload": queue_payload,
+            }
+        )
+    return {
+        "parent_delivery_id": parent_delivery_id,
+        "handoff_evidence": evidence or BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED,
+        "child_set_fingerprint": "fingerprint-1",
+        "child_count": len(queue_payloads),
+        "children": pending_children,
+        "pending_children": pending_children,
+    }
 
 
 def build_message(**overrides):
@@ -78,6 +116,10 @@ def build_v2_message(**overrides):
     }
     message.update(overrides)
     return build_message(**message)
+
+
+def decode_queue_message_content(queue_message):
+    return json.loads(base64.b64decode(queue_message["content"]).decode("utf-8"))
 
 
 def test_handler_passes_request_timeouts_to_api_client(monkeypatch):
@@ -275,6 +317,47 @@ def test_handler_processes_v2_root_messages_on_the_existing_unsplit_route():
     handler.api.stix2.import_bundle_from_json_batch.assert_called_once()
 
 
+def test_v1_routes_do_not_use_durable_child_handoff_api(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2Splitter,
+        "split_bundle_with_expectations",
+        lambda *args, **kwargs: (
+            2,
+            [],
+            [
+                {
+                    "type": "bundle",
+                    "id": "bundle--1",
+                    "objects": [{"id": "indicator--1"}],
+                },
+                {
+                    "type": "bundle",
+                    "id": "bundle--1",
+                    "objects": [{"id": "indicator--2"}],
+                },
+            ],
+        ),
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(split_bundles=True, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.api.batch_delivery_handoff.assert_not_called()
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.api.mark_batch_delivery_children_published.assert_not_called()
+
+
 def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
     handler = build_handler()
 
@@ -319,7 +402,7 @@ def test_batch_payload_too_large_detection_handles_typed_and_backend_errors():
 
 def test_handler_requeues_durable_batch_chunks_for_oversized_batch_plan(monkeypatch):
     handler = build_handler()
-    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.send_queue_message_to_specific_queue = MagicMock()
     handler.api.stix2.import_bundle_from_json_batch.side_effect = (
         BatchMutationPlanTooLarge(200, 100)
     )
@@ -358,13 +441,135 @@ def test_handler_requeues_durable_batch_chunks_for_oversized_batch_plan(monkeypa
     assert result == "ack"
     handler.api.work.add_expectations.assert_called_once_with("work--1", 2)
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
-    assert handler.send_bundle_to_specific_queue.call_count == 2
-    first_chunk_data = handler.send_bundle_to_specific_queue.call_args_list[0].args[3]
-    second_chunk_data = handler.send_bundle_to_specific_queue.call_args_list[1].args[3]
+    assert handler.send_queue_message_to_specific_queue.call_count == 2
+    first_chunk_data = handler.send_queue_message_to_specific_queue.call_args_list[
+        0
+    ].args[3]
+    second_chunk_data = handler.send_queue_message_to_specific_queue.call_args_list[
+        1
+    ].args[3]
     assert first_chunk_data["split_bundles"] is False
     assert first_chunk_data["no_split"] is True
     assert first_chunk_data["batch_plan"] == batch_chunks[0][1]
     assert second_chunk_data["batch_plan"] == batch_chunks[1][1]
+
+
+def test_handler_reserves_v2_oversized_chunks_before_publishing(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooLarge(200, 100)
+    )
+    batch_chunks = [
+        (
+            {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
+            {"version": 1, "ordered_object_ids": ["indicator--1"]},
+        ),
+        (
+            {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--2"}]},
+            {"version": 1, "ordered_object_ids": ["indicator--2"]},
+        ),
+    ]
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2,
+        "build_oversized_batch_plan_chunks",
+        lambda *args, **kwargs: batch_chunks,
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    def reserve_children(parent_delivery_id, children):
+        return build_reserved_handoff(
+            parent_delivery_id,
+            [child["queue_payload"] for child in children],
+        )
+
+    handler.api.reserve_batch_delivery_children.side_effect = reserve_children
+
+    result = handler.handle_message(
+        build_v2_message(
+            split_bundles=False,
+            work_id="work--1",
+            batch_plan={"version": 1},
+        )
+    )
+
+    assert result == "ack"
+    reserve_call = handler.api.reserve_batch_delivery_children.call_args.args
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    assert reserve_call[0] == root_delivery_id
+    assert [child["branch_kind"] for child in reserve_call[1]] == [
+        BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+        BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+    ]
+    assert handler.send_queue_message_to_specific_queue.call_count == 2
+    handler.api.mark_batch_delivery_children_published.assert_called_once_with(
+        root_delivery_id,
+        [
+            build_child_delivery_id(
+                root_delivery_id, BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK, 0, 0
+            ),
+            build_child_delivery_id(
+                root_delivery_id, BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK, 0, 1
+            ),
+        ],
+    )
+
+
+def test_handler_resumes_reserved_v2_chunks_before_reimport(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = AssertionError(
+        "reserved chunk handoffs must not reimport the parent"
+    )
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    chunk_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(chunk_child)],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=False, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.send_queue_message_to_specific_queue.assert_called_once_with(
+        channel,
+        "push-exchange",
+        "push-routing",
+        chunk_child,
+        False,
+    )
+    handler.api.work.report_expectation.assert_called_once_with("work--1", None)
 
 
 def test_handler_requeues_transient_api_connection_failures(monkeypatch):
@@ -387,7 +592,7 @@ def test_handler_requeues_transient_api_connection_failures(monkeypatch):
 
 def test_handler_republishes_intact_bundle_for_retryable_batch_failures(monkeypatch):
     handler = build_handler()
-    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.send_queue_message_to_specific_queue = MagicMock()
     handler.api.stix2.import_bundle_from_json_batch.return_value = (
         [],
         [
@@ -415,13 +620,16 @@ def test_handler_republishes_intact_bundle_for_retryable_batch_failures(monkeypa
 
     assert result == "ack"
     handler.api.work.report_expectation.assert_not_called()
-    handler.send_bundle_to_specific_queue.assert_called_once()
-    replay_call = handler.send_bundle_to_specific_queue.call_args.args
+    handler.send_queue_message_to_specific_queue.assert_called_once()
+    replay_call = handler.send_queue_message_to_specific_queue.call_args.args
     assert replay_call[0] is channel
     assert replay_call[1] == "push-exchange"
     assert replay_call[2] == "push-routing"
     assert replay_call[3]["batch_replay_count"] == 1
-    assert replay_call[4]["id"] == "bundle--11111111-1111-4111-8111-111111111111"
+    assert (
+        decode_queue_message_content(replay_call[3])["id"]
+        == "bundle--11111111-1111-4111-8111-111111111111"
+    )
     handler.api.set_retry_number.assert_any_call(None)
 
 
@@ -429,7 +637,7 @@ def test_handler_republishes_v2_intact_replays_with_deterministic_child_ids(
     monkeypatch,
 ):
     handler = build_handler()
-    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.send_queue_message_to_specific_queue = MagicMock()
     handler.api.stix2.import_bundle_from_json_batch.return_value = (
         [],
         [
@@ -454,7 +662,7 @@ def test_handler_republishes_v2_intact_replays_with_deterministic_child_ids(
     result = handler.handle_message(build_v2_message(split_bundles=False))
 
     assert result == "ack"
-    replay_data = handler.send_bundle_to_specific_queue.call_args.args[3]
+    replay_data = handler.send_queue_message_to_specific_queue.call_args.args[3]
     root_delivery_id = build_root_delivery_id("batch-submission--1")
     assert replay_data["delivery_id"] == build_child_delivery_id(
         root_delivery_id,
@@ -464,6 +672,124 @@ def test_handler_republishes_v2_intact_replays_with_deterministic_child_ids(
     )
     assert replay_data["parent_delivery_id"] == root_delivery_id
     assert replay_data["delivery_kind"] == BATCH_DELIVERY_KIND_CHILD
+
+
+def test_handler_reuses_reserved_v2_replay_children_and_publishes_only_missing(
+    monkeypatch,
+):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [],
+        [
+            {
+                "id": "relationship--1",
+                "rejection_info": {
+                    "reject_reason": "MISSING_REFERENCE",
+                    "retryable": True,
+                },
+            }
+        ],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    reserved_queue_payload = json.dumps(
+        json.loads(
+            build_v2_message(
+                delivery_id=build_child_delivery_id(
+                    root_delivery_id,
+                    BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+                    1,
+                    0,
+                ),
+                parent_delivery_id=root_delivery_id,
+                delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+                delivery_branch_kind=BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+                delivery_branch_sequence=1,
+                delivery_branch_ordinal=0,
+                batch_replay_count=1,
+            )
+        )
+    )
+    handler.api.reserve_batch_delivery_children.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [reserved_queue_payload],
+    )
+    handler.api.reserve_batch_delivery_children.side_effect = None
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    handler.send_queue_message_to_specific_queue.assert_called_once_with(
+        channel,
+        "push-exchange",
+        "push-routing",
+        json.loads(reserved_queue_payload),
+        False,
+    )
+    handler.api.mark_batch_delivery_children_published.assert_called_once_with(
+        root_delivery_id,
+        [
+            build_child_delivery_id(
+                root_delivery_id, BATCH_DELIVERY_BRANCH_INTACT_REPLAY, 1, 0
+            )
+        ],
+    )
+
+
+def test_handler_resumes_reserved_v2_replay_children_before_reimport(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = AssertionError(
+        "reserved replay child handoffs must not reimport the parent"
+    )
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    replay_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+                1,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+            delivery_branch_sequence=1,
+            delivery_branch_ordinal=0,
+            batch_replay_count=1,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(replay_child)],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.send_queue_message_to_specific_queue.assert_called_once_with(
+        channel,
+        "push-exchange",
+        "push-routing",
+        replay_child,
+        False,
+    )
 
 
 def test_handler_reports_retryable_batch_failure_after_replay_budget(monkeypatch):
@@ -507,7 +833,7 @@ def test_handler_reports_retryable_batch_failure_after_replay_budget(monkeypatch
 
 def test_handler_dead_letters_nonretryable_batch_failures(monkeypatch):
     handler = build_handler()
-    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.send_queue_message_to_specific_queue = MagicMock()
     handler.api.stix2.import_bundle_from_json_batch.return_value = (
         [{"id": "indicator--2", "type": "indicator"}],
         [
@@ -541,14 +867,63 @@ def test_handler_dead_letters_nonretryable_batch_failures(monkeypatch):
             "source": "Bundle bundle--11111111-1111-4111-8111-111111111111",
         },
     )
-    handler.send_bundle_to_specific_queue.assert_called_once()
-    dead_letter_call = handler.send_bundle_to_specific_queue.call_args.args
+    handler.send_queue_message_to_specific_queue.assert_called_once()
+    dead_letter_call = handler.send_queue_message_to_specific_queue.call_args.args
     assert dead_letter_call[0] is channel
     assert dead_letter_call[1] == "listen-exchange"
     assert dead_letter_call[2] == "dead-letter-routing"
-    assert dead_letter_call[4]["id"] == "indicator--1"
+    dead_letter_content = decode_queue_message_content(dead_letter_call[3])
+    assert dead_letter_content["id"] == "indicator--1"
     assert (
-        dead_letter_call[4]["rejection_info"]["original_connector_id"] == "connector--1"
+        dead_letter_content["rejection_info"]["original_connector_id"] == "connector--1"
+    )
+
+
+def test_handler_resumes_reserved_v2_dead_letter_children_before_reimport(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = AssertionError(
+        "reserved dead-letter handoffs must not reimport the parent"
+    )
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    dead_letter_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(dead_letter_child)],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.send_queue_message_to_specific_queue.assert_called_once_with(
+        channel,
+        "listen-exchange",
+        "dead-letter-routing",
+        dead_letter_child,
+        False,
     )
 
 
@@ -583,7 +958,7 @@ def test_handler_forwards_backend_batch_plan_to_batch_importer():
 
 def test_handler_requeues_child_bundles_only_for_explicit_split(monkeypatch):
     handler = build_handler()
-    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.send_queue_message_to_specific_queue = MagicMock()
 
     split_bundles = [
         {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
@@ -611,12 +986,12 @@ def test_handler_requeues_child_bundles_only_for_explicit_split(monkeypatch):
     handler.api.stix2.import_bundle_from_json.assert_not_called()
     handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
     handler.api.work.add_expectations.assert_called_once_with("work--1", 2)
-    assert handler.send_bundle_to_specific_queue.call_count == 2
+    assert handler.send_queue_message_to_specific_queue.call_count == 2
 
 
 def test_handler_requeues_v2_split_children_with_stable_sibling_ids(monkeypatch):
     handler = build_handler()
-    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.send_queue_message_to_specific_queue = MagicMock()
 
     split_bundles = [
         {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
@@ -642,8 +1017,10 @@ def test_handler_requeues_v2_split_children_with_stable_sibling_ids(monkeypatch)
 
     assert result == "ack"
     root_delivery_id = build_root_delivery_id("batch-submission--1")
-    first_child = handler.send_bundle_to_specific_queue.call_args_list[0].args[3]
-    second_child = handler.send_bundle_to_specific_queue.call_args_list[1].args[3]
+    first_child = handler.send_queue_message_to_specific_queue.call_args_list[0].args[3]
+    second_child = handler.send_queue_message_to_specific_queue.call_args_list[1].args[
+        3
+    ]
     assert first_child["delivery_id"] == build_child_delivery_id(
         root_delivery_id,
         BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
@@ -657,3 +1034,320 @@ def test_handler_requeues_v2_split_children_with_stable_sibling_ids(monkeypatch)
         1,
     )
     assert first_child["delivery_id"] != second_child["delivery_id"]
+
+
+def test_handler_resumes_reserved_v2_fallback_split_children_before_reimport(
+    monkeypatch,
+):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = AssertionError(
+        "reserved fallback split handoffs must not reimport the parent"
+    )
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    split_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(split_child)],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=False, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.send_queue_message_to_specific_queue.assert_called_once_with(
+        channel,
+        "push-exchange",
+        "push-routing",
+        split_child,
+        True,
+    )
+    handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+
+
+def test_handler_recovers_only_missing_reserved_v2_split_children(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    first_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    second_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                1,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=1,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(second_child)],
+    )
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2Splitter,
+        "split_bundle_with_expectations",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("reserved child handoff must not recompute split bundles")
+        ),
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=True, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.send_queue_message_to_specific_queue.assert_called_once_with(
+        channel,
+        "push-exchange",
+        "push-routing",
+        second_child,
+        True,
+    )
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.api.mark_batch_delivery_children_published.assert_called_once_with(
+        root_delivery_id,
+        [second_child["delivery_id"]],
+    )
+    assert first_child["delivery_id"] != second_child["delivery_id"]
+
+
+def test_handler_finalizes_reserved_v2_split_handoff_without_republishing(
+    monkeypatch,
+):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    first_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    second_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                1,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=1,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = {
+        "parent_delivery_id": root_delivery_id,
+        "handoff_evidence": BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED,
+        "child_set_fingerprint": "fingerprint-1",
+        "child_count": 2,
+        "children": [
+            {
+                "delivery_id": first_child["delivery_id"],
+                "state": "PUBLISHED",
+                "queue_payload": json.dumps(first_child),
+            },
+            {
+                "delivery_id": second_child["delivery_id"],
+                "state": "PUBLISHED",
+                "queue_payload": json.dumps(second_child),
+            },
+        ],
+        "pending_children": [],
+    }
+
+    def fail_split(*args, **kwargs):
+        raise AssertionError("completed child handoffs must not be recomputed")
+
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2Splitter,
+        "split_bundle_with_expectations",
+        fail_split,
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=True, work_id="work--1")
+    )
+
+    assert result == "ack"
+    handler.send_queue_message_to_specific_queue.assert_not_called()
+    handler.api.mark_batch_delivery_children_published.assert_called_once_with(
+        root_delivery_id,
+        [],
+    )
+    handler.api.work.report_expectation.assert_not_called()
+
+
+def test_handler_requeues_reserved_v2_child_publish_failures(monkeypatch):
+    handler = build_handler()
+    monkeypatch.setattr(push_handler.time, "sleep", MagicMock())
+    monkeypatch.setattr(push_handler.random, "uniform", lambda *_: 0)
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(child)],
+    )
+    handler.send_queue_message_to_specific_queue = MagicMock(
+        side_effect=RuntimeError("broker connection lost")
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=True, work_id="work--1")
+    )
+
+    assert result == "requeue"
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.api.mark_batch_delivery_children_published.assert_not_called()
+
+
+def test_resume_reserved_handoff_rejects_mismatched_child_branch_route():
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    dead_letter_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    handler.api.batch_delivery_handoff.return_value = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(dead_letter_child)],
+    )
+
+    resumed = handler._resume_reserved_child_handoff(
+        MagicMock(),
+        "push-exchange",
+        "push-routing",
+        json.loads(build_v2_message()),
+        BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+    )
+
+    assert resumed is False
+    handler.send_queue_message_to_specific_queue.assert_not_called()
+    handler.api.mark_batch_delivery_children_published.assert_not_called()
+
+
+def test_handler_requeues_v2_child_handoff_when_confirms_unavailable(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    monkeypatch.setattr(push_handler.time, "sleep", MagicMock())
+    monkeypatch.setattr(push_handler.random, "uniform", lambda *_: 0)
+    channel = MagicMock()
+    channel.confirm_delivery.side_effect = RuntimeError("confirms unavailable")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=True, work_id="work--1")
+    )
+
+    assert result == "requeue"
+    handler.api.batch_delivery_handoff.assert_not_called()
+    handler.api.reserve_batch_delivery_children.assert_not_called()
+    handler.send_queue_message_to_specific_queue.assert_not_called()
+    handler.api.mark_batch_delivery_children_published.assert_not_called()

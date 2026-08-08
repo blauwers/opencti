@@ -32,6 +32,14 @@ BATCH_DELIVERY_BRANCH_KINDS = {
     BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
     BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
 }
+BATCH_DELIVERY_HANDOFF_NONE = "NONE"
+BATCH_DELIVERY_HANDOFF_PLANNED = "PLANNED"
+BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED = "CHILDREN_RESERVED"
+BATCH_DELIVERY_HANDOFF_CHILDREN_PUBLISHED = "CHILDREN_PUBLISHED"
+
+
+class BatchDeliveryChildPublishRetryable(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -176,6 +184,33 @@ def build_child_delivery_message(
     return child_data
 
 
+def build_bundle_queue_message(data: Dict[str, Any], bundle: Any) -> Dict[str, Any]:
+    queue_message = dict(data)
+    text_bundle = json.dumps(bundle)
+    queue_message["content"] = base64.b64encode(
+        text_bundle.encode("utf-8", "escape")
+    ).decode("utf-8")
+    return queue_message
+
+
+def build_child_delivery_queue_message(
+    data: Dict[str, Any],
+    bundle: Any,
+    branch_kind: str,
+    branch_sequence: int,
+    branch_ordinal: int,
+) -> Dict[str, Any]:
+    return build_bundle_queue_message(
+        build_child_delivery_message(
+            data,
+            branch_kind,
+            branch_sequence,
+            branch_ordinal,
+        ),
+        bundle,
+    )
+
+
 def should_split_bundles(data: Dict[str, Any], content: Dict[str, Any]) -> bool:
     return len(content["objects"]) > 1 and data.get("split_bundles") is True
 
@@ -291,11 +326,22 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         bundle: Any,
         is_split_bundle=False,
     ):
-        text_bundle = json.dumps(bundle)
-        data["content"] = base64.b64encode(
-            text_bundle.encode("utf-8", "escape")
-        ).decode("utf-8")
+        self.send_queue_message_to_specific_queue(
+            push_channel,
+            exchange,
+            routing_key,
+            build_bundle_queue_message(data, bundle),
+            is_split_bundle,
+        )
 
+    def send_queue_message_to_specific_queue(
+        self,
+        push_channel: BlockingChannel,
+        exchange: str,
+        routing_key: str,
+        data: Dict[str, Any],
+        is_split_bundle=False,
+    ):
         # Send the message
         retry_count = 0
         while True:
@@ -323,6 +369,251 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 self.logger.debug("Unable to send bundle error", {"error": str(err)})
                 time.sleep(10)
 
+    def _confirm_delivery(self, push_channel: BlockingChannel, data: Dict[str, Any]):
+        try:
+            push_channel.confirm_delivery()
+        except Exception as err:  # pylint: disable=broad-except
+            if parse_batch_delivery_envelope(data) is not None:
+                raise BatchDeliveryChildPublishRetryable(
+                    "Unable to enable publisher confirms for durable child handoff"
+                ) from err
+            self.logger.warning(str(err))
+
+    @staticmethod
+    def _build_child_reservations(
+        child_queue_messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return [
+            {
+                "branch_kind": child_queue_message["delivery_branch_kind"],
+                "branch_sequence": child_queue_message["delivery_branch_sequence"],
+                "branch_ordinal": child_queue_message["delivery_branch_ordinal"],
+                "queue_payload": json.dumps(child_queue_message),
+            }
+            for child_queue_message in child_queue_messages
+        ]
+
+    @staticmethod
+    def _handoff_matches_branch(
+        handoff: Dict[str, Any],
+        expected_branch_kind: str,
+    ) -> bool:
+        children = handoff.get("children")
+        if children is None:
+            children = handoff.get("pending_children")
+        if not isinstance(children, list):
+            raise ValueError("Invalid durable child handoff state")
+        if len(children) == 0:
+            if handoff.get("child_count") == 0:
+                return False
+            raise ValueError("Invalid durable child handoff state")
+        branch_kind = None
+        for child in children:
+            queue_payload = child.get("queue_payload")
+            if not isinstance(queue_payload, str) or len(queue_payload) == 0:
+                raise ValueError("Invalid durable child handoff payload")
+            queue_message = json.loads(queue_payload)
+            child_envelope = parse_batch_delivery_envelope(queue_message)
+            if child_envelope is None:
+                raise ValueError("Invalid durable child handoff payload")
+            if branch_kind is None:
+                branch_kind = child_envelope.delivery_branch_kind
+            elif branch_kind != child_envelope.delivery_branch_kind:
+                raise ValueError("Invalid durable child handoff branch set")
+            if child_envelope.delivery_branch_kind != expected_branch_kind:
+                return False
+        return True
+
+    @staticmethod
+    def _handoff_branch_kind(handoff: Dict[str, Any]) -> Optional[str]:
+        children = handoff.get("children")
+        if children is None:
+            children = handoff.get("pending_children")
+        if not isinstance(children, list) or len(children) == 0:
+            raise ValueError("Invalid durable child handoff state")
+        branch_kind = None
+        for child in children:
+            queue_payload = child.get("queue_payload")
+            if not isinstance(queue_payload, str) or len(queue_payload) == 0:
+                raise ValueError("Invalid durable child handoff payload")
+            child_envelope = parse_batch_delivery_envelope(json.loads(queue_payload))
+            if child_envelope is None:
+                raise ValueError("Invalid durable child handoff payload")
+            if branch_kind is None:
+                branch_kind = child_envelope.delivery_branch_kind
+            elif branch_kind != child_envelope.delivery_branch_kind:
+                raise ValueError("Invalid durable child handoff branch set")
+        return branch_kind
+
+    def _publish_reserved_child_handoff(
+        self,
+        push_channel: BlockingChannel,
+        exchange: str,
+        routing_key: str,
+        parent_delivery_id: str,
+        handoff: Dict[str, Any],
+        is_split_bundle=False,
+    ) -> None:
+        pending_children = handoff.get("pending_children")
+        if not isinstance(pending_children, list):
+            raise ValueError("Invalid durable child handoff state")
+        published_child_ids = []
+        try:
+            for child in pending_children:
+                queue_payload = child.get("queue_payload")
+                child_delivery_id = child.get("delivery_id")
+                if (
+                    not isinstance(queue_payload, str)
+                    or len(queue_payload) == 0
+                    or not isinstance(child_delivery_id, str)
+                    or len(child_delivery_id) == 0
+                ):
+                    raise ValueError("Invalid durable child handoff payload")
+                queue_message = json.loads(queue_payload)
+                try:
+                    self.send_queue_message_to_specific_queue(
+                        push_channel,
+                        exchange,
+                        routing_key,
+                        queue_message,
+                        is_split_bundle,
+                    )
+                except Exception as err:  # pylint: disable=broad-except
+                    raise BatchDeliveryChildPublishRetryable(
+                        "Unable to publish durable child handoff"
+                    ) from err
+                published_child_ids.append(child_delivery_id)
+        except BatchDeliveryChildPublishRetryable:
+            if published_child_ids:
+                self.api.mark_batch_delivery_children_published(
+                    parent_delivery_id,
+                    published_child_ids,
+                )
+            raise
+        if published_child_ids or (
+            len(pending_children) == 0
+            and handoff.get("handoff_evidence")
+            == BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED
+        ):
+            self.api.mark_batch_delivery_children_published(
+                parent_delivery_id,
+                published_child_ids,
+            )
+
+    def _reserve_and_publish_child_handoff(
+        self,
+        push_channel: BlockingChannel,
+        exchange: str,
+        routing_key: str,
+        data: Dict[str, Any],
+        child_queue_messages: List[Dict[str, Any]],
+        is_split_bundle=False,
+    ) -> None:
+        parent_envelope = parse_batch_delivery_envelope(data)
+        if parent_envelope is None:
+            for child_queue_message in child_queue_messages:
+                self.send_queue_message_to_specific_queue(
+                    push_channel,
+                    exchange,
+                    routing_key,
+                    child_queue_message,
+                    is_split_bundle,
+                )
+            return
+        handoff = self.api.reserve_batch_delivery_children(
+            parent_envelope.delivery_id,
+            self._build_child_reservations(child_queue_messages),
+        )
+        self._publish_reserved_child_handoff(
+            push_channel,
+            exchange,
+            routing_key,
+            parent_envelope.delivery_id,
+            handoff,
+            is_split_bundle,
+        )
+
+    def _resume_reserved_child_handoff(
+        self,
+        push_channel: BlockingChannel,
+        exchange: str,
+        routing_key: str,
+        data: Dict[str, Any],
+        expected_branch_kind: str,
+        is_split_bundle=False,
+    ) -> bool:
+        parent_envelope = parse_batch_delivery_envelope(data)
+        if parent_envelope is None:
+            return False
+        handoff = self.api.batch_delivery_handoff(parent_envelope.delivery_id)
+        if handoff.get("handoff_evidence") not in {
+            BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED,
+            BATCH_DELIVERY_HANDOFF_CHILDREN_PUBLISHED,
+        }:
+            return False
+        if not self._handoff_matches_branch(handoff, expected_branch_kind):
+            return False
+        self._publish_reserved_child_handoff(
+            push_channel,
+            exchange,
+            routing_key,
+            parent_envelope.delivery_id,
+            handoff,
+            is_split_bundle,
+        )
+        return True
+
+    def _resume_reserved_unsplit_child_handoff(
+        self,
+        data: Dict[str, Any],
+    ) -> Optional[str]:
+        parent_envelope = parse_batch_delivery_envelope(data)
+        if parent_envelope is None:
+            return None
+        handoff = self.api.batch_delivery_handoff(parent_envelope.delivery_id)
+        if handoff.get("handoff_evidence") not in {
+            BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED,
+            BATCH_DELIVERY_HANDOFF_CHILDREN_PUBLISHED,
+        }:
+            return None
+        branch_kind = self._handoff_branch_kind(handoff)
+        route = {
+            BATCH_DELIVERY_BRANCH_LEGACY_SPLIT: (
+                self.push_exchange,
+                self.push_routing,
+                True,
+            ),
+            BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK: (
+                self.push_exchange,
+                self.push_routing,
+                False,
+            ),
+            BATCH_DELIVERY_BRANCH_INTACT_REPLAY: (
+                self.push_exchange,
+                self.push_routing,
+                False,
+            ),
+            BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER: (
+                self.listen_exchange,
+                self.dead_letter_routing,
+                False,
+            ),
+        }.get(branch_kind)
+        if route is None:
+            return None
+        with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
+            with push_pika_connection.channel() as push_channel:
+                self._confirm_delivery(push_channel, data)
+                self._publish_reserved_child_handoff(
+                    push_channel,
+                    route[0],
+                    route[1],
+                    parent_envelope.delivery_id,
+                    handoff,
+                    route[2],
+                )
+        return branch_kind
+
     def split_and_requeue_bundle(
         self,
         data: Dict[str, Any],
@@ -334,10 +625,18 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
     ) -> Literal["ack"]:
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
-                try:
-                    push_channel.confirm_delivery()
-                except Exception as err:  # pylint: disable=broad-except
-                    self.logger.warning(str(err))
+                self._confirm_delivery(push_channel, data)
+                if self._resume_reserved_child_handoff(
+                    push_channel,
+                    self.push_exchange,
+                    self.push_routing,
+                    data,
+                    BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                    True,
+                ):
+                    if work_id is not None and report_parent_expectation:
+                        self.api.work.report_expectation(work_id, None)
+                    return "ack"
                 event_version = content.get("x_opencti_event_version")
                 stix2_splitter = OpenCTIStix2Splitter()
                 expectations, _, bundles = (
@@ -352,9 +651,11 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     work_alive = self.api.work.add_expectations(work_id, expectations)
                     if not work_alive:
                         return "ack"
+                split_queue_messages = []
                 for bundle_ordinal, bundle in enumerate(bundles):
-                    split_data = build_child_delivery_message(
+                    split_data = build_child_delivery_queue_message(
                         data,
+                        bundle,
                         BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
                         0,
                         bundle_ordinal,
@@ -362,14 +663,15 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     split_data["split_bundles"] = True
                     split_data["no_split"] = False
                     split_data.pop("batch_plan", None)
-                    self.send_bundle_to_specific_queue(
-                        push_channel,
-                        self.push_exchange,
-                        self.push_routing,
-                        split_data,
-                        bundle,
-                        True,
-                    )
+                    split_queue_messages.append(split_data)
+                self._reserve_and_publish_child_handoff(
+                    push_channel,
+                    self.push_exchange,
+                    self.push_routing,
+                    data,
+                    split_queue_messages,
+                    True,
+                )
                 if work_id is not None and report_parent_expectation:
                     self.api.work.report_expectation(work_id, None)
         return "ack"
@@ -381,45 +683,56 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         work_id: Optional[str],
         error: Exception,
     ) -> Optional[Literal["ack"]]:
-        chunks = OpenCTIStix2.build_oversized_batch_plan_chunks(
-            content,
-            data.get("cleanup_inconsistent_bundle", False),
-            data.get("batch_plan"),
-        )
-        if chunks is None:
-            return None
-
-        log_context = {
-            "bundle_id": content.get("id"),
-            "object_count": len(content["objects"]),
-            "chunk_object_counts": [
-                len(chunk_bundle["objects"]) for chunk_bundle, _ in chunks
-            ],
-        }
-        if isinstance(error, BatchMutationPlanTooLarge):
-            log_context["actual_size"] = error.actual_size
-            log_context["max_size"] = error.max_size
-        self.logger.warning(
-            "Splitting oversized batch mutation plan into durable child batches",
-            log_context,
-        )
-
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
-                try:
-                    push_channel.confirm_delivery()
-                except Exception as err:  # pylint: disable=broad-except
-                    self.logger.warning(str(err))
+                self._confirm_delivery(push_channel, data)
+                if self._resume_reserved_child_handoff(
+                    push_channel,
+                    self.push_exchange,
+                    self.push_routing,
+                    data,
+                    BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+                ):
+                    if work_id is not None:
+                        self.api.work.report_expectation(work_id, None)
+                    return "ack"
+                chunks = OpenCTIStix2.build_oversized_batch_plan_chunks(
+                    content,
+                    data.get("cleanup_inconsistent_bundle", False),
+                    data.get("batch_plan"),
+                )
+                if chunks is None:
+                    return None
+
+                log_context = {
+                    "bundle_id": content.get("id"),
+                    "object_count": len(content["objects"]),
+                    "chunk_object_counts": [
+                        len(chunk_bundle["objects"]) for chunk_bundle, _ in chunks
+                    ],
+                }
+                if isinstance(error, BatchMutationPlanTooLarge):
+                    log_context["actual_size"] = error.actual_size
+                    log_context["max_size"] = error.max_size
+                self.logger.warning(
+                    (
+                        "Splitting oversized batch mutation plan into "
+                        "durable child batches"
+                    ),
+                    log_context,
+                )
                 if work_id is not None:
                     work_alive = self.api.work.add_expectations(work_id, len(chunks))
                     if not work_alive:
                         return "ack"
+                chunk_queue_messages = []
                 for chunk_ordinal, (
                     chunk_bundle,
                     chunk_backend_batch_plan,
                 ) in enumerate(chunks):
-                    chunk_data = build_child_delivery_message(
+                    chunk_data = build_child_delivery_queue_message(
                         data,
+                        chunk_bundle,
                         BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
                         0,
                         chunk_ordinal,
@@ -427,13 +740,14 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     chunk_data["split_bundles"] = False
                     chunk_data["no_split"] = True
                     chunk_data["batch_plan"] = chunk_backend_batch_plan
-                    self.send_bundle_to_specific_queue(
-                        push_channel,
-                        self.push_exchange,
-                        self.push_routing,
-                        chunk_data,
-                        chunk_bundle,
-                    )
+                    chunk_queue_messages.append(chunk_data)
+                self._reserve_and_publish_child_handoff(
+                    push_channel,
+                    self.push_exchange,
+                    self.push_routing,
+                    data,
+                    chunk_queue_messages,
+                )
                 if work_id is not None:
                     self.api.work.report_expectation(work_id, None)
         return "ack"
@@ -485,6 +799,16 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 if "objects" not in content or len(content["objects"]) == 0:
                     raise ValueError("JSON data type is not a STIX2 bundle")
                 if not should_split_bundles(data, content):
+                    resumed_handoff_branch = (
+                        self._resume_reserved_unsplit_child_handoff(data)
+                    )
+                    if resumed_handoff_branch is not None:
+                        if work_id is not None and resumed_handoff_branch in {
+                            BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                            BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+                        }:
+                            self.api.work.report_expectation(work_id, None)
+                        return "ack"
                     report_batch_expectation = (
                         work_id is not None and should_report_batch_expectation(data)
                     )
@@ -546,7 +870,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                 log_context["actual_size"] = err.actual_size
                                 log_context["max_size"] = err.max_size
                             self.logger.warning(
-                                "Falling back to split bundle transport for oversized batch mutation request",
+                                (
+                                    "Falling back to split bundle transport for "
+                                    "oversized batch mutation request"
+                                ),
                                 log_context,
                             )
                             return self.split_and_requeue_bundle(
@@ -561,7 +888,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     if should_replay_intact_bundle(data, too_large_items_bundles):
                         next_replay_count = replay_count + 1
                         self.logger.warning(
-                            "Deferring intact bundle replay for retryable batch failures",
+                            (
+                                "Deferring intact bundle replay for retryable "
+                                "batch failures"
+                            ),
                             {
                                 "bundle_id": content.get("id"),
                                 "count": sum(
@@ -572,8 +902,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                 "retry_number": next_replay_count,
                             },
                         )
-                        replay_data = build_child_delivery_message(
+                        replay_data = build_child_delivery_queue_message(
                             data,
+                            content,
                             BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
                             next_replay_count,
                             0,
@@ -583,16 +914,13 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                             self.pika_parameters
                         ) as push_pika_connection:
                             with push_pika_connection.channel() as push_channel:
-                                try:
-                                    push_channel.confirm_delivery()
-                                except Exception as err:  # pylint: disable=broad-except
-                                    self.logger.warning(str(err))
-                                self.send_bundle_to_specific_queue(
+                                self._confirm_delivery(push_channel, data)
+                                self._reserve_and_publish_child_handoff(
                                     push_channel,
                                     self.push_exchange,
                                     self.push_routing,
-                                    replay_data,
-                                    content,
+                                    data,
+                                    [replay_data],
                                 )
                         imported_items = []
                         return "ack"
@@ -613,10 +941,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                             self.pika_parameters
                         ) as push_pika_connection:
                             with push_pika_connection.channel() as push_channel:
-                                try:
-                                    push_channel.confirm_delivery()
-                                except Exception as err:  # pylint: disable=broad-except
-                                    self.logger.warning(str(err))
+                                self._confirm_delivery(push_channel, data)
+                                dead_letter_queue_messages = []
                                 for (
                                     dead_letter_ordinal,
                                     too_large_item_bundle,
@@ -628,24 +954,31 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                         self.connector_id
                                     )
                                     self.logger.warning(
-                                        "Detected a rejected batch item, sending it to dead letter queue...",
+                                        (
+                                            "Detected a rejected batch item, "
+                                            "sending it to dead letter queue..."
+                                        ),
                                         {
                                             "bundle_id": too_large_item_bundle["id"],
                                             "connector_id": self.connector_id,
                                         },
                                     )
-                                    self.send_bundle_to_specific_queue(
-                                        push_channel,
-                                        self.listen_exchange,
-                                        self.dead_letter_routing,
-                                        build_child_delivery_message(
+                                    dead_letter_queue_messages.append(
+                                        build_child_delivery_queue_message(
                                             data,
+                                            too_large_item_bundle,
                                             BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
                                             replay_count,
                                             dead_letter_ordinal,
-                                        ),
-                                        too_large_item_bundle,
+                                        )
                                     )
+                                self._reserve_and_publish_child_handoff(
+                                    push_channel,
+                                    self.listen_exchange,
+                                    self.dead_letter_routing,
+                                    data,
+                                    dead_letter_queue_messages,
+                                )
                 else:
                     # Bundle splitting was explicitly requested, split and requeue.
                     return self.split_and_requeue_bundle(
@@ -700,8 +1033,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         | "rule_clear"  # Clearing a rule (stop engine)
                         | "rules_rescan"  # Rescan a rule (massive operation in UI)
                         | "enrichment"  # Ask for enrichment (massive operation in UI)
-                        | "clear_access_restriction"  # Clear access members (massive operation in UI)
-                        | "revert_draft"  # Cancel draft modification (massive operation in UI)
+                        | "clear_access_restriction"  # Clear access members
+                        | "revert_draft"  # Cancel draft modification
                     ):
                         data_object = content["data"]
                         data_object["opencti_operation"] = content["type"]
@@ -720,7 +1053,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 raise ValueError("Unsupported event type", {"event_type": event_type})
 
             return "ack"
-        except (RequestException, Timeout):
+        except (RequestException, Timeout, BatchDeliveryChildPublishRetryable):
             self.logger.error(
                 "Error executing data handling, a connection error or timeout occurred"
             )
