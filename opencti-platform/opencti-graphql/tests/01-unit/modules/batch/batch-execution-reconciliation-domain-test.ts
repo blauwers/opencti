@@ -7,11 +7,17 @@ import {
   buildBatchExecutionReconciliationId,
   buildBatchExecutionReconciliationLockId,
   ensureBatchExecutionReconciliationForRequiresReconciliation,
+  inspectBatchExecutionReconciliationAttemptObservation,
   openBatchExecutionReconciliation,
+  recordBatchExecutionReconciliationRunningObserved,
   recordBatchExecutionReconciliationResolvedCompleted,
   recordBatchExecutionReconciliationResolvedFailedTerminal,
   reserveBatchExecutionReconciliation,
 } from '../../../../src/modules/batch/batch-execution-reconciliation-domain';
+import {
+  buildBatchBackendAttemptObservation,
+  readFreshBatchBackendAttemptObservation,
+} from '../../../../src/modules/batch/batch-backend-attempt-observation-domain';
 import {
   buildBatchExecutionReceiptRequestMetadata,
   recordBatchExecutionReceiptCompletion,
@@ -49,6 +55,14 @@ vi.mock('../../../../src/database/engine', () => ({
 vi.mock('../../../../src/lock/master-lock', () => ({
   lockResources: vi.fn(),
 }));
+
+vi.mock('../../../../src/modules/batch/batch-backend-attempt-observation-domain', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../src/modules/batch/batch-backend-attempt-observation-domain')>();
+  return {
+    ...actual,
+    readFreshBatchBackendAttemptObservation: vi.fn(),
+  };
+});
 
 const delivery = {
   id: 'batch-delivery--reconciliation-test',
@@ -135,6 +149,7 @@ describe('batch execution reconciliation domain', () => {
       records.set(id, next);
       return next;
     });
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockRejectedValue(new Error('observation missing'));
   });
 
   const createStartedReceipt = async (): Promise<BatchExecutionReceipt> => {
@@ -388,5 +403,119 @@ describe('batch execution reconciliation domain', () => {
       state: BatchExecutionReconciliationState.ResolvedCompleted,
       resolved_receipt_state: BatchExecutionReceiptState.Completed,
     });
+  });
+
+  it('advances OPEN to RUNNING_OBSERVED and refreshes bounded attempt fields in place', async () => {
+    const started = await createStartedReceipt();
+    await openBatchExecutionReconciliation(testContext, started.delivery_id);
+    const firstObservation = buildBatchBackendAttemptObservation(started, {
+      backendNodeId: 'platform:instance:reconciliation-test',
+      ttlSeconds: 120,
+    });
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockResolvedValueOnce(firstObservation);
+
+    const running = await inspectBatchExecutionReconciliationAttemptObservation(testContext, started.delivery_id);
+    expect(running).toMatchObject({
+      state: BatchExecutionReconciliationState.RunningObserved,
+      evidence_class: BatchExecutionReconciliationEvidenceClass.ActiveAttempt,
+      evidence_ref_type: 'BACKEND_ATTEMPT_OBSERVATION',
+      evidence_ref_id: firstObservation.observation_id,
+      attempt_observation_id: firstObservation.observation_id,
+      attempt_observed_at: firstObservation.observed_at,
+      attempt_expires_at: firstObservation.expires_at,
+    });
+    expect(records.get(started.internal_id)).toMatchObject({
+      state: BatchExecutionReceiptState.Started,
+    });
+
+    const refreshedObservation = {
+      ...firstObservation,
+      observed_at: '2026-08-08T00:00:30.000Z',
+      expires_at: '2026-08-08T00:02:30.000Z',
+    };
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockResolvedValueOnce(refreshedObservation);
+    const refreshed = await inspectBatchExecutionReconciliationAttemptObservation(testContext, started.delivery_id);
+    expect(refreshed).toMatchObject({
+      state: BatchExecutionReconciliationState.RunningObserved,
+      attempt_observation_id: firstObservation.observation_id,
+      attempt_observed_at: refreshedObservation.observed_at,
+      attempt_expires_at: refreshedObservation.expires_at,
+    });
+  });
+
+  it.each([
+    'missing',
+    'expired',
+    'malformed',
+    'mismatched',
+  ])('moves RUNNING_OBSERVED to AMBIGUOUS after explicit inspection of %s observation evidence', async (kind) => {
+    const started = await createStartedReceipt();
+    await openBatchExecutionReconciliation(testContext, started.delivery_id);
+    const observation = buildBatchBackendAttemptObservation(started, {
+      backendNodeId: 'platform:instance:reconciliation-test',
+      ttlSeconds: 120,
+    });
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockResolvedValueOnce(observation);
+    await inspectBatchExecutionReconciliationAttemptObservation(testContext, started.delivery_id);
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockRejectedValueOnce(new Error(`${kind} observation`));
+
+    const ambiguous = await inspectBatchExecutionReconciliationAttemptObservation(testContext, started.delivery_id);
+    expect(ambiguous).toMatchObject({
+      state: BatchExecutionReconciliationState.Ambiguous,
+      evidence_class: null,
+      last_error: `${kind} observation`,
+      attempt_observation_id: observation.observation_id,
+    });
+    expect(records.get(started.internal_id)).toMatchObject({
+      state: BatchExecutionReceiptState.Started,
+    });
+  });
+
+  it('keeps OPEN unchanged when no fresh observation exists yet', async () => {
+    const started = await createStartedReceipt();
+    const open = await openBatchExecutionReconciliation(testContext, started.delivery_id);
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockRejectedValueOnce(new Error('observation missing'));
+
+    await expect(inspectBatchExecutionReconciliationAttemptObservation(testContext, started.delivery_id))
+      .resolves.toStrictEqual(open);
+    expect(records.get(open.internal_id)).toMatchObject({
+      state: BatchExecutionReconciliationState.Open,
+      attempt_observation_id: null,
+    });
+  });
+
+  it('requires fresh Redis evidence when the running-observed helper is called directly', async () => {
+    const started = await createStartedReceipt();
+    const open = await openBatchExecutionReconciliation(testContext, started.delivery_id);
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockRejectedValueOnce(new Error('observation expired'));
+
+    await expect(recordBatchExecutionReconciliationRunningObserved(testContext, open, started))
+      .rejects.toThrowError('observation expired');
+    expect(records.get(open.internal_id)).toMatchObject({
+      state: BatchExecutionReconciliationState.Open,
+      attempt_observation_id: null,
+    });
+  });
+
+  it('lets terminal receipt evidence resolve reconciliation before stale observation inspection', async () => {
+    const started = await createStartedReceipt();
+    await openBatchExecutionReconciliation(testContext, started.delivery_id);
+    const observation = buildBatchBackendAttemptObservation(started, {
+      backendNodeId: 'platform:instance:reconciliation-test',
+      ttlSeconds: 120,
+    });
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockResolvedValueOnce(observation);
+    await inspectBatchExecutionReconciliationAttemptObservation(testContext, started.delivery_id);
+    const completed = await recordBatchExecutionReceiptCompletion(testContext, started, resultMetadata);
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockClear();
+    vi.mocked(readFreshBatchBackendAttemptObservation).mockRejectedValueOnce(new Error('stale observation'));
+
+    const resolved = await inspectBatchExecutionReconciliationAttemptObservation(testContext, completed.delivery_id);
+    expect(resolved).toMatchObject({
+      state: BatchExecutionReconciliationState.ResolvedCompleted,
+      resolved_receipt_state: BatchExecutionReceiptState.Completed,
+      evidence_class: BatchExecutionReconciliationEvidenceClass.ExistingTerminalReceipt,
+    });
+    expect(readFreshBatchBackendAttemptObservation).not.toHaveBeenCalled();
   });
 });

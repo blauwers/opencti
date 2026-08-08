@@ -18,7 +18,7 @@ import { enrichWithRemoteCredentials } from '../config/credentials';
 import type { ExclusionListCacheItem } from './exclusionListCache';
 import { refreshLocalCacheForEntity } from './cache';
 import { schemaRelationsRefDefinition } from '../schema/schema-relationsRef';
-import type { BatchWorkerRuntimeCapability } from '../modules/batch/batch-types';
+import type { BatchBackendAttemptObservation, BatchWorkerRuntimeCapability } from '../modules/batch/batch-types';
 
 const USE_SSL = booleanConf('redis:use_ssl', false);
 const REDIS_CA = conf.get('redis:ca').map((path: string) => loadCert(path));
@@ -596,6 +596,138 @@ export const redisGetBatchWorkerRuntimeCapabilitySnapshot = async (): Promise<Ba
     })),
     atCapacity: capabilities.length >= BATCH_WORKER_RUNTIME_CAPABILITY_MAX_LENGTH,
   };
+};
+export interface RedisBatchBackendAttemptObservationSnapshot {
+  rawValue: string | null;
+  ttlSeconds: number;
+}
+export enum RedisBatchBackendAttemptObservationWriteResult {
+  Malformed = -1,
+  Conflict = 0,
+  Created = 1,
+  Refreshed = 2,
+}
+export enum RedisBatchBackendAttemptObservationDeleteResult {
+  Malformed = -1,
+  MissingOrConflict = 0,
+  Deleted = 1,
+}
+const UPSERT_BATCH_BACKEND_ATTEMPT_OBSERVATION_SCRIPT = `
+  local current = redis.call('GET', KEYS[1])
+  if current then
+    local decoded, observation = pcall(cjson.decode, current)
+    if not decoded then
+      return -1
+    end
+    if tostring(observation.observation_id) ~= ARGV[1]
+      or tostring(observation.receipt_id) ~= ARGV[2]
+      or tostring(observation.delivery_id) ~= ARGV[3]
+      or tostring(observation.submission_id) ~= ARGV[4]
+      or tostring(observation.request_fingerprint) ~= ARGV[5]
+      or tostring(observation.request_contract_version) ~= ARGV[6]
+      or tostring(observation.receipt_started_at) ~= ARGV[7]
+      or tostring(observation.backend_node_id) ~= ARGV[8]
+      or tostring(observation.observation_version) ~= ARGV[9] then
+      return 0
+    end
+  end
+  redis.call('SET', KEYS[1], ARGV[10], 'EX', ARGV[11])
+  if current then
+    return 2
+  end
+  return 1
+`;
+const DELETE_BATCH_BACKEND_ATTEMPT_OBSERVATION_SCRIPT = `
+  local current = redis.call('GET', KEYS[1])
+  if not current then
+    return 0
+  end
+  local decoded, observation = pcall(cjson.decode, current)
+  if not decoded then
+    return -1
+  end
+  if tostring(observation.observation_id) ~= ARGV[1]
+    or tostring(observation.receipt_id) ~= ARGV[2]
+    or tostring(observation.delivery_id) ~= ARGV[3]
+    or tostring(observation.submission_id) ~= ARGV[4]
+    or tostring(observation.request_fingerprint) ~= ARGV[5]
+    or tostring(observation.request_contract_version) ~= ARGV[6]
+    or tostring(observation.receipt_started_at) ~= ARGV[7]
+    or tostring(observation.backend_node_id) ~= ARGV[8]
+    or tostring(observation.observation_version) ~= ARGV[9] then
+    return 0
+  end
+  redis.call('DEL', KEYS[1])
+  return 1
+`;
+const batchBackendAttemptObservationIdentityArgs = (observation: BatchBackendAttemptObservation): string[] => [
+  observation.observation_id,
+  observation.receipt_id,
+  observation.delivery_id,
+  observation.submission_id,
+  observation.request_fingerprint,
+  `${observation.request_contract_version}`,
+  observation.receipt_started_at,
+  observation.backend_node_id,
+  `${observation.observation_version}`,
+];
+const redisUpsertBatchBackendAttemptObservation = async (
+  key: string,
+  observation: BatchBackendAttemptObservation,
+  ttlSeconds: number,
+): Promise<RedisBatchBackendAttemptObservationWriteResult> => {
+  const result = await getClientBase().eval(
+    UPSERT_BATCH_BACKEND_ATTEMPT_OBSERVATION_SCRIPT,
+    1,
+    key,
+    ...batchBackendAttemptObservationIdentityArgs(observation),
+    JSON.stringify(observation),
+    `${ttlSeconds}`,
+  );
+  return Number(result) as RedisBatchBackendAttemptObservationWriteResult;
+};
+export const redisReadBatchBackendAttemptObservation = async (
+  key: string,
+): Promise<RedisBatchBackendAttemptObservationSnapshot> => {
+  const result = await getClientBase().multi().ttl(key).get(key).exec();
+  const ttlError = result?.[0]?.[0];
+  const getError = result?.[1]?.[0];
+  if (ttlError || getError) {
+    throw DatabaseError('Redis backend attempt observation read failed', {
+      cause: ttlError ?? getError,
+      key,
+    });
+  }
+  return {
+    ttlSeconds: Number(result?.[0]?.[1] ?? -2),
+    rawValue: typeof result?.[1]?.[1] === 'string' ? result[1][1] as string : null,
+  };
+};
+export const redisWriteBatchBackendAttemptObservation = async (
+  key: string,
+  observation: BatchBackendAttemptObservation,
+  ttlSeconds: number,
+): Promise<RedisBatchBackendAttemptObservationWriteResult> => {
+  return redisUpsertBatchBackendAttemptObservation(key, observation, ttlSeconds);
+};
+export const redisRefreshBatchBackendAttemptObservation = async (
+  key: string,
+  observation: BatchBackendAttemptObservation,
+  ttlSeconds: number,
+): Promise<RedisBatchBackendAttemptObservationWriteResult> => {
+  return redisUpsertBatchBackendAttemptObservation(key, observation, ttlSeconds);
+};
+export const redisDeleteBatchBackendAttemptObservation = async (
+  key: string,
+  observation: BatchBackendAttemptObservation,
+): Promise<RedisBatchBackendAttemptObservationDeleteResult> => {
+  const result = await getClientBase().eval(
+    DELETE_BATCH_BACKEND_ATTEMPT_OBSERVATION_SCRIPT,
+    1,
+    key,
+    ...batchBackendAttemptObservationIdentityArgs(observation),
+  );
+  return Number(result) as RedisBatchBackendAttemptObservationDeleteResult;
 };
 export const redisInitializeWork = async (workId: string, isMultiPartWork: boolean) => {
   await redisTx(getClientBase(), async (tx) => {

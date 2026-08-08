@@ -25,6 +25,7 @@ import {
   runWithBatchEntityCreateCoordinator,
   waitForBatchEntityCreateCoordinatorPromise,
 } from './batch-entity-create-coordinator';
+import { startBatchBackendAttemptObservationRefreshLoop, type BatchBackendAttemptObservationRefreshLoop } from './batch-backend-attempt-observation-domain';
 import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
 import {
   ensureBatchExecutionReconciliationBeforeRequiresReconciliation,
@@ -1521,75 +1522,69 @@ export const executeBatchGraphqlOperations = async (
       throw error;
     }
     let startedReceipt: BatchExecutionReceipt | undefined;
-    if (receiptReservationInput) {
-      const started = await startPreparedBatchExecutionReceipt(context, receiptReservationInput);
-      if (started.replay) {
-        return started.replay;
-      }
-      startedReceipt = started.receipt;
-    }
-    const resultBindings: BatchGraphqlResultBindings = new Map();
-    let result: BatchGraphqlExecutionResult;
+    let attemptObservationRefreshLoop: BatchBackendAttemptObservationRefreshLoop | undefined;
     try {
-      const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
-        kind: BatchMutationKind.GraphqlOperation,
-        executeWrite: () => executeOperationGroups(
-          schema,
-          context,
-          preparedOperations,
-          operationGroups,
-          resultBindings,
-          normalizedOptions.executionMode !== BatchExecutionMode.Atomic,
-          executionId,
-        ),
-      }], {
-        ...options,
-        onMaterializationStarted: async () => {
-          await options.onMaterializationStarted?.();
-          if (materializationAdmissionWeight >= admissionStats.weight) {
-            return;
-          }
-          releaseAdmission.downgrade(materializationAdmissionWeight);
-          if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
-            logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
-              event: 'downgraded',
-              ...admissionMetadata,
-              operation_count: admissionStats.operationCount,
-              encoded_bytes: admissionStats.encodedBytes,
-              admission_weight: admissionStats.weight,
-              materialization_admission_weight: materializationAdmissionWeight,
-              admission_wait_ms: admittedAt - admissionRequestedAt,
-              execution_time_ms: Date.now() - admittedAt,
-              admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
-            });
-          }
-        },
-        performanceTraceId: executionId,
-      });
-      result = {
-        ...execution,
-        operationErrors: execution.results[0].operationErrors,
-        results: execution.results[0].results,
-      };
-    } catch (error) {
-      if (startedReceipt) {
+      if (receiptReservationInput) {
+        const started = await startPreparedBatchExecutionReceipt(context, receiptReservationInput);
+        if (started.replay) {
+          return started.replay;
+        }
+        startedReceipt = started.receipt;
         try {
-          await recordStartedBatchExecutionReceiptError(context, startedReceipt, error);
-        } catch (receiptError) {
-          logApp.error('Failed to persist batch execution receipt reconciliation state', {
-            cause: receiptError,
+          attemptObservationRefreshLoop = await startBatchBackendAttemptObservationRefreshLoop(startedReceipt);
+        } catch (error) {
+          logApp.warn('[BATCH] Unable to start backend attempt observation refresh loop; direct execution continues without fresh liveness evidence', {
+            cause: error,
+            receipt_id: startedReceipt.internal_id,
             delivery_id: startedReceipt.delivery_id,
-            original_error: error,
           });
         }
       }
-      throw error;
-    }
-    if (startedReceipt) {
+      const resultBindings: BatchGraphqlResultBindings = new Map();
+      let result: BatchGraphqlExecutionResult;
       try {
-        await recordStartedBatchExecutionReceiptResult(context, startedReceipt, result);
+        const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
+          kind: BatchMutationKind.GraphqlOperation,
+          executeWrite: () => executeOperationGroups(
+            schema,
+            context,
+            preparedOperations,
+            operationGroups,
+            resultBindings,
+            normalizedOptions.executionMode !== BatchExecutionMode.Atomic,
+            executionId,
+          ),
+        }], {
+          ...options,
+          onMaterializationStarted: async () => {
+            await options.onMaterializationStarted?.();
+            if (materializationAdmissionWeight >= admissionStats.weight) {
+              return;
+            }
+            releaseAdmission.downgrade(materializationAdmissionWeight);
+            if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+              logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+                event: 'downgraded',
+                ...admissionMetadata,
+                operation_count: admissionStats.operationCount,
+                encoded_bytes: admissionStats.encodedBytes,
+                admission_weight: admissionStats.weight,
+                materialization_admission_weight: materializationAdmissionWeight,
+                admission_wait_ms: admittedAt - admissionRequestedAt,
+                execution_time_ms: Date.now() - admittedAt,
+                admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+              });
+            }
+          },
+          performanceTraceId: executionId,
+        });
+        result = {
+          ...execution,
+          operationErrors: execution.results[0].operationErrors,
+          results: execution.results[0].results,
+        };
       } catch (error) {
-        if (result.materialized) {
+        if (startedReceipt) {
           try {
             await recordStartedBatchExecutionReceiptError(context, startedReceipt, error);
           } catch (receiptError) {
@@ -1602,8 +1597,28 @@ export const executeBatchGraphqlOperations = async (
         }
         throw error;
       }
+      if (startedReceipt) {
+        try {
+          await recordStartedBatchExecutionReceiptResult(context, startedReceipt, result);
+        } catch (error) {
+          if (result.materialized) {
+            try {
+              await recordStartedBatchExecutionReceiptError(context, startedReceipt, error);
+            } catch (receiptError) {
+              logApp.error('Failed to persist batch execution receipt reconciliation state', {
+                cause: receiptError,
+                delivery_id: startedReceipt.delivery_id,
+                original_error: error,
+              });
+            }
+          }
+          throw error;
+        }
+      }
+      return result;
+    } finally {
+      await attemptObservationRefreshLoop?.stop();
     }
-    return result;
   } finally {
     const completedAt = Date.now();
     releaseAdmission();

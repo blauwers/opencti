@@ -391,6 +391,20 @@ export interface BatchExecutionReconciliation {
   last_error: string | null;
 }
 
+export interface BatchBackendAttemptObservation {
+  observation_id: string;
+  receipt_id: string;
+  delivery_id: string;
+  submission_id: string;
+  request_fingerprint: string;
+  request_contract_version: number;
+  receipt_started_at: string;
+  backend_node_id: string;
+  observed_at: string;
+  expires_at: string;
+  observation_version: number;
+}
+
 export interface BatchDeliveryChildReservationInput {
   branchKind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
   branchSequence: number;

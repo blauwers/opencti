@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { elIndex, elLoadById, elUpdate } from '../../../../src/database/engine';
 import { lockResources } from '../../../../src/lock/master-lock';
 import { loadBatchDelivery, readBatchDeliveryQueueMessage } from '../../../../src/modules/batch/batch-delivery-domain';
+import { startBatchBackendAttemptObservationRefreshLoop } from '../../../../src/modules/batch/batch-backend-attempt-observation-domain';
 import { buildBatchExecutionReconciliationId, openBatchExecutionReconciliation } from '../../../../src/modules/batch/batch-execution-reconciliation-domain';
 import {
   buildBatchExecutionReceiptId,
@@ -45,6 +46,10 @@ vi.mock('../../../../src/lock/master-lock', () => ({
 vi.mock('../../../../src/modules/batch/batch-delivery-domain', () => ({
   loadBatchDelivery: vi.fn(),
   readBatchDeliveryQueueMessage: vi.fn(),
+}));
+
+vi.mock('../../../../src/modules/batch/batch-backend-attempt-observation-domain', () => ({
+  startBatchBackendAttemptObservationRefreshLoop: vi.fn(),
 }));
 
 const query = 'mutation Record($value: String!) {\n  record(value: $value)\n}';
@@ -161,15 +166,20 @@ const buildPreparedReceiptInput = () => ({
 
 describe('batch GraphQL execution receipt boundary', () => {
   let receipts: Map<string, any>;
+  let stopAttemptObservationRefreshLoop: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     receipts = new Map();
+    stopAttemptObservationRefreshLoop = vi.fn().mockResolvedValue(undefined);
     vi.mocked(lockResources).mockResolvedValue({ unlock: vi.fn() } as any);
     vi.mocked(loadBatchDelivery).mockResolvedValue(delivery);
     vi.mocked(readBatchDeliveryQueueMessage).mockReturnValue({
       submission_id: delivery.submission_id,
     } as any);
+    vi.mocked(startBatchBackendAttemptObservationRefreshLoop).mockResolvedValue({
+      stop: stopAttemptObservationRefreshLoop as unknown as () => Promise<void>,
+    });
     vi.mocked(elLoadById).mockImplementation(async (_context, _user, id) => receipts.get(id) ?? null);
     vi.mocked(elIndex).mockImplementation(async (_index, document) => {
       receipts.set(document.internal_id, document);
@@ -220,6 +230,47 @@ describe('batch GraphQL execution receipt boundary', () => {
     }));
     expect(calls).toEqual([]);
     expect(receipts.has(buildBatchExecutionReconciliationId(delivery.internal_id))).toBe(false);
+    expect(startBatchBackendAttemptObservationRefreshLoop).not.toHaveBeenCalled();
+  });
+
+  it('starts observation only after STARTED is durable and stops it after materialized completion', async () => {
+    const calls: string[] = [];
+    vi.mocked(startBatchBackendAttemptObservationRefreshLoop).mockImplementation(async (receipt) => {
+      expect(receipts.get(receipt.internal_id)).toMatchObject({
+        state: BatchExecutionReceiptState.Started,
+        started_at: expect.any(String),
+      });
+      calls.push('observation:start');
+      return {
+        stop: vi.fn(async () => {
+          calls.push('observation:stop');
+        }),
+      };
+    });
+
+    await executeBatchGraphqlOperations(buildSchema(calls), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    expect(calls).toEqual(['observation:start', 'write:one', 'observation:stop']);
+  });
+
+  it('keeps direct execution semantics unchanged when observation startup fails', async () => {
+    const calls: string[] = [];
+    vi.mocked(startBatchBackendAttemptObservationRefreshLoop).mockRejectedValueOnce(new Error('redis unavailable'));
+
+    const execution = await executeBatchGraphqlOperations(buildSchema(calls), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    expect(execution.materialized).toBe(true);
+    expect(calls).toEqual(['write:one']);
+    expect(receipts.get(buildBatchExecutionReceiptId(delivery.internal_id))).toMatchObject({
+      state: BatchExecutionReceiptState.Completed,
+      result_materialized: true,
+    });
   });
 
   it('returns cached materialized metadata on duplicate delivery without rerunning the mutation', async () => {
@@ -413,6 +464,7 @@ describe('batch GraphQL execution receipt boundary', () => {
       last_error: 'Batch GraphQL operation failed',
     });
     expect(calls).toEqual(['write:one']);
+    expect(stopAttemptObservationRefreshLoop).toHaveBeenCalledTimes(1);
   });
 
   it('keeps an OPEN reconciliation row when ambiguity persistence fails after the receipt transition', async () => {

@@ -8,9 +8,15 @@ import type { AuthContext } from '../../types/user';
 import { SYSTEM_USER } from '../../utils/access';
 import { now } from '../../utils/format';
 import { hashSHA256 } from '../../utils/hash';
+import {
+  assertBatchBackendAttemptObservationIdentity,
+  buildBatchBackendAttemptObservationFingerprint,
+  readFreshBatchBackendAttemptObservation,
+} from './batch-backend-attempt-observation-domain';
 import { buildBatchExecutionReceiptLockId, loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';
 import {
   BatchAdmissionErrorCode,
+  type BatchBackendAttemptObservation,
   type BatchExecutionReceipt,
   BatchExecutionReceiptFailureProof,
   BatchExecutionReceiptState,
@@ -341,9 +347,70 @@ const recordBatchExecutionReconciliationAmbiguousUnlocked = async (
     });
   }
   return advanceBatchExecutionReconciliationState(context, reconciliation, BatchExecutionReconciliationState.Ambiguous, {
+    ...(reconciliation.state === BatchExecutionReconciliationState.RunningObserved ? {
+      evidence_class: null,
+      evidence_ref_type: null,
+      evidence_ref_id: null,
+      evidence_fingerprint: null,
+    } : {}),
     last_observed_at: lastObservedAt,
     last_error: lastError,
   });
+};
+
+const buildBatchExecutionReconciliationActiveAttemptPatch = (
+  observation: BatchBackendAttemptObservation,
+): BatchExecutionReconciliationPatch => ({
+  evidence_class: BatchExecutionReconciliationEvidenceClass.ActiveAttempt,
+  evidence_ref_type: BatchExecutionReconciliationEvidenceRefType.BackendAttemptObservation,
+  evidence_ref_id: observation.observation_id,
+  evidence_fingerprint: buildBatchBackendAttemptObservationFingerprint(observation),
+  attempt_observation_id: observation.observation_id,
+  attempt_observed_at: observation.observed_at,
+  attempt_expires_at: observation.expires_at,
+  last_observed_at: observation.observed_at,
+  last_error: null,
+});
+
+const assertBatchExecutionReconciliationActiveAttemptEvidenceIdentity = (
+  reconciliation: BatchExecutionReconciliation,
+  patch: BatchExecutionReconciliationPatch,
+) => {
+  const conflictingFields = Object.entries({
+    evidence_class: reconciliation.evidence_class !== patch.evidence_class,
+    evidence_ref_type: reconciliation.evidence_ref_type !== patch.evidence_ref_type,
+    evidence_ref_id: reconciliation.evidence_ref_id !== patch.evidence_ref_id,
+    evidence_fingerprint: reconciliation.evidence_fingerprint !== patch.evidence_fingerprint,
+    attempt_observation_id: reconciliation.attempt_observation_id !== patch.attempt_observation_id,
+  }).filter(([, conflict]) => conflict).map(([field]) => field);
+  if (conflictingFields.length > 0) {
+    throw batchExecutionReconciliationConflict('Batch execution reconciliation active attempt evidence changed after persistence', {
+      reconciliation_id: reconciliation.internal_id,
+      conflicting_fields: conflictingFields,
+    });
+  }
+};
+
+const recordBatchExecutionReconciliationRunningObservedUnlocked = async (
+  context: AuthContext,
+  reconciliation: BatchExecutionReconciliation,
+  receipt: BatchExecutionReceipt,
+  observation: BatchBackendAttemptObservation,
+): Promise<BatchExecutionReconciliation> => {
+  assertBatchExecutionReconciliationIdentity(reconciliation, receipt);
+  assertBatchBackendAttemptObservationIdentity(observation, receipt);
+  if (
+    reconciliation.state !== BatchExecutionReconciliationState.Open
+    && reconciliation.state !== BatchExecutionReconciliationState.RunningObserved
+  ) {
+    return reconciliation;
+  }
+  const patch = buildBatchExecutionReconciliationActiveAttemptPatch(observation);
+  if (reconciliation.state === BatchExecutionReconciliationState.RunningObserved) {
+    assertBatchExecutionReconciliationActiveAttemptEvidenceIdentity(reconciliation, patch);
+    return updateBatchExecutionReconciliationObservation(context, reconciliation, patch);
+  }
+  return advanceBatchExecutionReconciliationState(context, reconciliation, BatchExecutionReconciliationState.RunningObserved, patch);
 };
 
 const withBatchExecutionReconciliationLock = async <T>(
@@ -412,6 +479,17 @@ export const recordBatchExecutionReconciliationAmbiguous = async (
 ): Promise<BatchExecutionReconciliation> => {
   return withCurrentBatchExecutionReconciliationLock(context, reconciliation, async (currentReconciliation) => {
     return recordBatchExecutionReconciliationAmbiguousUnlocked(context, currentReconciliation, error);
+  });
+};
+
+export const recordBatchExecutionReconciliationRunningObserved = async (
+  context: AuthContext,
+  reconciliation: BatchExecutionReconciliation,
+  receipt: BatchExecutionReceipt,
+): Promise<BatchExecutionReconciliation> => {
+  return withCurrentBatchExecutionReconciliationLock(context, reconciliation, async (currentReconciliation) => {
+    const observation = await readFreshBatchBackendAttemptObservation(receipt);
+    return recordBatchExecutionReconciliationRunningObservedUnlocked(context, currentReconciliation, receipt, observation);
   });
 };
 
@@ -740,4 +818,50 @@ export const recordBatchExecutionReconciliationResolvedFailedTerminal = async (
   return withCurrentBatchExecutionReconciliationLock(context, reconciliation, async (currentReconciliation) => {
     return recordBatchExecutionReconciliationResolvedFailedTerminalUnlocked(context, currentReconciliation, evidence);
   });
+};
+
+export const inspectBatchExecutionReconciliationAttemptObservation = async (
+  context: AuthContext,
+  deliveryId: string,
+): Promise<BatchExecutionReconciliation> => {
+  const receiptLock = await lockResources([buildBatchExecutionReceiptLockId(deliveryId)]);
+  try {
+    const receipt = await loadBatchExecutionReceipt(context, deliveryId);
+    if (!receipt) {
+      throw batchExecutionReconciliationConflict('Batch execution receipt cannot be found for reconciliation inspection', {
+        delivery_id: deliveryId,
+      });
+    }
+    return withBatchExecutionReconciliationLock(deliveryId, async () => {
+      const reconciliation = await loadRequiredBatchExecutionReconciliation(context, deliveryId);
+      assertBatchExecutionReconciliationIdentity(reconciliation, receipt);
+      if (receipt.state === BatchExecutionReceiptState.Completed) {
+        return recordBatchExecutionReconciliationResolvedCompletedUnlocked(context, reconciliation, {
+          evidenceClass: BatchExecutionReconciliationEvidenceClass.ExistingTerminalReceipt,
+          receipt,
+        });
+      }
+      if (
+        receipt.state === BatchExecutionReceiptState.FailedTerminal
+        && receipt.failure_proof === BatchExecutionReceiptFailureProof.NoEffectTerminal
+      ) {
+        return recordBatchExecutionReconciliationResolvedFailedTerminalUnlocked(context, reconciliation, {
+          evidenceClass: BatchExecutionReconciliationEvidenceClass.ExistingTerminalReceipt,
+          receipt,
+        });
+      }
+      let observation: BatchBackendAttemptObservation;
+      try {
+        observation = await readFreshBatchBackendAttemptObservation(receipt);
+      } catch (error) {
+        if (reconciliation.state === BatchExecutionReconciliationState.RunningObserved) {
+          return recordBatchExecutionReconciliationAmbiguousUnlocked(context, reconciliation, error);
+        }
+        return reconciliation;
+      }
+      return recordBatchExecutionReconciliationRunningObservedUnlocked(context, reconciliation, receipt, observation);
+    });
+  } finally {
+    await receiptLock.unlock();
+  }
 };
