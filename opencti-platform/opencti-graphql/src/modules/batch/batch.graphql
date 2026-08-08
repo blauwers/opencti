@@ -38,6 +38,11 @@ enum BatchDeliveryBranchKind {
   TERMINAL_DEAD_LETTER
 }
 
+enum BatchDeliveryKind {
+  ROOT
+  CHILD
+}
+
 enum BatchDeliveryState {
   READY
   PUBLISHED
@@ -48,6 +53,23 @@ enum BatchDeliveryHandoffEvidence {
   PLANNED
   CHILDREN_RESERVED
   CHILDREN_PUBLISHED
+}
+
+enum BatchExecutionReceiptState {
+  PREPARED
+  STARTED
+  COMPLETED
+  FAILED_TERMINAL
+  REQUIRES_RECONCILIATION
+}
+
+enum BatchExecutionReceiptCompletionBoundary {
+  MATERIALIZED
+}
+
+enum BatchExecutionReceiptFailureProof {
+  PRE_START_VALIDATION
+  NO_EFFECT_TERMINAL
 }
 
 input BatchSubmitOptionsInput {
@@ -79,6 +101,18 @@ input BatchExecuteOptionsInput {
   wait_until: BatchWaitUntil
   execution_mode: BatchExecutionMode
   batch_plan: BatchGraphqlExecutionPlanInput
+  direct_delivery_context: BatchDirectDeliveryContextInput
+}
+
+input BatchDirectDeliveryContextInput {
+  submission_id: ID!
+  delivery_id: ID!
+  parent_delivery_id: ID
+  delivery_kind: BatchDeliveryKind!
+  delivery_protocol_version: Int!
+  delivery_branch_kind: BatchDeliveryBranchKind!
+  delivery_branch_sequence: Int!
+  delivery_branch_ordinal: Int!
 }
 
 input BatchGraphqlExecutionPhaseInput {
@@ -145,8 +179,49 @@ type BatchDeliveryHandoff {
   pending_children: [BatchDeliveryChild!]!
 }
 
+type BatchExecutionReceipt {
+  receipt_id: ID!
+  delivery_id: ID!
+  submission_id: ID!
+  delivery_payload_fingerprint: String!
+  request_contract_version: Int!
+  request_fingerprint: String!
+  batch_plan_fingerprint: String!
+  operation_manifest_fingerprint: String!
+  operation_count: Int!
+  execution_mode: BatchExecutionMode!
+  wait_until: BatchWaitUntil!
+  state: BatchExecutionReceiptState!
+  result_fingerprint: String
+  result_version: Int
+  result_operation_count: Int
+  result_operation_errors: [BatchMutationOperationError!]
+  result_execution_mode: BatchExecutionMode
+  result_wait_until: BatchWaitUntil
+  result_side_effect_kinds: [String!]!
+  result_materialized: Boolean
+  completion_boundary: BatchExecutionReceiptCompletionBoundary
+  side_effect_kind_counts: String
+  prepared_at: DateTime!
+  started_at: DateTime
+  completed_at: DateTime
+  materialized_at: DateTime
+  failure_stage: String
+  failure_code: String
+  failure_message: String
+  failure_fingerprint: String
+  failure_retryable: Boolean
+  failure_proof: BatchExecutionReceiptFailureProof
+  failed_at: DateTime
+  reconciliation_required_at: DateTime
+  created_at: DateTime!
+  updated_at: DateTime!
+  last_error: String
+}
+
 type Query {
   batchDeliveryHandoff(parent_delivery_id: ID!): BatchDeliveryHandoff! @auth(for: [CONNECTORAPI])
+  batchExecutionReceipt(delivery_id: ID!): BatchExecutionReceipt @auth(for: [CONNECTORAPI])
 }
 
 type Mutation {

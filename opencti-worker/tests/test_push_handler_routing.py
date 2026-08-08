@@ -392,6 +392,26 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
 
 
+def test_handler_forwards_v2_direct_delivery_context_to_batch_importer():
+    handler = build_handler()
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    assert handler.api.stix2.import_bundle_from_json_batch.call_args.kwargs[
+        "direct_delivery_context"
+    ] == {
+        "submission_id": "batch-submission--1",
+        "delivery_id": build_root_delivery_id("batch-submission--1"),
+        "parent_delivery_id": None,
+        "delivery_kind": BATCH_DELIVERY_KIND_ROOT,
+        "delivery_protocol_version": BATCH_DELIVERY_PROTOCOL_V2,
+        "delivery_branch_kind": "ROOT",
+        "delivery_branch_sequence": 0,
+        "delivery_branch_ordinal": 0,
+    }
+
+
 def test_batch_payload_too_large_detection_handles_typed_and_backend_errors():
     assert is_batch_payload_too_large_error(BatchMutationPlanTooLarge(2, 1)) is True
     assert (

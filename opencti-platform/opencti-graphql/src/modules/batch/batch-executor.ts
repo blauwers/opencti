@@ -50,7 +50,7 @@ export interface BatchExecutionOptions {
   waitUntil?: BatchWaitUntil | string;
 }
 
-type NormalizedBatchExecutionOptions = {
+export type NormalizedBatchExecutionOptions = {
   executionMode: BatchExecutionMode;
   waitUntil: BatchWaitUntil;
 };
@@ -135,7 +135,7 @@ const runWithBatchExecutionState = async <T>(
   });
 };
 
-const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
+export const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
   executionMode: options.executionMode ?? BatchExecutionMode.Bulk,
   waitUntil: options.waitUntil === BatchWaitUntil.Committed ? BatchWaitUntil.Committed : BatchWaitUntil.Materialized,
 });

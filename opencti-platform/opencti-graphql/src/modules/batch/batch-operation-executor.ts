@@ -16,7 +16,9 @@ import Upload from 'graphql-upload/Upload.mjs';
 import jsonCanonicalize from 'canonicalize';
 import conf, { booleanConf, logApp } from '../../config/conf';
 import { FUNCTIONAL_ERROR, FunctionalError, MISSING_REF_ERROR, VALIDATION_ERROR } from '../../config/errors';
+import { lockResources } from '../../lock/master-lock';
 import type { AuthContext } from '../../types/user';
+import { hashSHA256 } from '../../utils/hash';
 import {
   BatchEntityCreateCoordinator,
   getBatchEntityCreateCoordinatorGroupId,
@@ -24,8 +26,35 @@ import {
   waitForBatchEntityCreateCoordinatorPromise,
 } from './batch-entity-create-coordinator';
 import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
-import { BatchMutationKind, executeBatchMutations, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
-import { BatchExecutionMode, type BatchGraphqlExecutionPlanInput, type BatchGraphqlFileInput, type BatchGraphqlOperationInput } from './batch-types';
+import {
+  assertBatchDirectDeliveryContext,
+  buildBatchExecutionReceiptLockId,
+  buildBatchExecutionReceiptRequestMetadata,
+  buildBatchExecutionReceiptRequiresReconciliationError,
+  buildBatchExecutionReceiptTerminalFailureError,
+  loadBatchExecutionReceipt,
+  readBatchExecutionReceiptResultMetadata,
+  recordBatchExecutionReceiptCompletion,
+  recordBatchExecutionReceiptRequiresReconciliation,
+  recordBatchExecutionReceiptStarted,
+  recordBatchExecutionReceiptTerminalFailure,
+  reserveBatchExecutionReceipt,
+  type ReserveBatchExecutionReceiptInput,
+} from './batch-execution-receipt-domain';
+import { BatchMutationKind, executeBatchMutations, normalizeBatchExecutionOptions, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
+import {
+  BatchAdmissionErrorCode,
+  type BatchDirectDeliveryContext,
+  BatchExecutionMode,
+  BatchExecutionReceiptFailureProof,
+  BatchExecutionReceiptState,
+  type BatchExecutionReceipt,
+  type BatchExecutionReceiptOperationManifest,
+  type BatchExecutionReceiptResultMetadata,
+  type BatchGraphqlExecutionPlanInput,
+  type BatchGraphqlFileInput,
+  type BatchGraphqlOperationInput,
+} from './batch-types';
 
 type BatchGraphqlOperationResult = Record<string, unknown> | null | undefined;
 export type BatchGraphqlOperationError = {
@@ -61,8 +90,9 @@ type PreparedBatchGraphqlOperationGroup = {
   groupId: number;
   operations: PreparedBatchGraphqlOperation[];
 };
-type BatchGraphqlExecutionOptions = BatchExecutionOptions & {
+export type BatchGraphqlExecutionOptions = BatchExecutionOptions & {
   bundlePlan?: BatchGraphqlExecutionPlanInput;
+  directDeliveryContext?: BatchDirectDeliveryContext;
   pruneUnusedResultFields?: boolean;
 };
 type BatchGraphqlOperationExecution = {
@@ -1077,13 +1107,12 @@ const executeOperationGroups = async (
   schema: GraphQLSchema,
   context: AuthContext,
   operations: PreparedBatchGraphqlOperation[],
+  groups: PreparedBatchGraphqlOperationGroup[],
   resultBindings: BatchGraphqlResultBindings,
-  bundlePlan: BatchGraphqlExecutionPlanInput | undefined,
   allowPartialFailures: boolean,
   executionId?: string,
 ): Promise<BatchGraphqlOperationExecution> => {
   const executionStartedAt = Date.now();
-  const groups = buildOperationGroups(operations, bundlePlan);
   const groupsByPhase = new Map<number, PreparedBatchGraphqlOperationGroup[]>();
   groups.forEach((group) => {
     const phaseGroups = groupsByPhase.get(group.executionPhase) ?? [];
@@ -1159,6 +1188,184 @@ const executeOperationGroups = async (
   };
 };
 
+const buildBatchExecutionReceiptOperationManifest = (
+  operations: PreparedBatchGraphqlOperation[],
+): BatchExecutionReceiptOperationManifest[] => operations.map((operation) => ({
+  query: print(operation.document),
+  variables: operation.variables,
+  operationName: operation.operationName ?? null,
+  objectId: operation.objectId ?? null,
+  executionGroup: operation.executionGroup ?? null,
+  executionPhase: operation.executionPhase ?? null,
+  files: operation.files?.map((file) => ({
+    path: file.path,
+    name: file.name,
+    mimeType: file.mimeType,
+    contentHash: hashSHA256(file.data),
+    byteLength: Buffer.byteLength(file.data, 'utf8'),
+  })) ?? null,
+}));
+
+const getBatchExecutionReceiptErrorCode = (error: unknown): string | undefined => {
+  if (error === null || typeof error !== 'object') {
+    return undefined;
+  }
+  const extensions = (error as { extensions?: { code?: unknown } }).extensions;
+  return typeof extensions?.code === 'string' ? extensions.code : undefined;
+};
+
+const batchExecutionReceiptConflict = (message: string, receipt: BatchExecutionReceipt) => {
+  return FunctionalError(message, {
+    batch_error_code: BatchAdmissionErrorCode.ExecutionReceiptConflict,
+    receipt_id: receipt.internal_id,
+    delivery_id: receipt.delivery_id,
+    receipt_state: receipt.state,
+  });
+};
+
+const buildCachedBatchGraphqlExecutionResult = (
+  metadata: BatchExecutionReceiptResultMetadata,
+): BatchGraphqlExecutionResult => ({
+  executionMode: metadata.executionMode,
+  waitUntil: metadata.waitUntil,
+  results: Array.from({ length: metadata.operationCount }, () => null),
+  operationErrors: metadata.operationErrors,
+  sideEffectKinds: metadata.sideEffectKinds as BatchGraphqlExecutionResult['sideEffectKinds'],
+  materialized: true,
+});
+
+const readBatchExecutionReceiptReplay = (
+  receipt: BatchExecutionReceipt,
+): BatchGraphqlExecutionResult | null => {
+  switch (receipt.state) {
+    case BatchExecutionReceiptState.Prepared:
+      return null;
+    case BatchExecutionReceiptState.Completed: {
+      const metadata = readBatchExecutionReceiptResultMetadata(receipt);
+      if (!metadata) {
+        throw batchExecutionReceiptConflict('Batch execution receipt is completed without replay-safe terminal metadata', receipt);
+      }
+      return buildCachedBatchGraphqlExecutionResult(metadata);
+    }
+    case BatchExecutionReceiptState.Started:
+    case BatchExecutionReceiptState.RequiresReconciliation:
+      throw buildBatchExecutionReceiptRequiresReconciliationError(receipt);
+    case BatchExecutionReceiptState.FailedTerminal:
+      throw buildBatchExecutionReceiptTerminalFailureError(receipt);
+    default:
+      throw batchExecutionReceiptConflict('Batch execution receipt has an invalid state', receipt);
+  }
+};
+
+const withBatchExecutionReceiptLock = async <T>(
+  deliveryId: string,
+  executeWithLock: () => Promise<T>,
+): Promise<T> => {
+  const lock = await lockResources([buildBatchExecutionReceiptLockId(deliveryId)]);
+  try {
+    return await executeWithLock();
+  } finally {
+    await lock.unlock();
+  }
+};
+
+const reservePreparedBatchExecutionReceipt = async (
+  context: AuthContext,
+  input: ReserveBatchExecutionReceiptInput,
+): Promise<{ receipt: BatchExecutionReceipt; replay: BatchGraphqlExecutionResult | null }> => {
+  return withBatchExecutionReceiptLock(input.deliveryId, async () => {
+    const receipt = await reserveBatchExecutionReceipt(context, input);
+    return {
+      receipt,
+      replay: readBatchExecutionReceiptReplay(receipt),
+    };
+  });
+};
+
+const startPreparedBatchExecutionReceipt = async (
+  context: AuthContext,
+  input: ReserveBatchExecutionReceiptInput,
+): Promise<{ receipt: BatchExecutionReceipt; replay: BatchGraphqlExecutionResult | null }> => {
+  return withBatchExecutionReceiptLock(input.deliveryId, async () => {
+    const receipt = await reserveBatchExecutionReceipt(context, input);
+    const replay = readBatchExecutionReceiptReplay(receipt);
+    if (replay) {
+      return { receipt, replay };
+    }
+    return {
+      receipt: await recordBatchExecutionReceiptStarted(context, receipt),
+      replay: null,
+    };
+  });
+};
+
+const recordPreparedBatchExecutionReceiptFailure = async (
+  context: AuthContext,
+  input: ReserveBatchExecutionReceiptInput,
+  error: unknown,
+): Promise<void> => {
+  await withBatchExecutionReceiptLock(input.deliveryId, async () => {
+    const receipt = await reserveBatchExecutionReceipt(context, input);
+    if (receipt.state !== BatchExecutionReceiptState.Prepared) {
+      return;
+    }
+    await recordBatchExecutionReceiptTerminalFailure(context, receipt, {
+      stage: 'BUILD_EXECUTION_GROUPS',
+      code: getBatchExecutionReceiptErrorCode(error),
+      message: error instanceof Error ? error.message : String(error),
+      proof: BatchExecutionReceiptFailureProof.PreStartValidation,
+    });
+  });
+};
+
+const recordStartedBatchExecutionReceiptResult = async (
+  context: AuthContext,
+  receipt: BatchExecutionReceipt,
+  execution: BatchGraphqlExecutionResult,
+): Promise<void> => {
+  await withBatchExecutionReceiptLock(receipt.delivery_id, async () => {
+    const currentReceipt = await loadBatchExecutionReceipt(context, receipt.delivery_id) ?? receipt;
+    if (currentReceipt.state === BatchExecutionReceiptState.Completed) {
+      readBatchExecutionReceiptReplay(currentReceipt);
+      return;
+    }
+    if (execution.materialized) {
+      await recordBatchExecutionReceiptCompletion(context, currentReceipt, {
+        operationCount: execution.results.length,
+        operationErrors: execution.operationErrors,
+        executionMode: execution.executionMode,
+        waitUntil: execution.waitUntil,
+        sideEffectKinds: execution.sideEffectKinds,
+        materialized: true,
+      });
+      return;
+    }
+    await recordBatchExecutionReceiptRequiresReconciliation(
+      context,
+      currentReceipt,
+      new Error('Batch execution committed before durable materialization evidence existed'),
+    );
+  });
+};
+
+const recordStartedBatchExecutionReceiptError = async (
+  context: AuthContext,
+  receipt: BatchExecutionReceipt,
+  error: unknown,
+): Promise<void> => {
+  await withBatchExecutionReceiptLock(receipt.delivery_id, async () => {
+    const currentReceipt = await loadBatchExecutionReceipt(context, receipt.delivery_id) ?? receipt;
+    if (
+      currentReceipt.state === BatchExecutionReceiptState.Completed
+      || currentReceipt.state === BatchExecutionReceiptState.FailedTerminal
+      || currentReceipt.state === BatchExecutionReceiptState.RequiresReconciliation
+    ) {
+      return;
+    }
+    await recordBatchExecutionReceiptRequiresReconciliation(context, currentReceipt, error);
+  });
+};
+
 export const executeBatchGraphqlOperations = async (
   schema: GraphQLSchema,
   context: AuthContext,
@@ -1205,47 +1412,106 @@ export const executeBatchGraphqlOperations = async (
   }
   try {
     const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
+    const normalizedOptions = normalizeBatchExecutionOptions(options);
+    let receiptReservationInput: ReserveBatchExecutionReceiptInput | undefined;
+    if (options.directDeliveryContext) {
+      const delivery = await assertBatchDirectDeliveryContext(context, options.directDeliveryContext);
+      receiptReservationInput = {
+        deliveryId: delivery.internal_id,
+        submissionId: delivery.submission_id,
+        deliveryPayloadFingerprint: delivery.payload_fingerprint,
+        executionMode: normalizedOptions.executionMode,
+        waitUntil: normalizedOptions.waitUntil,
+        requestMetadata: buildBatchExecutionReceiptRequestMetadata({
+          delivery,
+          executionMode: normalizedOptions.executionMode,
+          waitUntil: normalizedOptions.waitUntil,
+          batchPlan: options.bundlePlan ?? null,
+          operations: buildBatchExecutionReceiptOperationManifest(preparedOperations),
+        }),
+      };
+      const reservation = await reservePreparedBatchExecutionReceipt(context, receiptReservationInput);
+      if (reservation.replay) {
+        return reservation.replay;
+      }
+    }
+    let operationGroups: PreparedBatchGraphqlOperationGroup[];
+    try {
+      operationGroups = buildOperationGroups(preparedOperations, options.bundlePlan);
+    } catch (error) {
+      if (receiptReservationInput) {
+        await recordPreparedBatchExecutionReceiptFailure(context, receiptReservationInput, error);
+      }
+      throw error;
+    }
+    let startedReceipt: BatchExecutionReceipt | undefined;
+    if (receiptReservationInput) {
+      const started = await startPreparedBatchExecutionReceipt(context, receiptReservationInput);
+      if (started.replay) {
+        return started.replay;
+      }
+      startedReceipt = started.receipt;
+    }
     const resultBindings: BatchGraphqlResultBindings = new Map();
-    const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
-      kind: BatchMutationKind.GraphqlOperation,
-      executeWrite: () => executeOperationGroups(
-        schema,
-        context,
-        preparedOperations,
-        resultBindings,
-        options.bundlePlan,
-        options.executionMode !== BatchExecutionMode.Atomic,
-        executionId,
-      ),
-    }], {
-      ...options,
-      onMaterializationStarted: async () => {
-        await options.onMaterializationStarted?.();
-        if (materializationAdmissionWeight >= admissionStats.weight) {
-          return;
-        }
-        releaseAdmission.downgrade(materializationAdmissionWeight);
-        if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
-          logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
-            event: 'downgraded',
-            ...admissionMetadata,
-            operation_count: admissionStats.operationCount,
-            encoded_bytes: admissionStats.encodedBytes,
-            admission_weight: admissionStats.weight,
-            materialization_admission_weight: materializationAdmissionWeight,
-            admission_wait_ms: admittedAt - admissionRequestedAt,
-            execution_time_ms: Date.now() - admittedAt,
-            admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+    try {
+      const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
+        kind: BatchMutationKind.GraphqlOperation,
+        executeWrite: () => executeOperationGroups(
+          schema,
+          context,
+          preparedOperations,
+          operationGroups,
+          resultBindings,
+          normalizedOptions.executionMode !== BatchExecutionMode.Atomic,
+          executionId,
+        ),
+      }], {
+        ...options,
+        onMaterializationStarted: async () => {
+          await options.onMaterializationStarted?.();
+          if (materializationAdmissionWeight >= admissionStats.weight) {
+            return;
+          }
+          releaseAdmission.downgrade(materializationAdmissionWeight);
+          if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+            logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+              event: 'downgraded',
+              ...admissionMetadata,
+              operation_count: admissionStats.operationCount,
+              encoded_bytes: admissionStats.encodedBytes,
+              admission_weight: admissionStats.weight,
+              materialization_admission_weight: materializationAdmissionWeight,
+              admission_wait_ms: admittedAt - admissionRequestedAt,
+              execution_time_ms: Date.now() - admittedAt,
+              admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+            });
+          }
+        },
+        performanceTraceId: executionId,
+      });
+      const result = {
+        ...execution,
+        operationErrors: execution.results[0].operationErrors,
+        results: execution.results[0].results,
+      };
+      if (startedReceipt) {
+        await recordStartedBatchExecutionReceiptResult(context, startedReceipt, result);
+      }
+      return result;
+    } catch (error) {
+      if (startedReceipt) {
+        try {
+          await recordStartedBatchExecutionReceiptError(context, startedReceipt, error);
+        } catch (receiptError) {
+          logApp.error('Failed to persist batch execution receipt reconciliation state', {
+            cause: receiptError,
+            delivery_id: startedReceipt.delivery_id,
+            original_error: error,
           });
         }
-      },
-      performanceTraceId: executionId,
-    });
-    return {
-      ...execution,
-      operationErrors: execution.results[0].operationErrors,
-      results: execution.results[0].results,
-    };
+      }
+      throw error;
+    }
   } finally {
     const completedAt = Date.now();
     releaseAdmission();

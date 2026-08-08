@@ -2164,13 +2164,30 @@ export enum BatchDeliveryHandoffEvidence {
   Planned = 'PLANNED'
 }
 
+export enum BatchDeliveryKind {
+  Child = 'CHILD',
+  Root = 'ROOT'
+}
+
 export enum BatchDeliveryState {
   Published = 'PUBLISHED',
   Ready = 'READY'
 }
 
+export type BatchDirectDeliveryContextInput = {
+  delivery_branch_kind: BatchDeliveryBranchKind;
+  delivery_branch_ordinal: Scalars['Int']['input'];
+  delivery_branch_sequence: Scalars['Int']['input'];
+  delivery_id: Scalars['ID']['input'];
+  delivery_kind: BatchDeliveryKind;
+  delivery_protocol_version: Scalars['Int']['input'];
+  parent_delivery_id?: InputMaybe<Scalars['ID']['input']>;
+  submission_id: Scalars['ID']['input'];
+};
+
 export type BatchExecuteOptionsInput = {
   batch_plan?: InputMaybe<BatchGraphqlExecutionPlanInput>;
+  direct_delivery_context?: InputMaybe<BatchDirectDeliveryContextInput>;
   execution_mode?: InputMaybe<BatchExecutionMode>;
   wait_until?: InputMaybe<BatchWaitUntil>;
 };
@@ -2196,6 +2213,64 @@ export enum BatchExecutionReason {
   GenericBulkCompatible = 'GENERIC_BULK_COMPATIBLE',
   IdentityIndicatorAtomicCohort = 'IDENTITY_INDICATOR_ATOMIC_COHORT',
   OperationalBundleCompatibility = 'OPERATIONAL_BUNDLE_COMPATIBILITY'
+}
+
+export type BatchExecutionReceipt = {
+  __typename?: 'BatchExecutionReceipt';
+  batch_plan_fingerprint: Scalars['String']['output'];
+  completed_at?: Maybe<Scalars['DateTime']['output']>;
+  completion_boundary?: Maybe<BatchExecutionReceiptCompletionBoundary>;
+  created_at: Scalars['DateTime']['output'];
+  delivery_id: Scalars['ID']['output'];
+  delivery_payload_fingerprint: Scalars['String']['output'];
+  execution_mode: BatchExecutionMode;
+  failed_at?: Maybe<Scalars['DateTime']['output']>;
+  failure_code?: Maybe<Scalars['String']['output']>;
+  failure_fingerprint?: Maybe<Scalars['String']['output']>;
+  failure_message?: Maybe<Scalars['String']['output']>;
+  failure_proof?: Maybe<BatchExecutionReceiptFailureProof>;
+  failure_retryable?: Maybe<Scalars['Boolean']['output']>;
+  failure_stage?: Maybe<Scalars['String']['output']>;
+  last_error?: Maybe<Scalars['String']['output']>;
+  materialized_at?: Maybe<Scalars['DateTime']['output']>;
+  operation_count: Scalars['Int']['output'];
+  operation_manifest_fingerprint: Scalars['String']['output'];
+  prepared_at: Scalars['DateTime']['output'];
+  receipt_id: Scalars['ID']['output'];
+  reconciliation_required_at?: Maybe<Scalars['DateTime']['output']>;
+  request_contract_version: Scalars['Int']['output'];
+  request_fingerprint: Scalars['String']['output'];
+  result_execution_mode?: Maybe<BatchExecutionMode>;
+  result_fingerprint?: Maybe<Scalars['String']['output']>;
+  result_materialized?: Maybe<Scalars['Boolean']['output']>;
+  result_operation_count?: Maybe<Scalars['Int']['output']>;
+  result_operation_errors?: Maybe<Array<BatchMutationOperationError>>;
+  result_side_effect_kinds: Array<Scalars['String']['output']>;
+  result_version?: Maybe<Scalars['Int']['output']>;
+  result_wait_until?: Maybe<BatchWaitUntil>;
+  side_effect_kind_counts?: Maybe<Scalars['String']['output']>;
+  started_at?: Maybe<Scalars['DateTime']['output']>;
+  state: BatchExecutionReceiptState;
+  submission_id: Scalars['ID']['output'];
+  updated_at: Scalars['DateTime']['output'];
+  wait_until: BatchWaitUntil;
+};
+
+export enum BatchExecutionReceiptCompletionBoundary {
+  Materialized = 'MATERIALIZED'
+}
+
+export enum BatchExecutionReceiptFailureProof {
+  NoEffectTerminal = 'NO_EFFECT_TERMINAL',
+  PreStartValidation = 'PRE_START_VALIDATION'
+}
+
+export enum BatchExecutionReceiptState {
+  Completed = 'COMPLETED',
+  FailedTerminal = 'FAILED_TERMINAL',
+  Prepared = 'PREPARED',
+  RequiresReconciliation = 'REQUIRES_RECONCILIATION',
+  Started = 'STARTED'
 }
 
 export type BatchGraphqlExecutionPhaseInput = {
@@ -24658,6 +24733,7 @@ export type Query = {
   backgroundTask?: Maybe<BackgroundTask>;
   backgroundTasks?: Maybe<BackgroundTaskConnection>;
   batchDeliveryHandoff: BatchDeliveryHandoff;
+  batchExecutionReceipt?: Maybe<BatchExecutionReceipt>;
   bookmarks?: Maybe<StixDomainObjectConnection>;
   campaign?: Maybe<Campaign>;
   campaigns?: Maybe<CampaignConnection>;
@@ -25209,6 +25285,11 @@ export type QueryBackgroundTasksArgs = {
 
 export type QueryBatchDeliveryHandoffArgs = {
   parent_delivery_id: Scalars['ID']['input'];
+};
+
+
+export type QueryBatchExecutionReceiptArgs = {
+  delivery_id: Scalars['ID']['input'];
 };
 
 
@@ -39884,11 +39965,17 @@ export type ResolversTypes = ResolversObject<{
   BatchDeliveryChildReservationInput: BatchDeliveryChildReservationInput;
   BatchDeliveryHandoff: ResolverTypeWrapper<BatchDeliveryHandoff>;
   BatchDeliveryHandoffEvidence: BatchDeliveryHandoffEvidence;
+  BatchDeliveryKind: BatchDeliveryKind;
   BatchDeliveryState: BatchDeliveryState;
+  BatchDirectDeliveryContextInput: BatchDirectDeliveryContextInput;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
   BatchExecutionMode: BatchExecutionMode;
   BatchExecutionPreference: BatchExecutionPreference;
   BatchExecutionReason: BatchExecutionReason;
+  BatchExecutionReceipt: ResolverTypeWrapper<BatchExecutionReceipt>;
+  BatchExecutionReceiptCompletionBoundary: BatchExecutionReceiptCompletionBoundary;
+  BatchExecutionReceiptFailureProof: BatchExecutionReceiptFailureProof;
+  BatchExecutionReceiptState: BatchExecutionReceiptState;
   BatchGraphqlExecutionPhaseInput: BatchGraphqlExecutionPhaseInput;
   BatchGraphqlExecutionPlanInput: BatchGraphqlExecutionPlanInput;
   BatchGraphqlFileInput: BatchGraphqlFileInput;
@@ -41047,7 +41134,9 @@ export type ResolversParentTypes = ResolversObject<{
   BatchDeliveryChild: BatchDeliveryChild;
   BatchDeliveryChildReservationInput: BatchDeliveryChildReservationInput;
   BatchDeliveryHandoff: BatchDeliveryHandoff;
+  BatchDirectDeliveryContextInput: BatchDirectDeliveryContextInput;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
+  BatchExecutionReceipt: BatchExecutionReceipt;
   BatchGraphqlExecutionPhaseInput: BatchGraphqlExecutionPhaseInput;
   BatchGraphqlExecutionPlanInput: BatchGraphqlExecutionPlanInput;
   BatchGraphqlFileInput: BatchGraphqlFileInput;
@@ -42736,6 +42825,46 @@ export type BatchDeliveryHandoffResolvers<ContextType = any, ParentType extends 
   handoff_evidence?: Resolver<ResolversTypes['BatchDeliveryHandoffEvidence'], ParentType, ContextType>;
   parent_delivery_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
   pending_children?: Resolver<Array<ResolversTypes['BatchDeliveryChild']>, ParentType, ContextType>;
+}>;
+
+export type BatchExecutionReceiptResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchExecutionReceipt'] = ResolversParentTypes['BatchExecutionReceipt']> = ResolversObject<{
+  batch_plan_fingerprint?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  completed_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  completion_boundary?: Resolver<Maybe<ResolversTypes['BatchExecutionReceiptCompletionBoundary']>, ParentType, ContextType>;
+  created_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  delivery_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  delivery_payload_fingerprint?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  execution_mode?: Resolver<ResolversTypes['BatchExecutionMode'], ParentType, ContextType>;
+  failed_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  failure_code?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  failure_fingerprint?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  failure_message?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  failure_proof?: Resolver<Maybe<ResolversTypes['BatchExecutionReceiptFailureProof']>, ParentType, ContextType>;
+  failure_retryable?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType>;
+  failure_stage?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  last_error?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  materialized_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  operation_count?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  operation_manifest_fingerprint?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  prepared_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  receipt_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  reconciliation_required_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  request_contract_version?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  request_fingerprint?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  result_execution_mode?: Resolver<Maybe<ResolversTypes['BatchExecutionMode']>, ParentType, ContextType>;
+  result_fingerprint?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  result_materialized?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType>;
+  result_operation_count?: Resolver<Maybe<ResolversTypes['Int']>, ParentType, ContextType>;
+  result_operation_errors?: Resolver<Maybe<Array<ResolversTypes['BatchMutationOperationError']>>, ParentType, ContextType>;
+  result_side_effect_kinds?: Resolver<Array<ResolversTypes['String']>, ParentType, ContextType>;
+  result_version?: Resolver<Maybe<ResolversTypes['Int']>, ParentType, ContextType>;
+  result_wait_until?: Resolver<Maybe<ResolversTypes['BatchWaitUntil']>, ParentType, ContextType>;
+  side_effect_kind_counts?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  started_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  state?: Resolver<ResolversTypes['BatchExecutionReceiptState'], ParentType, ContextType>;
+  submission_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  updated_at?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  wait_until?: Resolver<ResolversTypes['BatchWaitUntil'], ParentType, ContextType>;
 }>;
 
 export type BatchMutationExecutionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchMutationExecution'] = ResolversParentTypes['BatchMutationExecution']> = ResolversObject<{
@@ -49778,6 +49907,7 @@ export type QueryResolvers<ContextType = any, ParentType extends ResolversParent
   backgroundTask?: Resolver<Maybe<ResolversTypes['BackgroundTask']>, ParentType, ContextType, RequireFields<QueryBackgroundTaskArgs, 'id'>>;
   backgroundTasks?: Resolver<Maybe<ResolversTypes['BackgroundTaskConnection']>, ParentType, ContextType, Partial<QueryBackgroundTasksArgs>>;
   batchDeliveryHandoff?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<QueryBatchDeliveryHandoffArgs, 'parent_delivery_id'>>;
+  batchExecutionReceipt?: Resolver<Maybe<ResolversTypes['BatchExecutionReceipt']>, ParentType, ContextType, RequireFields<QueryBatchExecutionReceiptArgs, 'delivery_id'>>;
   bookmarks?: Resolver<Maybe<ResolversTypes['StixDomainObjectConnection']>, ParentType, ContextType, Partial<QueryBookmarksArgs>>;
   campaign?: Resolver<Maybe<ResolversTypes['Campaign']>, ParentType, ContextType, Partial<QueryCampaignArgs>>;
   campaigns?: Resolver<Maybe<ResolversTypes['CampaignConnection']>, ParentType, ContextType, Partial<QueryCampaignsArgs>>;
@@ -53836,6 +53966,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   BatchAdmission?: BatchAdmissionResolvers<ContextType>;
   BatchDeliveryChild?: BatchDeliveryChildResolvers<ContextType>;
   BatchDeliveryHandoff?: BatchDeliveryHandoffResolvers<ContextType>;
+  BatchExecutionReceipt?: BatchExecutionReceiptResolvers<ContextType>;
   BatchMutationExecution?: BatchMutationExecutionResolvers<ContextType>;
   BatchMutationOperationError?: BatchMutationOperationErrorResolvers<ContextType>;
   CSVFeedAddInputFromImport?: CsvFeedAddInputFromImportResolvers<ContextType>;

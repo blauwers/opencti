@@ -1,10 +1,14 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
 import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, reserveBatchDeliveryChildren } from './batch-delivery-domain';
+import { loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';
 import { executeBatchGraphqlOperations } from './batch-operation-executor';
 import type {
+  BatchDirectDeliveryContext,
   BatchDeliveryBranchKind,
   BatchDeliveryChildReservationInput,
+  BatchDeliveryKind,
+  BatchDeliveryProtocol,
   BatchExecutionMode,
   BatchExecutionPreference,
   BatchGraphqlExecutionPlanInput,
@@ -26,6 +30,7 @@ interface BatchExecuteOptionsInput {
   wait_until?: BatchWaitUntil | null;
   execution_mode?: BatchExecutionMode | null;
   batch_plan?: BatchGraphqlExecutionPlanInputValue | null;
+  direct_delivery_context?: BatchDirectDeliveryContextInputValue | null;
 }
 
 interface BatchGraphqlOperationInputValue {
@@ -53,6 +58,17 @@ interface BatchGraphqlExecutionPlanInputValue {
   }>;
 }
 
+interface BatchDirectDeliveryContextInputValue {
+  submission_id: string;
+  delivery_id: string;
+  parent_delivery_id?: string | null;
+  delivery_kind: BatchDeliveryKind;
+  delivery_protocol_version: BatchDeliveryProtocol.V2;
+  delivery_branch_kind: BatchDeliveryBranchKind;
+  delivery_branch_sequence: number;
+  delivery_branch_ordinal: number;
+}
+
 interface BatchDeliveryChildReservationInputValue {
   branch_kind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
   branch_sequence: number;
@@ -71,6 +87,11 @@ const batchResolvers = {
       { parent_delivery_id }: { parent_delivery_id: string },
       context: any,
     ) => loadBatchDeliveryHandoff(context, parent_delivery_id),
+    batchExecutionReceipt: (
+      _: unknown,
+      { delivery_id }: { delivery_id: string },
+      context: any,
+    ) => loadBatchExecutionReceipt(context, delivery_id),
   },
   Mutation: {
     stixBundleSubmit: (
@@ -122,6 +143,18 @@ const batchResolvers = {
             objectIds: phase.object_ids,
           })),
         } satisfies BatchGraphqlExecutionPlanInput
+        : undefined,
+      directDeliveryContext: options?.direct_delivery_context
+        ? {
+          submission_id: options.direct_delivery_context.submission_id,
+          delivery_id: options.direct_delivery_context.delivery_id,
+          parent_delivery_id: options.direct_delivery_context.parent_delivery_id ?? null,
+          delivery_kind: options.direct_delivery_context.delivery_kind,
+          delivery_protocol_version: options.direct_delivery_context.delivery_protocol_version,
+          delivery_branch_kind: options.direct_delivery_context.delivery_branch_kind,
+          delivery_branch_sequence: options.direct_delivery_context.delivery_branch_sequence,
+          delivery_branch_ordinal: options.direct_delivery_context.delivery_branch_ordinal,
+        } satisfies BatchDirectDeliveryContext
         : undefined,
     }),
     batchDeliveryReserveChildren: (
@@ -182,6 +215,10 @@ const batchResolvers = {
     delivery_id: (delivery: any) => delivery.internal_id,
     state: (delivery: any) => delivery.state,
     queue_payload: (delivery: any) => delivery.queue_payload,
+  },
+  BatchExecutionReceipt: {
+    receipt_id: (receipt: any) => receipt.internal_id,
+    result_operation_errors: (receipt: any) => readBatchExecutionReceiptResultMetadata(receipt)?.operationErrors ?? null,
   },
 };
 

@@ -525,6 +525,7 @@ class OpenCTIStix2:
         wait_until: str = None,
         backend_batch_plan: Optional[Dict] = None,
         split_oversized_batch_plan: bool = False,
+        direct_delivery_context: Optional[Dict] = None,
     ) -> Tuple[list, list]:
         """Import a STIX2 bundle through one backend mutation-plan request."""
         data = json.loads(json_data)
@@ -540,9 +541,14 @@ class OpenCTIStix2:
                 execution_mode,
                 wait_until,
                 backend_batch_plan,
+                direct_delivery_context,
             )
         except BatchMutationPlanTooLarge as error:
-            if not split_oversized_batch_plan or report_expectations:
+            if (
+                not split_oversized_batch_plan
+                or report_expectations
+                or direct_delivery_context is not None
+            ):
                 raise
             return self._import_oversized_batch_plan_chunks(
                 json_data,
@@ -570,12 +576,14 @@ class OpenCTIStix2:
         execution_mode: str,
         wait_until: str,
         backend_batch_plan: Optional[Dict],
+        direct_delivery_context: Optional[Dict],
     ) -> Tuple[list, list]:
         with self.batch_mapping_cache():
             with self.opencti.batch_mutation_plan(
                 execution_mode=execution_mode,
                 wait_until=wait_until,
                 backend_batch_plan=backend_batch_plan,
+                direct_delivery_context=direct_delivery_context,
             ) as plan:
                 imported, rejected = self.import_bundle(
                     data,
@@ -594,6 +602,8 @@ class OpenCTIStix2:
         }
         if backend_batch_plan is not None:
             execute_kwargs["backend_batch_plan"] = backend_batch_plan
+        if direct_delivery_context is not None:
+            execute_kwargs["direct_delivery_context"] = direct_delivery_context
         execution_result = self.opencti.execute_batch_mutation_plan(
             plan, **execute_kwargs
         )

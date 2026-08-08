@@ -2,6 +2,7 @@ import type { BatchBundlePlan } from './batch-bundle-planner';
 
 export const ENTITY_TYPE_BATCH_SUBMISSION = 'BatchSubmission';
 export const ENTITY_TYPE_BATCH_DELIVERY = 'BatchDelivery';
+export const ENTITY_TYPE_BATCH_EXECUTION_RECEIPT = 'BatchExecutionReceipt';
 
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
@@ -77,6 +78,23 @@ export enum BatchDeliveryHandoffEvidence {
   ChildrenPublished = 'CHILDREN_PUBLISHED',
 }
 
+export enum BatchExecutionReceiptState {
+  Prepared = 'PREPARED',
+  Started = 'STARTED',
+  Completed = 'COMPLETED',
+  FailedTerminal = 'FAILED_TERMINAL',
+  RequiresReconciliation = 'REQUIRES_RECONCILIATION',
+}
+
+export enum BatchExecutionReceiptCompletionBoundary {
+  Materialized = 'MATERIALIZED',
+}
+
+export enum BatchExecutionReceiptFailureProof {
+  PreStartValidation = 'PRE_START_VALIDATION',
+  NoEffectTerminal = 'NO_EFFECT_TERMINAL',
+}
+
 export enum BatchAdmissionErrorCode {
   InvalidBundle = 'INVALID_BUNDLE',
   InvalidBundleId = 'INVALID_BUNDLE_ID',
@@ -84,6 +102,9 @@ export enum BatchAdmissionErrorCode {
   InvalidIdempotencyKey = 'INVALID_IDEMPOTENCY_KEY',
   IdempotencyKeyConflict = 'IDEMPOTENCY_KEY_CONFLICT',
   DeliveryIdentityConflict = 'DELIVERY_IDENTITY_CONFLICT',
+  ExecutionReceiptConflict = 'EXECUTION_RECEIPT_CONFLICT',
+  ExecutionRequiresReconciliation = 'EXECUTION_REQUIRES_RECONCILIATION',
+  ExecutionFailedTerminal = 'EXECUTION_FAILED_TERMINAL',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
   UnsupportedExecutionPreference = 'UNSUPPORTED_EXECUTION_PREFERENCE',
   ExecutionPreferenceNotEligible = 'EXECUTION_PREFERENCE_NOT_ELIGIBLE',
@@ -144,6 +165,10 @@ export interface BatchDeliveryEnvelope {
   delivery_branch_kind: BatchDeliveryBranchKind;
   delivery_branch_sequence: number;
   delivery_branch_ordinal: number;
+}
+
+export interface BatchDirectDeliveryContext extends BatchDeliveryEnvelope {
+  submission_id: string;
 }
 
 export interface BatchQueueMessage {
@@ -254,6 +279,52 @@ export interface BatchDelivery {
   last_error: string | null;
 }
 
+export interface BatchExecutionReceipt {
+  id: string;
+  internal_id: string;
+  _index?: string;
+  standard_id: string;
+  entity_type: typeof ENTITY_TYPE_BATCH_EXECUTION_RECEIPT;
+  base_type: 'ENTITY';
+  parent_types: string[];
+  delivery_id: string;
+  submission_id: string;
+  delivery_payload_fingerprint: string;
+  request_contract_version: number;
+  request_fingerprint: string;
+  batch_plan_fingerprint: string;
+  operation_manifest_fingerprint: string;
+  operation_count: number;
+  execution_mode: BatchExecutionMode;
+  wait_until: BatchWaitUntil;
+  state: BatchExecutionReceiptState;
+  result_fingerprint: string | null;
+  result_version: number | null;
+  result_operation_count: number | null;
+  result_operation_errors: string | null;
+  result_execution_mode: BatchExecutionMode | null;
+  result_wait_until: BatchWaitUntil | null;
+  result_side_effect_kinds: string[];
+  result_materialized: boolean | null;
+  completion_boundary: BatchExecutionReceiptCompletionBoundary | null;
+  side_effect_kind_counts: string | null;
+  prepared_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  materialized_at: string | null;
+  failure_stage: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  failure_fingerprint: string | null;
+  failure_retryable: false | null;
+  failure_proof: BatchExecutionReceiptFailureProof | null;
+  failed_at: string | null;
+  reconciliation_required_at: string | null;
+  created_at: string;
+  updated_at: string;
+  last_error: string | null;
+}
+
 export interface BatchDeliveryChildReservationInput {
   branchKind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
   branchSequence: number;
@@ -301,4 +372,60 @@ export interface BatchGraphqlExecutionPlanInput {
     phase: number;
   }>;
   version: number;
+}
+
+export interface BatchExecutionReceiptOperationManifest {
+  query: string;
+  variables: Record<string, unknown>;
+  operationName: string | null;
+  objectId: string | null;
+  executionGroup: number | null;
+  executionPhase: number | null;
+  files: Array<{
+    path: string;
+    name: string;
+    mimeType: string;
+    contentHash: string;
+    byteLength: number;
+  }> | null;
+}
+
+export interface BatchExecutionReceiptRequestInput {
+  delivery: BatchDelivery;
+  executionMode: BatchExecutionMode;
+  waitUntil: BatchWaitUntil;
+  batchPlan: BatchGraphqlExecutionPlanInput | null;
+  operations: BatchExecutionReceiptOperationManifest[];
+}
+
+export interface BatchExecutionReceiptRequestMetadata {
+  requestContractVersion: number;
+  requestFingerprint: string;
+  batchPlanFingerprint: string;
+  operationManifestFingerprint: string;
+  operationCount: number;
+}
+
+export interface BatchExecutionReceiptOperationError {
+  code?: string;
+  message: string;
+  objectId?: string;
+  operationIndex: number;
+  retryable: boolean;
+}
+
+export interface BatchExecutionReceiptResultMetadata {
+  operationCount: number;
+  operationErrors: BatchExecutionReceiptOperationError[];
+  executionMode: BatchExecutionMode;
+  waitUntil: BatchWaitUntil;
+  sideEffectKinds: string[];
+  materialized: true;
+}
+
+export interface BatchExecutionReceiptTerminalFailure {
+  stage: string;
+  code?: string;
+  message: string;
+  proof: BatchExecutionReceiptFailureProof;
 }

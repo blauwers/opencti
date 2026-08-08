@@ -355,6 +355,51 @@ def test_import_bundle_batch_executes_one_captured_plan(monkeypatch) -> None:
     )
 
 
+def test_import_bundle_batch_forwards_direct_delivery_context(monkeypatch) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    plan = MagicMock()
+    direct_delivery_context = {
+        "submission_id": "batch-submission--1",
+        "delivery_id": "batch-delivery--1",
+        "parent_delivery_id": None,
+        "delivery_kind": "ROOT",
+        "delivery_protocol_version": 2,
+        "delivery_branch_kind": "ROOT",
+        "delivery_branch_sequence": 0,
+        "delivery_branch_ordinal": 0,
+    }
+
+    @contextmanager
+    def batch_mutation_plan(*args, **kwargs):
+        yield plan
+
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    monkeypatch.setattr(
+        opencti_stix2,
+        "import_bundle",
+        lambda *args, **kwargs: ([{"id": "indicator--1", "type": "indicator"}], []),
+    )
+
+    opencti_stix2.import_bundle_from_json_batch(
+        '{"type":"bundle","id":"bundle--1","objects":[{"type":"indicator","id":"indicator--1"}]}',
+        execution_mode="BULK",
+        wait_until="MATERIALIZED",
+        direct_delivery_context=direct_delivery_context,
+    )
+
+    assert (
+        opencti.batch_mutation_plan.call_args.kwargs["direct_delivery_context"]
+        == direct_delivery_context
+    )
+    opencti.execute_batch_mutation_plan.assert_called_once_with(
+        plan,
+        execution_mode="BULK",
+        wait_until="MATERIALIZED",
+        direct_delivery_context=direct_delivery_context,
+    )
+
+
 def test_import_item_with_retries_propagates_batch_plan_size_failures() -> None:
     opencti_stix2 = OpenCTIStix2(MagicMock())
     opencti_stix2.import_item = MagicMock(side_effect=BatchMutationPlanTooLarge(2, 1))
@@ -440,6 +485,39 @@ def test_import_bundle_batch_splits_oversized_plan_into_sequential_chunks(
     assert executed_backend_plans[1]["ordered_object_ids"] == object_ids[:2]
     assert executed_backend_plans[2]["ordered_object_ids"] == object_ids[2:]
     opencti.logger_class.return_value.warning.assert_called_once()
+
+
+def test_import_bundle_batch_does_not_split_oversized_direct_delivery_context(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    @contextmanager
+    def batch_mutation_plan(*args, **kwargs):
+        yield BatchMutationPlan()
+
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    opencti.execute_batch_mutation_plan.side_effect = BatchMutationPlanTooLarge(
+        200, 100
+    )
+    monkeypatch.setattr(
+        opencti_stix2,
+        "import_bundle",
+        lambda *args, **kwargs: ([{"id": "indicator--1", "type": "indicator"}], []),
+    )
+
+    with pytest.raises(BatchMutationPlanTooLarge):
+        opencti_stix2.import_bundle_from_json_batch(
+            '{"type":"bundle","id":"bundle--1","objects":[{"type":"indicator","id":"indicator--1"}]}',
+            report_expectations=False,
+            execution_mode="BULK",
+            split_oversized_batch_plan=True,
+            direct_delivery_context={
+                "submission_id": "batch-submission--1",
+                "delivery_id": "batch-delivery--1",
+            },
+        )
 
 
 def test_import_bundle_batch_returns_retryable_missing_reference_items(

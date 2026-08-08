@@ -910,6 +910,7 @@ class OpenCTIApiClient:
         execution_mode: Optional[str] = None,
         wait_until: Optional[str] = None,
         backend_batch_plan: Optional[Dict[str, Any]] = None,
+        direct_delivery_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         options = {}
         if execution_mode is not None:
@@ -921,6 +922,25 @@ class OpenCTIApiClient:
                 "version": backend_batch_plan.get("version"),
                 "execution_phases": backend_batch_plan.get("execution_phases"),
             }
+        if isinstance(direct_delivery_context, dict):
+            options["direct_delivery_context"] = {
+                "submission_id": direct_delivery_context.get("submission_id"),
+                "delivery_id": direct_delivery_context.get("delivery_id"),
+                "parent_delivery_id": direct_delivery_context.get("parent_delivery_id"),
+                "delivery_kind": direct_delivery_context.get("delivery_kind"),
+                "delivery_protocol_version": direct_delivery_context.get(
+                    "delivery_protocol_version"
+                ),
+                "delivery_branch_kind": direct_delivery_context.get(
+                    "delivery_branch_kind"
+                ),
+                "delivery_branch_sequence": direct_delivery_context.get(
+                    "delivery_branch_sequence"
+                ),
+                "delivery_branch_ordinal": direct_delivery_context.get(
+                    "delivery_branch_ordinal"
+                ),
+            }
         return options or None
 
     @classmethod
@@ -930,13 +950,17 @@ class OpenCTIApiClient:
         execution_mode: Optional[str] = None,
         wait_until: Optional[str] = None,
         backend_batch_plan: Optional[Dict[str, Any]] = None,
+        direct_delivery_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return {
             "query": BATCH_MUTATION_EXECUTE_QUERY,
             "variables": {
                 "operations": operations,
                 "options": cls._build_batch_mutation_options(
-                    execution_mode, wait_until, backend_batch_plan
+                    execution_mode,
+                    wait_until,
+                    backend_batch_plan,
+                    direct_delivery_context,
                 ),
             },
         }
@@ -948,11 +972,16 @@ class OpenCTIApiClient:
         execution_mode: Optional[str] = None,
         wait_until: Optional[str] = None,
         backend_batch_plan: Optional[Dict[str, Any]] = None,
+        direct_delivery_context: Optional[Dict[str, Any]] = None,
     ) -> int:
         return len(
             json.dumps(
                 cls._build_batch_mutation_request_payload(
-                    operations, execution_mode, wait_until, backend_batch_plan
+                    operations,
+                    execution_mode,
+                    wait_until,
+                    backend_batch_plan,
+                    direct_delivery_context,
                 )
             ).encode("utf-8")
         )
@@ -963,13 +992,18 @@ class OpenCTIApiClient:
         execution_mode: Optional[str] = None,
         wait_until: Optional[str] = None,
         backend_batch_plan: Optional[Dict[str, Any]] = None,
+        direct_delivery_context: Optional[Dict[str, Any]] = None,
     ):
         """Capture GraphQL mutations so they can be executed in one backend batch."""
         if self._batch_mutation_plan is not None:
             raise ValueError("A batch mutation plan is already active")
         serialized_request_overhead_size = (
             self._batch_mutation_request_payload_size(
-                [], execution_mode, wait_until, backend_batch_plan
+                [],
+                execution_mode,
+                wait_until,
+                backend_batch_plan,
+                direct_delivery_context,
             )
             - 2
         )
@@ -1001,12 +1035,17 @@ class OpenCTIApiClient:
         execution_mode: Optional[str] = None,
         wait_until: Optional[str] = None,
         backend_batch_plan: Optional[Dict[str, Any]] = None,
+        direct_delivery_context: Optional[Dict[str, Any]] = None,
     ):
         """Execute a captured mutation plan through the backend batch endpoint."""
         if len(plan.operations) == 0:
             return None
         request_payload = self._build_batch_mutation_request_payload(
-            plan.operations, execution_mode, wait_until, backend_batch_plan
+            plan.operations,
+            execution_mode,
+            wait_until,
+            backend_batch_plan,
+            direct_delivery_context,
         )
         variables = request_payload["variables"]
         request_payload_size = len(json.dumps(request_payload).encode("utf-8"))

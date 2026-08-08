@@ -39,7 +39,7 @@ import {
 } from '../../schema/internalObject';
 import { schemaAttributesDefinition } from '../../schema/schema-attributes';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../../schema/stixMetaObject';
-import { ENTITY_TYPE_BATCH_DELIVERY, ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
+import { ENTITY_TYPE_BATCH_DELIVERY, ENTITY_TYPE_BATCH_EXECUTION_RECEIPT, ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
 import { ENTITY_TYPE_PIR } from '../pir/pir-types';
 
@@ -564,6 +564,44 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
     { name: 'published_at', label: 'Published at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { name: 'children_reserved_at', label: 'Children reserved at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { name: 'children_published_at', label: 'Children published at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+  ],
+  [ENTITY_TYPE_BATCH_EXECUTION_RECEIPT]: [
+    { name: 'delivery_id', label: 'Delivery ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'submission_id', label: 'Submission ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'delivery_payload_fingerprint', label: 'Delivery payload fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'request_contract_version', label: 'Request contract version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'request_fingerprint', label: 'Request fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'batch_plan_fingerprint', label: 'Batch plan fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'operation_manifest_fingerprint', label: 'Operation manifest fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'operation_count', label: 'Operation count', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'execution_mode', label: 'Execution mode', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'wait_until', label: 'Wait until', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'state', label: 'Receipt state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'result_fingerprint', label: 'Result fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_version', label: 'Result version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_operation_count', label: 'Result operation count', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_operation_errors', label: 'Result operation errors', type: 'string', format: 'json', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_execution_mode', label: 'Result execution mode', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_wait_until', label: 'Result wait until', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_side_effect_kinds', label: 'Result side effect kinds', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: true, upsert: false, isFilterable: false },
+    { name: 'result_materialized', label: 'Result materialized', type: 'boolean', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'completion_boundary', label: 'Completion boundary', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'side_effect_kind_counts', label: 'Side effect kind counts', type: 'string', format: 'json', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'prepared_at', label: 'Prepared at', type: 'date', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'started_at', label: 'Started at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'completed_at', label: 'Completed at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'materialized_at', label: 'Materialized at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failure_stage', label: 'Failure stage', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failure_code', label: 'Failure code', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failure_message', label: 'Failure message', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failure_fingerprint', label: 'Failure fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failure_retryable', label: 'Failure retryable', type: 'boolean', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failure_proof', label: 'Failure proof', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'failed_at', label: 'Failed at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'reconciliation_required_at', label: 'Reconciliation required at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { ...createdAt, isFilterable: false },
+    { ...updatedAt, isFilterable: false },
     { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
   ],
   [ENTITY_TYPE_BACKGROUND_TASK]: [

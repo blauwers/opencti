@@ -155,6 +155,23 @@ def parse_batch_delivery_envelope(
     )
 
 
+def build_direct_delivery_context(
+    data: Dict[str, Any], envelope: Optional[BatchDeliveryEnvelope]
+) -> Optional[Dict[str, Any]]:
+    if envelope is None:
+        return None
+    return {
+        "submission_id": data["submission_id"],
+        "delivery_id": envelope.delivery_id,
+        "parent_delivery_id": envelope.parent_delivery_id,
+        "delivery_kind": envelope.delivery_kind,
+        "delivery_protocol_version": envelope.delivery_protocol_version,
+        "delivery_branch_kind": envelope.delivery_branch_kind,
+        "delivery_branch_sequence": envelope.delivery_branch_sequence,
+        "delivery_branch_ordinal": envelope.delivery_branch_ordinal,
+    }
+
+
 def build_child_delivery_message(
     data: Dict[str, Any],
     branch_kind: str,
@@ -771,7 +788,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         start_processing = datetime.datetime.now()
         try:
             # Set the API headers
-            parse_batch_delivery_envelope(data)
+            delivery_envelope = parse_batch_delivery_envelope(data)
             self.api.set_applicant_id_header(data.get("applicant_id"))
             self.api.set_playbook_id_header(data.get("playbook_id"))
             self.api.set_event_id(data.get("event_id"))
@@ -837,6 +854,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         import_kwargs["wait_until"] = data.get("batch_wait_until")
                         import_kwargs["backend_batch_plan"] = data.get("batch_plan")
                         import_kwargs["split_oversized_batch_plan"] = False
+                        import_kwargs["direct_delivery_context"] = (
+                            build_direct_delivery_context(data, delivery_envelope)
+                        )
                     try:
                         imported_items, too_large_items_bundles = import_bundle(
                             raw_content,

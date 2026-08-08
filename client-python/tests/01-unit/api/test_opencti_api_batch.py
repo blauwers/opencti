@@ -193,6 +193,42 @@ def test_batch_mutation_plan_preserves_explicit_batch_request_timeout():
     assert client.query.call_args.kwargs["fresh_session"] is True
 
 
+def test_batch_mutation_plan_forwards_direct_delivery_context():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    client.query = MagicMock(return_value={"data": {"batchMutationsExecute": {}}})
+    plan = BatchMutationPlan()
+    plan.capture(
+        "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+        {"input": {"stix_id": "indicator--1"}},
+        [],
+    )
+    direct_delivery_context = {
+        "submission_id": "batch-submission--1",
+        "delivery_id": "batch-delivery--1",
+        "parent_delivery_id": None,
+        "delivery_kind": "ROOT",
+        "delivery_protocol_version": 2,
+        "delivery_branch_kind": "ROOT",
+        "delivery_branch_sequence": 0,
+        "delivery_branch_ordinal": 0,
+    }
+
+    client.execute_batch_mutation_plan(
+        plan,
+        execution_mode="BULK",
+        wait_until="MATERIALIZED",
+        direct_delivery_context=direct_delivery_context,
+    )
+
+    assert client.query.call_args.args[1]["options"]["direct_delivery_context"] == (
+        direct_delivery_context
+    )
+
+
 def test_batch_mutation_plan_uses_one_shot_http_session(monkeypatch):
     client = OpenCTIApiClient(
         url="http://localhost:4000",
