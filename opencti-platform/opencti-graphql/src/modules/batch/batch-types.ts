@@ -1,5 +1,7 @@
 import type { BatchBundlePlan } from './batch-bundle-planner';
 
+export const ENTITY_TYPE_BATCH_SUBMISSION = 'BatchSubmission';
+
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
 }
@@ -30,6 +32,18 @@ export enum BatchExecutionReason {
 export enum BatchWaitUntil {
   Committed = 'COMMITTED',
   Materialized = 'MATERIALIZED',
+}
+
+export enum BatchSubmissionState {
+  Reserved = 'RESERVED',
+  WorkBound = 'WORK_BOUND',
+  ExpectationRecorded = 'EXPECTATION_RECORDED',
+  Published = 'PUBLISHED',
+}
+
+export enum BatchSubmissionWorkOrigin {
+  Generated = 'GENERATED',
+  CallerProvided = 'CALLER_PROVIDED',
 }
 
 export enum BatchAdmissionErrorCode {
@@ -85,6 +99,7 @@ export interface BatchAdmission {
   idempotencyKey: string;
   cleanupInconsistentBundle: boolean;
   bundle: string;
+  submissionId?: string;
 }
 
 export interface BatchQueueMessage {
@@ -102,6 +117,7 @@ export interface BatchQueueMessage {
   batch_eligible_execution_modes: BatchExecutionMode[];
   batch_wait_until: BatchWaitUntil;
   batch_idempotency_key: string;
+  submission_id?: string;
   batch_plan: {
     execution_phases: Array<{
       object_ids: string[];
@@ -120,6 +136,38 @@ export interface BatchQueueMessage {
     planned_object_count: number;
     version: 1;
   };
+}
+
+export interface BatchSubmission {
+  id: string;
+  internal_id: string;
+  _index?: string;
+  standard_id: string;
+  entity_type: typeof ENTITY_TYPE_BATCH_SUBMISSION;
+  base_type: 'ENTITY';
+  parent_types: string[];
+  connector_id: string;
+  idempotency_key: string;
+  payload_fingerprint: string;
+  bundle_id: string;
+  work_id: string;
+  work_origin: BatchSubmissionWorkOrigin;
+  work_timestamp: string | null;
+  execution_preference: BatchExecutionPreference;
+  execution_mode: BatchExecutionMode;
+  execution_reason: BatchExecutionReason;
+  eligible_execution_modes: BatchExecutionMode[];
+  wait_until: BatchWaitUntil;
+  cleanup_inconsistent_bundle: boolean;
+  applicant_id: string;
+  queue_message_version: 1;
+  queue_payload: string;
+  state: BatchSubmissionState;
+  created_at: string;
+  updated_at: string;
+  expectation_recorded_at: string | null;
+  published_at: string | null;
+  last_error: string | null;
 }
 
 export interface BatchGraphqlOperationInput {

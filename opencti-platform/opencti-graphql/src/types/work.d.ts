@@ -12,8 +12,7 @@ interface Work extends BasicStoreBase {
   event_source_id: string;
   user_id: string;
   connector_id: string;
-  batch_idempotency_key?: string;
-  batch_payload_fingerprint?: string;
+  batch_expectation_submission_ids?: string[];
   status: string;
   import_expected_number: number;
   received_time: string | null;

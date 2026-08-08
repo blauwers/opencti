@@ -7,7 +7,7 @@ import { FunctionalError, UnsupportedError } from '../config/errors';
 import { connectorsForExport } from './connector';
 import { findById as findMarkingDefinitionById, markingDefinitionDeleteAndUpdateGroups } from './markingDefinition';
 import { now, observableValue } from '../utils/format';
-import { createWork, findWorkForBatchSubmission, updateExpectationsNumber } from './work';
+import { createWork, loadWorkById, updateBatchSubmissionExpectation, updateExpectationsNumber } from './work';
 import { pushToConnector, pushToWorkerForConnector } from '../database/rabbitmq';
 import { isStixDomainObjectShareableContainer } from '../schema/stixDomainObject';
 import { ABSTRACT_STIX_CORE_OBJECT, ABSTRACT_STIX_OBJECT, buildRefRelationKey, CONNECTOR_INTERNAL_EXPORT_FILE, INPUT_GRANTED_REFS } from '../schema/general';
@@ -37,8 +37,18 @@ import {
   hasExplicitBatchIdempotencyKey,
   prepareBundleSubmission,
 } from '../modules/batch/batch-domain';
-import { BatchExecutionMode } from '../modules/batch/batch-types';
+import {
+  buildBatchSubmissionId,
+  isBatchSubmissionStateAtLeast,
+  loadBatchSubmission,
+  readBatchSubmissionQueueMessage,
+  recordBatchSubmissionError,
+  reserveBatchSubmission,
+  advanceBatchSubmissionState,
+} from '../modules/batch/batch-submission-domain';
+import { BatchExecutionMode, BatchSubmissionState, BatchSubmissionWorkOrigin } from '../modules/batch/batch-types';
 import { lockResources } from '../lock/master-lock';
+import { generateWorkId } from '../schema/identifier';
 
 export const stixDelete = async (context, user, id, opts = {}) => {
   const element = await internalLoadById(context, user, id);
@@ -64,6 +74,112 @@ export const stixObjectMerge = async (context, user, targetId, sourceIds) => {
   return mergeEntities(context, user, targetId, sourceIds);
 };
 
+const buildBatchAdmissionFromSubmission = (submission, preparedBundle) => {
+  return {
+    ...buildBatchAdmission(submission.connector_id, submission.work_id, preparedBundle, submission.internal_id),
+    batchId: submission.bundle_id,
+    bundleId: submission.bundle_id,
+    executionPreference: submission.execution_preference,
+    executionMode: submission.execution_mode,
+    executionReason: submission.execution_reason,
+    eligibleExecutionModes: submission.eligible_execution_modes,
+    waitUntil: submission.wait_until,
+    idempotencyKey: submission.idempotency_key,
+    cleanupInconsistentBundle: submission.cleanup_inconsistent_bundle,
+  };
+};
+
+const reserveOrLoadBatchSubmission = async (context, user, connector, connectorId, workId, preparedBundle) => {
+  const existingSubmission = await loadBatchSubmission(context, connectorId, preparedBundle.idempotencyKey);
+  if (existingSubmission) {
+    assertBatchReplayPayload(preparedBundle, existingSubmission.payload_fingerprint);
+    return existingSubmission;
+  }
+
+  let targetWorkId = workId;
+  let workTimestamp = null;
+  let workOrigin = BatchSubmissionWorkOrigin.CallerProvided;
+  if (isEmptyField(workId)) {
+    const generatedWork = generateWorkId(connector.internal_id);
+    targetWorkId = generatedWork.id;
+    workTimestamp = generatedWork.timestamp;
+    workOrigin = BatchSubmissionWorkOrigin.Generated;
+  }
+  const submissionId = buildBatchSubmissionId(connectorId, preparedBundle.idempotencyKey);
+  const admission = buildBatchAdmission(connectorId, targetWorkId, preparedBundle, submissionId);
+  return reserveBatchSubmission(context, {
+    admission,
+    applicantId: user.internal_id,
+    payloadFingerprint: preparedBundle.payloadFingerprint,
+    queueMessage: buildBatchQueueMessage(admission, user.internal_id),
+    workOrigin,
+    workTimestamp,
+  });
+};
+
+const bindBatchSubmissionWork = async (context, user, connector, submission) => {
+  if (isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.WorkBound)) {
+    return submission;
+  }
+  if (submission.work_origin === BatchSubmissionWorkOrigin.Generated) {
+    const existingWork = await loadWorkById(context, user, submission.work_id);
+    if (!existingWork) {
+      await createWork(context, user, connector, `${connector.name} run @ ${submission.created_at}`, connector.internal_id, {
+        receivedTime: submission.created_at,
+        preallocatedWork: {
+          id: submission.work_id,
+          timestamp: submission.work_timestamp ?? submission.created_at,
+        },
+      });
+    }
+  }
+  return advanceBatchSubmissionState(context, submission, BatchSubmissionState.WorkBound);
+};
+
+const submitExplicitBatch = async (context, user, connector, connectorId, workId, preparedBundle) => {
+  let submission = await reserveOrLoadBatchSubmission(context, user, connector, connectorId, workId, preparedBundle);
+  submission = await bindBatchSubmissionWork(context, user, connector, submission);
+  if (!isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.ExpectationRecorded)) {
+    if (submission.execution_mode !== BatchExecutionMode.LegacySplit) {
+      await updateBatchSubmissionExpectation(context, user, submission.work_id, 1, submission.internal_id);
+    }
+    submission = await advanceBatchSubmissionState(context, submission, BatchSubmissionState.ExpectationRecorded, {
+      expectation_recorded_at: now(),
+    });
+  }
+  if (!isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.Published)) {
+    try {
+      await pushToWorkerForConnector(submission.connector_id, readBatchSubmissionQueueMessage(submission));
+      submission = await advanceBatchSubmissionState(context, submission, BatchSubmissionState.Published, {
+        published_at: now(),
+      });
+    } catch (error) {
+      try {
+        await recordBatchSubmissionError(context, submission, error);
+      } catch {
+        // Keep the original dispatch error as the retry signal.
+      }
+      throw error;
+    }
+  }
+  return buildBatchAdmissionFromSubmission(submission, preparedBundle);
+};
+
+const submitUntrackedBatch = async (context, user, connector, connectorId, workId, preparedBundle) => {
+  let targetWorkId = workId;
+  if (isEmptyField(workId)) {
+    const workName = `${connector.name} run @ ${now()}`;
+    const work = await createWork(context, user, connector, workName, connector.internal_id, { receivedTime: now() });
+    targetWorkId = work.id;
+  }
+  const admission = buildBatchAdmission(connectorId, targetWorkId, preparedBundle);
+  if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
+    await updateExpectationsNumber(context, user, targetWorkId, 1);
+  }
+  await pushToWorkerForConnector(connectorId, buildBatchQueueMessage(admission, user.internal_id));
+  return admission;
+};
+
 export const submitStixBundle = async (
   context,
   user,
@@ -78,38 +194,14 @@ export const submitStixBundle = async (
   if (!connector) {
     throw UnsupportedError('Invalid connector', { connectorId });
   }
-  const replayProtected = isEmptyField(work_id) && hasExplicitBatchIdempotencyKey(options);
+  if (!hasExplicitBatchIdempotencyKey(options)) {
+    return submitUntrackedBatch(context, user, connector, connectorId, work_id, preparedBundle);
+  }
+
   let replayLock;
   try {
-    if (replayProtected) {
-      replayLock = await lockResources([buildBatchReplayLockId(connectorId, preparedBundle.idempotencyKey)]);
-      const existingWork = await findWorkForBatchSubmission(context, user, connectorId, preparedBundle.idempotencyKey);
-      if (existingWork) {
-        assertBatchReplayPayload(preparedBundle, existingWork.batch_payload_fingerprint);
-        return buildBatchAdmission(connectorId, existingWork.id ?? existingWork.internal_id, preparedBundle);
-      }
-    }
-
-    let target_work_id = work_id;
-    if (isEmptyField(work_id)) {
-      const workName = `${connector.name} run @ ${now()}`;
-      const work = await createWork(context, user, connector, workName, connector.internal_id, {
-        receivedTime: now(),
-        ...(replayProtected ? {
-          batchSubmission: {
-            idempotencyKey: preparedBundle.idempotencyKey,
-            payloadFingerprint: preparedBundle.payloadFingerprint,
-          },
-        } : {}),
-      });
-      target_work_id = work.id;
-    }
-    const admission = buildBatchAdmission(connectorId, target_work_id, preparedBundle);
-    if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
-      await updateExpectationsNumber(context, user, target_work_id, 1);
-    }
-    await pushToWorkerForConnector(connectorId, buildBatchQueueMessage(admission, user.internal_id));
-    return admission;
+    replayLock = await lockResources([buildBatchReplayLockId(connectorId, preparedBundle.idempotencyKey)]);
+    return await submitExplicitBatch(context, user, connector, connectorId, work_id, preparedBundle);
   } finally {
     if (replayLock) {
       await replayLock.unlock();

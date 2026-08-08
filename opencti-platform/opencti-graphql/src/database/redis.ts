@@ -546,6 +546,24 @@ export const redisUpdateActionExpectation = async (user: AuthUser, workId: strin
   });
   return workId;
 };
+const BATCH_SUBMISSION_EXPECTATION_FIELD_PREFIX = 'batch_expectation_submission:';
+const APPLY_BATCH_SUBMISSION_EXPECTATION_SCRIPT = `
+  if redis.call('HSETNX', KEYS[1], ARGV[1], '1') == 1 then
+    redis.call('HINCRBY', KEYS[1], 'import_expected_number', ARGV[2])
+    return 1
+  end
+  return 0
+`;
+export const redisApplyBatchSubmissionExpectation = async (workId: string, submissionId: string, expectation: number): Promise<boolean> => {
+  const result = await getClientBase().eval(
+    APPLY_BATCH_SUBMISSION_EXPECTATION_SCRIPT,
+    1,
+    workId,
+    `${BATCH_SUBMISSION_EXPECTATION_FIELD_PREFIX}${submissionId}`,
+    `${expectation}`,
+  );
+  return Number(result) === 1;
+};
 export const redisInitializeWork = async (workId: string, isMultiPartWork: boolean) => {
   await redisTx(getClientBase(), async (tx) => {
     await updateObjectRaw(tx, workId, {

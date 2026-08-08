@@ -11,6 +11,7 @@ import {
   redisGetWork,
   redisGetWorkCompletionState,
   redisInitializeWork,
+  redisApplyBatchSubmissionExpectation,
   redisMarkWorkAsProcessed,
   redisUpdateActionExpectation,
   redisUpdateWorkFigures,
@@ -79,12 +80,6 @@ export const worksForConnector = async (context, user, connectorId, args = {}) =
     first,
     filters: finalFilters,
   });
-};
-
-export const findWorkForBatchSubmission = async (context, user, connectorId, idempotencyKey) => {
-  const filters = addFilter(null, 'batch_idempotency_key', idempotencyKey);
-  const works = await worksForConnector(context, user, connectorId, { first: 1, filters });
-  return works[0] ?? null;
 };
 
 export const worksForDraft = async (context, user, draftId, args = {}) => {
@@ -229,11 +224,11 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
     background_task_id,
     fileMarkings = [],
     draftContext,
-    batchSubmission,
+    preallocatedWork,
   } = args;
   const isMultiPartWork = args.isMultiPartWork === true;
   // Create the work and an initial job
-  const { id: workId, timestamp } = generateWorkId(connector.internal_id);
+  const { id: workId, timestamp } = preallocatedWork ?? generateWorkId(connector.internal_id);
   const work = {
     internal_id: workId,
     timestamp,
@@ -261,10 +256,6 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   };
   if (draftContext) {
     work.draft_context = draftContext;
-  }
-  if (batchSubmission) {
-    work.batch_idempotency_key = batchSubmission.idempotencyKey;
-    work.batch_payload_fingerprint = batchSubmission.payloadFingerprint;
   }
   await elIndex(INDEX_HISTORY, work, { context });
   const createdWork = await loadWorkById(context, user, workId);
@@ -465,6 +456,46 @@ export const updateExpectationsNumber = async (context, user, workId, expectatio
     updated_at: params.updated_at,
     import_expected_number: (existing.import_expected_number ?? 0) + params.import_expected_number,
   }));
+  return workId;
+};
+
+export const updateBatchSubmissionExpectation = async (context, user, workId, expectations, submissionId) => {
+  const currentWork = await loadWorkById(context, user, workId);
+  if (!currentWork) {
+    logApp.warn('The work cannot be found in database, batch submission expectation cannot be updated.', { workId, expectations, submissionId });
+    return workId;
+  }
+
+  const params = {
+    updated_at: now(),
+    import_expected_number: expectations,
+    submission_id: submissionId,
+  };
+  let source = 'if (ctx._source.batch_expectation_submission_ids == null) { ctx._source.batch_expectation_submission_ids = []; }';
+  source += `if (!ctx._source.batch_expectation_submission_ids.contains(params.submission_id)) {
+    ctx._source.batch_expectation_submission_ids.add(params.submission_id);
+    ctx._source.updated_at = params.updated_at;
+    ctx._source["import_expected_number"] = ctx._source["import_expected_number"] + params.import_expected_number;
+  }`;
+  await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+    const submissionIds = Array.isArray(existing.batch_expectation_submission_ids) ? existing.batch_expectation_submission_ids : [];
+    if (submissionIds.includes(submissionId)) {
+      return existing;
+    }
+    return {
+      ...existing,
+      updated_at: params.updated_at,
+      import_expected_number: (existing.import_expected_number ?? 0) + params.import_expected_number,
+      batch_expectation_submission_ids: [...submissionIds, submissionId],
+    };
+  });
+
+  await redisApplyBatchSubmissionExpectation(workId, submissionId, expectations);
+  const workAlive = await isWorkAlive(context, user, workId);
+  if (!workAlive) {
+    await redisDeleteWorks([workId]);
+    logApp.warn('The work cannot be found in database, batch submission expectation cannot be updated.', { workId, expectations, submissionId });
+  }
   return workId;
 };
 

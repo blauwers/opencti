@@ -4,6 +4,8 @@ import {
   BatchExecutionMode,
   BatchExecutionPreference,
   BatchExecutionReason,
+  BatchSubmissionState,
+  BatchSubmissionWorkOrigin,
   BatchWaitUntil,
 } from '../../../src/modules/batch/batch-types';
 import {
@@ -11,10 +13,17 @@ import {
   buildBatchQueueMessage,
   prepareBundleSubmission,
 } from '../../../src/modules/batch/batch-domain';
+import {
+  advanceBatchSubmissionState,
+  buildBatchSubmissionId,
+  loadBatchSubmission,
+  recordBatchSubmissionError,
+  reserveBatchSubmission,
+} from '../../../src/modules/batch/batch-submission-domain';
 import { sendStixBundle, submitStixBundle } from '../../../src/domain/stix';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { pushToWorkerForConnector } from '../../../src/database/rabbitmq';
-import { createWork, findWorkForBatchSubmission, updateExpectationsNumber } from '../../../src/domain/work';
+import { createWork, loadWorkById, updateBatchSubmissionExpectation, updateExpectationsNumber } from '../../../src/domain/work';
 import { lockResources } from '../../../src/lock/master-lock';
 
 const { mockStoreLoadById } = vi.hoisted(() => ({
@@ -42,8 +51,20 @@ vi.mock('../../../src/domain/work', async (importOriginal) => {
   return {
     ...actual,
     createWork: vi.fn(),
-    findWorkForBatchSubmission: vi.fn(),
+    loadWorkById: vi.fn(),
+    updateBatchSubmissionExpectation: vi.fn(),
     updateExpectationsNumber: vi.fn(),
+  };
+});
+
+vi.mock('../../../src/modules/batch/batch-submission-domain', async (importOriginal) => {
+  const actual: object = await importOriginal();
+  return {
+    ...actual,
+    advanceBatchSubmissionState: vi.fn(),
+    loadBatchSubmission: vi.fn(),
+    recordBatchSubmissionError: vi.fn(),
+    reserveBatchSubmission: vi.fn(),
   };
 });
 
@@ -214,13 +235,14 @@ describe('batch admission contract', () => {
 
   it('builds queue messages with batch metadata and intact transport flags', () => {
     const prepared = prepareBundleSubmission(bundle);
-    const admission = buildBatchAdmission('connector-1', 'work-1', prepared);
+    const admission = buildBatchAdmission('connector-1', 'work-1', prepared, 'batch-submission--1');
     const message = buildBatchQueueMessage(admission, 'user-1');
 
     expect(message).toMatchObject({
       type: 'bundle',
       applicant_id: 'user-1',
       work_id: 'work-1',
+      submission_id: 'batch-submission--1',
       no_split: true,
       split_bundles: false,
       batch_id: prepared.bundleId,
@@ -264,24 +286,61 @@ describe('batch admission contract', () => {
 });
 
 describe('submitStixBundle', () => {
-  let replayWork: Record<string, unknown> | null;
+  let submission: Record<string, any> | null;
+  let generatedWork: Record<string, any> | null;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    replayWork = null;
+    submission = null;
+    generatedWork = null;
     mockStoreLoadById.mockResolvedValue({
       id: 'connector-1',
       internal_id: 'connector-1',
       name: 'Connector 1',
     });
-    vi.mocked(findWorkForBatchSubmission).mockImplementation(async () => replayWork as any);
-    vi.mocked(createWork).mockImplementation(async (_context, _user, _connector, _workName, _sourceId, args: any) => {
-      replayWork = {
-        id: 'work-created',
-        batch_idempotency_key: args?.batchSubmission?.idempotencyKey,
-        batch_payload_fingerprint: args?.batchSubmission?.payloadFingerprint,
+    vi.mocked(loadBatchSubmission).mockImplementation(async () => submission as any);
+    vi.mocked(reserveBatchSubmission).mockImplementation(async (_context, input: any) => {
+      submission = {
+        id: input.admission.submissionId,
+        internal_id: input.admission.submissionId,
+        connector_id: input.admission.connectorId,
+        idempotency_key: input.admission.idempotencyKey,
+        payload_fingerprint: input.payloadFingerprint,
+        bundle_id: input.admission.bundleId,
+        work_id: input.admission.workId,
+        work_origin: input.workOrigin,
+        work_timestamp: input.workTimestamp ?? null,
+        execution_preference: input.admission.executionPreference,
+        execution_mode: input.admission.executionMode,
+        execution_reason: input.admission.executionReason,
+        eligible_execution_modes: input.admission.eligibleExecutionModes,
+        wait_until: input.admission.waitUntil,
+        cleanup_inconsistent_bundle: input.admission.cleanupInconsistentBundle,
+        state: BatchSubmissionState.Reserved,
+        queue_payload: JSON.stringify(input.queueMessage),
+        queue_message_version: 1,
+        created_at: '2026-08-08T18:00:00.000Z',
+        expectation_recorded_at: null,
+        published_at: null,
+        last_error: null,
       };
-      return replayWork as any;
+      return submission as any;
+    });
+    vi.mocked(advanceBatchSubmissionState).mockImplementation(async (_context, currentSubmission: any, state: any, patch: any = {}) => {
+      submission = {
+        ...currentSubmission,
+        ...patch,
+        state,
+      };
+      return submission as any;
+    });
+    vi.mocked(loadWorkById).mockImplementation(async (_context, _user, workId) => (generatedWork?.id === workId ? generatedWork as any : null as any));
+    vi.mocked(createWork).mockImplementation(async (_context, _user, _connector, _workName, _sourceId, args: any) => {
+      generatedWork = {
+        id: args?.preallocatedWork?.id ?? 'work-created',
+        internal_id: args?.preallocatedWork?.id ?? 'work-created',
+      };
+      return generatedWork as any;
     });
     vi.mocked(lockResources).mockResolvedValue({ unlock: vi.fn() } as any);
   });
@@ -320,7 +379,7 @@ describe('submitStixBundle', () => {
     expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-created', 1);
   });
 
-  it('reuses one logical admission, work, and publication for an explicit-key replay of the same normalized payload', async () => {
+  it('reuses one durable submission identity, generated work, and publication for an explicit-key replay', async () => {
     const options = { idempotencyKey: 'feed-run-2026-08-08' };
 
     const firstAdmission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, undefined, options);
@@ -331,18 +390,38 @@ describe('submitStixBundle', () => {
       bundleId: firstAdmission.bundleId,
       workId: firstAdmission.workId,
       idempotencyKey: firstAdmission.idempotencyKey,
+      submissionId: firstAdmission.submissionId,
     });
+    expect(firstAdmission.submissionId).toBe(buildBatchSubmissionId('connector-1', options.idempotencyKey));
+    expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
     expect(createWork).toHaveBeenCalledTimes(1);
-    expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
     expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects conflicting normalized payload reuse of an explicit idempotency key before duplicating work or publication', async () => {
+  it('reuses one durable submission identity when the caller supplies a work id', async () => {
     const options = { idempotencyKey: 'feed-run-2026-08-08' };
 
-    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, undefined, options);
+    const firstAdmission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-caller-1', options);
+    const replayAdmission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', reorderedBundle, 'work-caller-2', options);
 
-    await expect(submitStixBundle(testContext, ADMIN_USER, 'connector-1', conflictingBundle, undefined, options))
+    expect(replayAdmission).toMatchObject({
+      workId: 'work-caller-1',
+      submissionId: firstAdmission.submissionId,
+    });
+    expect(submission?.work_origin).toBe(BatchSubmissionWorkOrigin.CallerProvided);
+    expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
+    expect(createWork).not.toHaveBeenCalled();
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects conflicting normalized payload reuse before duplicating expectation or publication', async () => {
+    const options = { idempotencyKey: 'feed-run-2026-08-08' };
+
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-caller-1', options);
+
+    await expect(submitStixBundle(testContext, ADMIN_USER, 'connector-1', conflictingBundle, 'work-caller-2', options))
       .rejects.toThrowError(expect.objectContaining({
         extensions: expect.objectContaining({
           data: expect.objectContaining({
@@ -350,9 +429,38 @@ describe('submitStixBundle', () => {
           }),
         }),
       }));
-    expect(createWork).toHaveBeenCalledTimes(1);
-    expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
+    expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
+    expect(createWork).not.toHaveBeenCalled();
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
     expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes a persisted pre-publication submission without creating a second logical handoff', async () => {
+    const options = { idempotencyKey: 'feed-run-2026-08-08' };
+    vi.mocked(pushToWorkerForConnector)
+      .mockRejectedValueOnce(new Error('rabbit unavailable'))
+      .mockResolvedValueOnce(true as any);
+
+    await expect(submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-caller-1', options))
+      .rejects.toThrow('rabbit unavailable');
+
+    const retryAdmission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', reorderedBundle, 'work-caller-2', options);
+
+    expect(retryAdmission).toMatchObject({
+      workId: 'work-caller-1',
+      submissionId: buildBatchSubmissionId('connector-1', options.idempotencyKey),
+    });
+    expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(2);
+    expect(pushToWorkerForConnector).toHaveBeenLastCalledWith(
+      'connector-1',
+      expect.objectContaining({
+        submission_id: retryAdmission.submissionId,
+      }),
+    );
+    expect(recordBatchSubmissionError).toHaveBeenCalledTimes(1);
+    expect(submission?.state).toBe(BatchSubmissionState.Published);
   });
 
   it('lets the compatibility mutation request committed-only execution', async () => {

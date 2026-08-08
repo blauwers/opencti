@@ -202,6 +202,7 @@ export const buildBatchAdmission = (
   connectorId: string,
   workId: string,
   prepared: PreparedBundleSubmission,
+  submissionId?: string,
 ): BatchAdmission => {
   if (typeof connectorId !== 'string' || connectorId.length === 0) {
     throw batchContractError('Invalid batch connector id', BatchAdmissionErrorCode.InvalidConnectorId, { connector_id: connectorId });
@@ -223,6 +224,7 @@ export const buildBatchAdmission = (
     idempotencyKey: prepared.idempotencyKey,
     cleanupInconsistentBundle: prepared.cleanupInconsistentBundle,
     bundle: prepared.bundle,
+    ...(submissionId ? { submissionId } : {}),
   };
 };
 
@@ -243,6 +245,7 @@ export const buildBatchQueueMessage = (admission: BatchAdmission, applicantId: s
     batch_eligible_execution_modes: admission.eligibleExecutionModes,
     batch_wait_until: admission.waitUntil,
     batch_idempotency_key: admission.idempotencyKey,
+    ...(admission.submissionId ? { submission_id: admission.submissionId } : {}),
     batch_plan: {
       version: 1,
       object_count: admission.bundlePlan.objectCount,

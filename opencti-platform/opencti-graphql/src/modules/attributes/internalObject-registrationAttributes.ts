@@ -39,6 +39,7 @@ import {
 } from '../../schema/internalObject';
 import { schemaAttributesDefinition } from '../../schema/schema-attributes';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../../schema/stixMetaObject';
+import { ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
 import { ENTITY_TYPE_PIR } from '../pir/pir-types';
 
@@ -490,8 +491,7 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
     { name: 'event_type', label: 'Event type', type: 'string', format: 'enum', values: EVENT_TYPE_VALUES, editDefault: false, mandatoryType: 'external', multiple: false, upsert: false, isFilterable: true },
     { name: 'user_id', label: 'User ID', type: 'string', format: 'id', entityTypes: [ENTITY_TYPE_USER], editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { name: 'connector_id', label: 'Connector ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: true },
-    { name: 'batch_idempotency_key', label: 'Batch idempotency key', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: true },
-    { name: 'batch_payload_fingerprint', label: 'Batch payload fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'batch_expectation_submission_ids', label: 'Batch expectation submission IDs', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: true, upsert: false, isFilterable: false },
     draftContext,
     { name: 'status', label: 'Work status', type: 'string', format: 'short', editDefault: false, mandatoryType: 'external', multiple: false, upsert: false, isFilterable: true },
     { name: 'import_expected_number', label: 'Expected import number', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: true },
@@ -516,6 +516,30 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
       ],
     },
     errors,
+  ],
+  [ENTITY_TYPE_BATCH_SUBMISSION]: [
+    { name: 'connector_id', label: 'Connector ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'idempotency_key', label: 'Idempotency key', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'payload_fingerprint', label: 'Payload fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'bundle_id', label: 'Bundle ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'work_id', label: 'Work', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'work_origin', label: 'Work origin', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'work_timestamp', label: 'Work timestamp', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'execution_preference', label: 'Execution preference', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'execution_mode', label: 'Execution mode', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'execution_reason', label: 'Execution reason', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'eligible_execution_modes', label: 'Eligible execution modes', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: true, upsert: false, isFilterable: false },
+    { name: 'wait_until', label: 'Wait until', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'cleanup_inconsistent_bundle', label: 'Cleanup inconsistent bundle', type: 'boolean', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'applicant_id', label: 'Applicant', type: 'string', format: 'id', entityTypes: [ENTITY_TYPE_USER], editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'queue_message_version', label: 'Queue message version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'queue_payload', label: 'Queue payload', type: 'string', format: 'json', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'state', label: 'Batch submission state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { ...createdAt, isFilterable: false },
+    { ...updatedAt, isFilterable: false },
+    { name: 'expectation_recorded_at', label: 'Expectation recorded at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'published_at', label: 'Published at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
   ],
   [ENTITY_TYPE_BACKGROUND_TASK]: [
     {
