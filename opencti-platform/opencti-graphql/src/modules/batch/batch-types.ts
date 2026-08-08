@@ -1,6 +1,7 @@
 import type { BatchBundlePlan } from './batch-bundle-planner';
 
 export const ENTITY_TYPE_BATCH_SUBMISSION = 'BatchSubmission';
+export const ENTITY_TYPE_BATCH_DELIVERY = 'BatchDelivery';
 
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
@@ -46,12 +47,36 @@ export enum BatchSubmissionWorkOrigin {
   CallerProvided = 'CALLER_PROVIDED',
 }
 
+export enum BatchDeliveryProtocol {
+  V1 = 1,
+  V2 = 2,
+}
+
+export enum BatchDeliveryKind {
+  Root = 'ROOT',
+  Child = 'CHILD',
+}
+
+export enum BatchDeliveryBranchKind {
+  Root = 'ROOT',
+  LegacySplit = 'LEGACY_SPLIT',
+  OversizedChunk = 'OVERSIZED_CHUNK',
+  IntactReplay = 'INTACT_REPLAY',
+  TerminalDeadLetter = 'TERMINAL_DEAD_LETTER',
+}
+
+export enum BatchDeliveryState {
+  Ready = 'READY',
+  Published = 'PUBLISHED',
+}
+
 export enum BatchAdmissionErrorCode {
   InvalidBundle = 'INVALID_BUNDLE',
   InvalidBundleId = 'INVALID_BUNDLE_ID',
   InvalidConnectorId = 'INVALID_CONNECTOR_ID',
   InvalidIdempotencyKey = 'INVALID_IDEMPOTENCY_KEY',
   IdempotencyKeyConflict = 'IDEMPOTENCY_KEY_CONFLICT',
+  DeliveryIdentityConflict = 'DELIVERY_IDENTITY_CONFLICT',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
   UnsupportedExecutionPreference = 'UNSUPPORTED_EXECUTION_PREFERENCE',
   ExecutionPreferenceNotEligible = 'EXECUTION_PREFERENCE_NOT_ELIGIBLE',
@@ -100,6 +125,18 @@ export interface BatchAdmission {
   cleanupInconsistentBundle: boolean;
   bundle: string;
   submissionId?: string;
+  rootDeliveryId?: string;
+  requiredDeliveryProtocol?: BatchDeliveryProtocol;
+}
+
+export interface BatchDeliveryEnvelope {
+  delivery_id: string;
+  parent_delivery_id: string | null;
+  delivery_kind: BatchDeliveryKind;
+  delivery_protocol_version: BatchDeliveryProtocol.V2;
+  delivery_branch_kind: BatchDeliveryBranchKind;
+  delivery_branch_sequence: number;
+  delivery_branch_ordinal: number;
 }
 
 export interface BatchQueueMessage {
@@ -118,6 +155,13 @@ export interface BatchQueueMessage {
   batch_wait_until: BatchWaitUntil;
   batch_idempotency_key: string;
   submission_id?: string;
+  delivery_id?: string;
+  parent_delivery_id?: string | null;
+  delivery_kind?: BatchDeliveryKind;
+  delivery_protocol_version?: BatchDeliveryProtocol.V2;
+  delivery_branch_kind?: BatchDeliveryBranchKind;
+  delivery_branch_sequence?: number;
+  delivery_branch_ordinal?: number;
   batch_plan: {
     execution_phases: Array<{
       object_ids: string[];
@@ -160,6 +204,8 @@ export interface BatchSubmission {
   wait_until: BatchWaitUntil;
   cleanup_inconsistent_bundle: boolean;
   applicant_id: string;
+  root_delivery_id: string;
+  required_delivery_protocol: BatchDeliveryProtocol;
   queue_message_version: 1;
   queue_payload: string;
   state: BatchSubmissionState;
@@ -168,6 +214,42 @@ export interface BatchSubmission {
   expectation_recorded_at: string | null;
   published_at: string | null;
   last_error: string | null;
+}
+
+export interface BatchDelivery {
+  id: string;
+  internal_id: string;
+  _index?: string;
+  standard_id: string;
+  entity_type: typeof ENTITY_TYPE_BATCH_DELIVERY;
+  base_type: 'ENTITY';
+  parent_types: string[];
+  submission_id: string;
+  parent_delivery_id: string | null;
+  delivery_kind: BatchDeliveryKind;
+  branch_kind: BatchDeliveryBranchKind;
+  branch_sequence: number;
+  branch_ordinal: number;
+  payload_fingerprint: string;
+  queue_payload_version: 1;
+  queue_payload: string;
+  required_worker_protocol: BatchDeliveryProtocol;
+  state: BatchDeliveryState;
+  created_at: string;
+  updated_at: string;
+  published_at: string | null;
+  last_error: string | null;
+}
+
+export interface BatchWorkerRuntimeCapabilityInput {
+  worker_id?: string | null;
+  batch_delivery_protocol_max?: number | null;
+}
+
+export interface BatchWorkerRuntimeCapability {
+  worker_id: string;
+  batch_delivery_protocol_max: BatchDeliveryProtocol;
+  observed_at: string;
 }
 
 export interface BatchGraphqlOperationInput {

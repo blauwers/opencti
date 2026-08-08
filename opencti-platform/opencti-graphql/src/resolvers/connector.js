@@ -73,6 +73,7 @@ import { ConnectorPriorityGroup } from '../generated/graphql';
 import { assessConnectorMigration, migrateConnectorToManaged } from '../domain/connector-migration';
 import { loadCreator } from '../database/members';
 import { readSyncConsumerMetrics } from '../graphql/syncConsumerMetrics';
+import { recordBatchWorkerRuntimeCapability } from '../modules/batch/batch-worker-runtime-domain';
 
 export const PLATFORM_VERSION = pjson.version;
 
@@ -81,7 +82,10 @@ const connectorResolvers = {
     connector: (_, { id }, context) => connector(context, context.user, id),
     connectors: (_, __, context) => connectors(context, context.user),
     connectorsForManagers: (_, __, context) => connectorsForManagers(context, context.user),
-    connectorsForWorker: (_, __, context) => connectorsForWorker(context, context.user),
+    connectorsForWorker: async (_, { workerRuntime }, context) => {
+      await recordBatchWorkerRuntimeCapability(workerRuntime, context.user.internal_id ?? context.user.id);
+      return connectorsForWorker(context, context.user);
+    },
     connectorsForExport: (_, __, context) => connectorsForExport(context, context.user),
     connectorsForImport: (_, __, context) => connectorsForImport(context, context.user),
     connectorsForAnalysis: (_, __, context) => connectorsForAnalysis(context, context.user),

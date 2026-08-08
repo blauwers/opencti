@@ -1,5 +1,6 @@
 import base64
 import datetime
+import hashlib
 import json
 import random
 import time
@@ -15,6 +16,164 @@ from requests import RequestException, Timeout
 
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
 BATCH_REPLAY_LIMIT = 4
+BATCH_DELIVERY_PROTOCOL_V2 = 2
+BATCH_DELIVERY_PREFIX = "batch-delivery--"
+BATCH_DELIVERY_KIND_ROOT = "ROOT"
+BATCH_DELIVERY_KIND_CHILD = "CHILD"
+BATCH_DELIVERY_BRANCH_ROOT = "ROOT"
+BATCH_DELIVERY_BRANCH_LEGACY_SPLIT = "LEGACY_SPLIT"
+BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK = "OVERSIZED_CHUNK"
+BATCH_DELIVERY_BRANCH_INTACT_REPLAY = "INTACT_REPLAY"
+BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER = "TERMINAL_DEAD_LETTER"
+BATCH_DELIVERY_BRANCH_KINDS = {
+    BATCH_DELIVERY_BRANCH_ROOT,
+    BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+    BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+    BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+    BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+}
+
+
+@dataclass(frozen=True)
+class BatchDeliveryEnvelope:
+    delivery_id: str
+    parent_delivery_id: Optional[str]
+    delivery_kind: str
+    delivery_protocol_version: int
+    delivery_branch_kind: str
+    delivery_branch_sequence: int
+    delivery_branch_ordinal: int
+
+
+def _is_non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _build_delivery_id(parts: List[Any]) -> str:
+    encoded = json.dumps(parts, separators=(",", ":"))
+    return (
+        f"{BATCH_DELIVERY_PREFIX}{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+    )
+
+
+def build_root_delivery_id(submission_id: str) -> str:
+    return _build_delivery_id([submission_id, BATCH_DELIVERY_BRANCH_ROOT, 0, 0])
+
+
+def build_child_delivery_id(
+    parent_delivery_id: str,
+    branch_kind: str,
+    branch_sequence: int,
+    branch_ordinal: int,
+) -> str:
+    if (
+        not isinstance(parent_delivery_id, str)
+        or len(parent_delivery_id) == 0
+        or branch_kind not in BATCH_DELIVERY_BRANCH_KINDS
+        or branch_kind == BATCH_DELIVERY_BRANCH_ROOT
+        or not _is_non_negative_int(branch_sequence)
+        or not _is_non_negative_int(branch_ordinal)
+    ):
+        raise ValueError("Invalid batch delivery child lineage")
+    return _build_delivery_id(
+        [parent_delivery_id, branch_kind, branch_sequence, branch_ordinal]
+    )
+
+
+def parse_batch_delivery_envelope(
+    data: Dict[str, Any],
+) -> Optional[BatchDeliveryEnvelope]:
+    envelope_fields = {
+        "delivery_id",
+        "parent_delivery_id",
+        "delivery_kind",
+        "delivery_protocol_version",
+        "delivery_branch_kind",
+        "delivery_branch_sequence",
+        "delivery_branch_ordinal",
+    }
+    if not any(field in data for field in envelope_fields):
+        return None
+    if data.get("delivery_protocol_version") != BATCH_DELIVERY_PROTOCOL_V2:
+        raise ValueError("Unsupported batch delivery protocol")
+    delivery_id = data.get("delivery_id")
+    submission_id = data.get("submission_id")
+    parent_delivery_id = data.get("parent_delivery_id")
+    delivery_kind = data.get("delivery_kind")
+    branch_kind = data.get("delivery_branch_kind")
+    branch_sequence = data.get("delivery_branch_sequence")
+    branch_ordinal = data.get("delivery_branch_ordinal")
+    if (
+        not isinstance(delivery_id, str)
+        or len(delivery_id) == 0
+        or not isinstance(submission_id, str)
+        or len(submission_id) == 0
+        or delivery_kind not in {BATCH_DELIVERY_KIND_ROOT, BATCH_DELIVERY_KIND_CHILD}
+        or branch_kind not in BATCH_DELIVERY_BRANCH_KINDS
+        or not _is_non_negative_int(branch_sequence)
+        or not _is_non_negative_int(branch_ordinal)
+    ):
+        raise ValueError("Invalid batch delivery envelope")
+    if delivery_kind == BATCH_DELIVERY_KIND_ROOT:
+        if (
+            parent_delivery_id is not None
+            or branch_kind != BATCH_DELIVERY_BRANCH_ROOT
+            or branch_sequence != 0
+            or branch_ordinal != 0
+            or delivery_id != build_root_delivery_id(submission_id)
+        ):
+            raise ValueError("Invalid root batch delivery envelope")
+    elif (
+        not isinstance(parent_delivery_id, str)
+        or len(parent_delivery_id) == 0
+        or branch_kind == BATCH_DELIVERY_BRANCH_ROOT
+        or delivery_id
+        != build_child_delivery_id(
+            parent_delivery_id,
+            branch_kind,
+            branch_sequence,
+            branch_ordinal,
+        )
+    ):
+        raise ValueError("Invalid child batch delivery envelope")
+    return BatchDeliveryEnvelope(
+        delivery_id=delivery_id,
+        parent_delivery_id=parent_delivery_id,
+        delivery_kind=delivery_kind,
+        delivery_protocol_version=BATCH_DELIVERY_PROTOCOL_V2,
+        delivery_branch_kind=branch_kind,
+        delivery_branch_sequence=branch_sequence,
+        delivery_branch_ordinal=branch_ordinal,
+    )
+
+
+def build_child_delivery_message(
+    data: Dict[str, Any],
+    branch_kind: str,
+    branch_sequence: int,
+    branch_ordinal: int,
+) -> Dict[str, Any]:
+    child_data = dict(data)
+    parent_envelope = parse_batch_delivery_envelope(data)
+    if parent_envelope is None:
+        return child_data
+    child_data.update(
+        {
+            "delivery_id": build_child_delivery_id(
+                parent_envelope.delivery_id,
+                branch_kind,
+                branch_sequence,
+                branch_ordinal,
+            ),
+            "parent_delivery_id": parent_envelope.delivery_id,
+            "delivery_kind": BATCH_DELIVERY_KIND_CHILD,
+            "delivery_protocol_version": BATCH_DELIVERY_PROTOCOL_V2,
+            "delivery_branch_kind": branch_kind,
+            "delivery_branch_sequence": branch_sequence,
+            "delivery_branch_ordinal": branch_ordinal,
+        }
+    )
+    return child_data
 
 
 def should_split_bundles(data: Dict[str, Any], content: Dict[str, Any]) -> bool:
@@ -193,11 +352,16 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     work_alive = self.api.work.add_expectations(work_id, expectations)
                     if not work_alive:
                         return "ack"
-                split_data = dict(data)
-                split_data["split_bundles"] = True
-                split_data["no_split"] = False
-                split_data.pop("batch_plan", None)
-                for bundle in bundles:
+                for bundle_ordinal, bundle in enumerate(bundles):
+                    split_data = build_child_delivery_message(
+                        data,
+                        BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                        0,
+                        bundle_ordinal,
+                    )
+                    split_data["split_bundles"] = True
+                    split_data["no_split"] = False
+                    split_data.pop("batch_plan", None)
                     self.send_bundle_to_specific_queue(
                         push_channel,
                         self.push_exchange,
@@ -250,8 +414,16 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     work_alive = self.api.work.add_expectations(work_id, len(chunks))
                     if not work_alive:
                         return "ack"
-                for chunk_bundle, chunk_backend_batch_plan in chunks:
-                    chunk_data = dict(data)
+                for chunk_ordinal, (
+                    chunk_bundle,
+                    chunk_backend_batch_plan,
+                ) in enumerate(chunks):
+                    chunk_data = build_child_delivery_message(
+                        data,
+                        BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
+                        0,
+                        chunk_ordinal,
+                    )
                     chunk_data["split_bundles"] = False
                     chunk_data["no_split"] = True
                     chunk_data["batch_plan"] = chunk_backend_batch_plan
@@ -285,6 +457,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         start_processing = datetime.datetime.now()
         try:
             # Set the API headers
+            parse_batch_delivery_envelope(data)
             self.api.set_applicant_id_header(data.get("applicant_id"))
             self.api.set_playbook_id_header(data.get("playbook_id"))
             self.api.set_event_id(data.get("event_id"))
@@ -399,7 +572,12 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                 "retry_number": next_replay_count,
                             },
                         )
-                        replay_data = dict(data)
+                        replay_data = build_child_delivery_message(
+                            data,
+                            BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+                            next_replay_count,
+                            0,
+                        )
                         replay_data[BATCH_REPLAY_COUNT_KEY] = next_replay_count
                         with pika.BlockingConnection(
                             self.pika_parameters
@@ -439,7 +617,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                     push_channel.confirm_delivery()
                                 except Exception as err:  # pylint: disable=broad-except
                                     self.logger.warning(str(err))
-                                for too_large_item_bundle in dead_letter_items:
+                                for (
+                                    dead_letter_ordinal,
+                                    too_large_item_bundle,
+                                ) in enumerate(dead_letter_items):
                                     rejection_info = too_large_item_bundle.setdefault(
                                         "rejection_info", {}
                                     )
@@ -457,7 +638,12 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                         push_channel,
                                         self.listen_exchange,
                                         self.dead_letter_routing,
-                                        data,
+                                        build_child_delivery_message(
+                                            data,
+                                            BATCH_DELIVERY_BRANCH_TERMINAL_DEAD_LETTER,
+                                            replay_count,
+                                            dead_letter_ordinal,
+                                        ),
                                         too_large_item_bundle,
                                     )
                 else:

@@ -39,7 +39,7 @@ import {
 } from '../../schema/internalObject';
 import { schemaAttributesDefinition } from '../../schema/schema-attributes';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../../schema/stixMetaObject';
-import { ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
+import { ENTITY_TYPE_BATCH_DELIVERY, ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
 import { ENTITY_TYPE_PIR } from '../pir/pir-types';
 
@@ -532,12 +532,31 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
     { name: 'wait_until', label: 'Wait until', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'cleanup_inconsistent_bundle', label: 'Cleanup inconsistent bundle', type: 'boolean', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'applicant_id', label: 'Applicant', type: 'string', format: 'id', entityTypes: [ENTITY_TYPE_USER], editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'root_delivery_id', label: 'Root delivery ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'required_delivery_protocol', label: 'Required delivery protocol', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'queue_message_version', label: 'Queue message version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'queue_payload', label: 'Queue payload', type: 'string', format: 'json', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'state', label: 'Batch submission state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
     { ...createdAt, isFilterable: false },
     { ...updatedAt, isFilterable: false },
     { name: 'expectation_recorded_at', label: 'Expectation recorded at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'published_at', label: 'Published at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+    { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+  ],
+  [ENTITY_TYPE_BATCH_DELIVERY]: [
+    { name: 'submission_id', label: 'Submission ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'parent_delivery_id', label: 'Parent delivery ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: true },
+    { name: 'delivery_kind', label: 'Delivery kind', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'branch_kind', label: 'Branch kind', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'branch_sequence', label: 'Branch sequence', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'branch_ordinal', label: 'Branch ordinal', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'payload_fingerprint', label: 'Payload fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'queue_payload_version', label: 'Queue payload version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'queue_payload', label: 'Queue payload', type: 'string', format: 'json', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'required_worker_protocol', label: 'Required worker protocol', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'state', label: 'Batch delivery state', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { ...createdAt, isFilterable: false },
+    { ...updatedAt, isFilterable: false },
     { name: 'published_at', label: 'Published at', type: 'date', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
     { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
   ],

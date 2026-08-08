@@ -9,6 +9,8 @@ import { now } from '../../utils/format';
 import { hashSHA256 } from '../../utils/hash';
 import {
   type BatchAdmission,
+  BatchAdmissionErrorCode,
+  BatchDeliveryProtocol,
   type BatchQueueMessage,
   type BatchSubmission,
   BatchSubmissionState,
@@ -30,11 +32,20 @@ export interface ReserveBatchSubmissionInput {
   applicantId: string;
   payloadFingerprint: string;
   queueMessage: BatchQueueMessage;
+  rootDeliveryId: string;
+  requiredDeliveryProtocol: BatchDeliveryProtocol;
   workOrigin: BatchSubmissionWorkOrigin;
   workTimestamp?: string | null;
 }
 
 type BatchSubmissionStatePatch = Partial<Pick<BatchSubmission, 'expectation_recorded_at' | 'published_at' | 'last_error'>>;
+
+const batchSubmissionDeliveryConflict = (message: string, data: Record<string, unknown> = {}) => {
+  return FunctionalError(message, {
+    batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+    ...data,
+  });
+};
 
 const getBatchSubmissionStateOrder = (state: BatchSubmissionState): number => {
   const order = BATCH_SUBMISSION_STATE_ORDER[state];
@@ -65,6 +76,47 @@ export const isBatchSubmissionStateAtLeast = (submission: BatchSubmission, state
   return getBatchSubmissionStateOrder(submission.state) >= getBatchSubmissionStateOrder(state);
 };
 
+export const ensureBatchSubmissionDeliveryMetadata = async (
+  context: AuthContext,
+  submission: BatchSubmission,
+  rootDeliveryId: string,
+): Promise<BatchSubmission> => {
+  if (submission.root_delivery_id && submission.root_delivery_id !== rootDeliveryId) {
+    throw batchSubmissionDeliveryConflict('Invalid batch submission root delivery id', {
+      submission_id: submission.internal_id,
+      root_delivery_id: submission.root_delivery_id,
+      expected_root_delivery_id: rootDeliveryId,
+    });
+  }
+  if (
+    submission.required_delivery_protocol !== undefined
+    && submission.required_delivery_protocol !== BatchDeliveryProtocol.V1
+    && submission.required_delivery_protocol !== BatchDeliveryProtocol.V2
+  ) {
+    throw batchSubmissionDeliveryConflict('Invalid batch submission delivery protocol', {
+      submission_id: submission.internal_id,
+      required_delivery_protocol: submission.required_delivery_protocol,
+    });
+  }
+  if (submission.root_delivery_id && submission.required_delivery_protocol !== undefined) {
+    return submission;
+  }
+  const updatedSubmission = {
+    ...submission,
+    root_delivery_id: rootDeliveryId,
+    required_delivery_protocol: submission.required_delivery_protocol ?? BatchDeliveryProtocol.V1,
+    updated_at: now(),
+  };
+  await elUpdate(context, submission._index ?? INDEX_INTERNAL_OBJECTS, submission.internal_id, {
+    doc: {
+      root_delivery_id: updatedSubmission.root_delivery_id,
+      required_delivery_protocol: updatedSubmission.required_delivery_protocol,
+      updated_at: updatedSubmission.updated_at,
+    },
+  });
+  return updatedSubmission;
+};
+
 export const reserveBatchSubmission = async (
   context: AuthContext,
   input: ReserveBatchSubmissionInput,
@@ -92,6 +144,8 @@ export const reserveBatchSubmission = async (
     wait_until: input.admission.waitUntil,
     cleanup_inconsistent_bundle: input.admission.cleanupInconsistentBundle,
     applicant_id: input.applicantId,
+    root_delivery_id: input.rootDeliveryId,
+    required_delivery_protocol: input.requiredDeliveryProtocol,
     queue_message_version: BATCH_SUBMISSION_QUEUE_MESSAGE_VERSION,
     queue_payload: JSON.stringify(input.queueMessage),
     state: BatchSubmissionState.Reserved,

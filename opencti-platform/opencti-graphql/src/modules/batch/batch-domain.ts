@@ -5,6 +5,7 @@ import { hashSHA256 } from '../../utils/hash';
 import {
   BatchAdmissionErrorCode,
   BatchAdmissionStatus,
+  type BatchDeliveryEnvelope,
   BatchExecutionMode,
   BatchExecutionPreference,
   BatchExecutionReason,
@@ -203,6 +204,8 @@ export const buildBatchAdmission = (
   workId: string,
   prepared: PreparedBundleSubmission,
   submissionId?: string,
+  rootDeliveryId?: string,
+  requiredDeliveryProtocol?: BatchAdmission['requiredDeliveryProtocol'],
 ): BatchAdmission => {
   if (typeof connectorId !== 'string' || connectorId.length === 0) {
     throw batchContractError('Invalid batch connector id', BatchAdmissionErrorCode.InvalidConnectorId, { connector_id: connectorId });
@@ -225,10 +228,16 @@ export const buildBatchAdmission = (
     cleanupInconsistentBundle: prepared.cleanupInconsistentBundle,
     bundle: prepared.bundle,
     ...(submissionId ? { submissionId } : {}),
+    ...(rootDeliveryId ? { rootDeliveryId } : {}),
+    ...(requiredDeliveryProtocol ? { requiredDeliveryProtocol } : {}),
   };
 };
 
-export const buildBatchQueueMessage = (admission: BatchAdmission, applicantId: string): BatchQueueMessage => {
+export const buildBatchQueueMessage = (
+  admission: BatchAdmission,
+  applicantId: string,
+  deliveryEnvelope?: BatchDeliveryEnvelope,
+): BatchQueueMessage => {
   const splitBundles = admission.executionMode === BatchExecutionMode.LegacySplit;
   return {
     type: 'bundle',
@@ -246,6 +255,7 @@ export const buildBatchQueueMessage = (admission: BatchAdmission, applicantId: s
     batch_wait_until: admission.waitUntil,
     batch_idempotency_key: admission.idempotencyKey,
     ...(admission.submissionId ? { submission_id: admission.submissionId } : {}),
+    ...(deliveryEnvelope ?? {}),
     batch_plan: {
       version: 1,
       object_count: admission.bundlePlan.objectCount,

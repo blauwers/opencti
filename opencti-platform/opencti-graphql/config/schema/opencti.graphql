@@ -2069,6 +2069,11 @@ input ConnectorInfoInput {
   last_run_datetime: DateTime
 }
 
+input WorkerRuntimeCapabilityInput {
+  worker_id: String
+  batch_delivery_protocol_max: Int
+}
+
 type ConnectorInfo {
   run_and_terminate: Boolean!
   buffering: Boolean!
@@ -14876,7 +14881,7 @@ type Query {
   connectorManager(managerId: ID!): ConnectorManager! @auth(for: [MODULES])
   connectorManagers: [ConnectorManager!]! @auth(for: [MODULES])
   connectorsForManagers: [ManagedConnector!] @auth(for: [SETTINGS_SETACCESSES])
-  connectorsForWorker: [Connector] @auth(for: [MODULES])
+  connectorsForWorker(workerRuntime: WorkerRuntimeCapabilityInput): [Connector] @auth(for: [MODULES])
   connectorsForExport: [Connector] @auth(for: [KNOWLEDGE])
   connectorsForImport: [Connector] @auth(for: [KNOWLEDGE])
   connectorsForAnalysis: [Connector] @auth(for: [KNOWLEDGE])

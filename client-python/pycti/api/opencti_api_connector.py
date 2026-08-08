@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pycti.connector.opencti_connector import OpenCTIConnector
 
@@ -61,7 +61,7 @@ class OpenCTIApiConnector:
         result = self.api.query(query, {"id": connector_id})
         return result["data"]["connector"]
 
-    def list(self) -> List[Dict]:
+    def list(self, worker_runtime: Optional[Dict[str, Any]] = None) -> List[Dict]:
         """List available connectors.
 
         :return: list of connector dictionaries
@@ -70,8 +70,8 @@ class OpenCTIApiConnector:
 
         self.api.app_logger.info("Getting connectors ...")
         query = """
-            query GetConnectors {
-                connectorsForWorker {
+            query GetConnectors($workerRuntime: WorkerRuntimeCapabilityInput) {
+                connectorsForWorker(workerRuntime: $workerRuntime) {
                     id
                     name
                     connector_user {
@@ -101,7 +101,7 @@ class OpenCTIApiConnector:
                 }
             }
         """
-        result = self.api.query(query)
+        result = self.api.query(query, {"workerRuntime": worker_runtime})
         return result["data"]["connectorsForWorker"]
 
     def ping(

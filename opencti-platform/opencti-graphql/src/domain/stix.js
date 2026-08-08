@@ -38,7 +38,17 @@ import {
   prepareBundleSubmission,
 } from '../modules/batch/batch-domain';
 import {
+  advanceBatchDeliveryState,
+  buildRootBatchDeliveryEnvelope,
+  buildRootBatchDeliveryId,
+  isBatchDeliveryStateAtLeast,
+  readBatchDeliveryQueueMessage,
+  recordBatchDeliveryError,
+  reserveBatchDelivery,
+} from '../modules/batch/batch-delivery-domain';
+import {
   buildBatchSubmissionId,
+  ensureBatchSubmissionDeliveryMetadata,
   isBatchSubmissionStateAtLeast,
   loadBatchSubmission,
   readBatchSubmissionQueueMessage,
@@ -46,7 +56,16 @@ import {
   reserveBatchSubmission,
   advanceBatchSubmissionState,
 } from '../modules/batch/batch-submission-domain';
-import { BatchExecutionMode, BatchSubmissionState, BatchSubmissionWorkOrigin } from '../modules/batch/batch-types';
+import { resolveRequiredBatchDeliveryProtocol } from '../modules/batch/batch-worker-runtime-domain';
+import {
+  BatchDeliveryBranchKind,
+  BatchDeliveryKind,
+  BatchDeliveryProtocol,
+  BatchDeliveryState,
+  BatchExecutionMode,
+  BatchSubmissionState,
+  BatchSubmissionWorkOrigin,
+} from '../modules/batch/batch-types';
 import { lockResources } from '../lock/master-lock';
 import { generateWorkId } from '../schema/identifier';
 
@@ -76,7 +95,14 @@ export const stixObjectMerge = async (context, user, targetId, sourceIds) => {
 
 const buildBatchAdmissionFromSubmission = (submission, preparedBundle) => {
   return {
-    ...buildBatchAdmission(submission.connector_id, submission.work_id, preparedBundle, submission.internal_id),
+    ...buildBatchAdmission(
+      submission.connector_id,
+      submission.work_id,
+      preparedBundle,
+      submission.internal_id,
+      submission.root_delivery_id,
+      submission.required_delivery_protocol,
+    ),
     batchId: submission.bundle_id,
     bundleId: submission.bundle_id,
     executionPreference: submission.execution_preference,
@@ -89,11 +115,22 @@ const buildBatchAdmissionFromSubmission = (submission, preparedBundle) => {
   };
 };
 
+const buildTrackedBatchQueueMessage = (admission, applicantId, requiredDeliveryProtocol) => {
+  if (requiredDeliveryProtocol !== BatchDeliveryProtocol.V2) {
+    return buildBatchQueueMessage(admission, applicantId);
+  }
+  return buildBatchQueueMessage(admission, applicantId, buildRootBatchDeliveryEnvelope(admission.submissionId));
+};
+
 const reserveOrLoadBatchSubmission = async (context, user, connector, connectorId, workId, preparedBundle) => {
   const existingSubmission = await loadBatchSubmission(context, connectorId, preparedBundle.idempotencyKey);
   if (existingSubmission) {
     assertBatchReplayPayload(preparedBundle, existingSubmission.payload_fingerprint);
-    return existingSubmission;
+    return ensureBatchSubmissionDeliveryMetadata(
+      context,
+      existingSubmission,
+      buildRootBatchDeliveryId(existingSubmission.internal_id),
+    );
   }
 
   let targetWorkId = workId;
@@ -106,15 +143,65 @@ const reserveOrLoadBatchSubmission = async (context, user, connector, connectorI
     workOrigin = BatchSubmissionWorkOrigin.Generated;
   }
   const submissionId = buildBatchSubmissionId(connectorId, preparedBundle.idempotencyKey);
-  const admission = buildBatchAdmission(connectorId, targetWorkId, preparedBundle, submissionId);
+  const rootDeliveryId = buildRootBatchDeliveryId(submissionId);
+  const requiredDeliveryProtocol = await resolveRequiredBatchDeliveryProtocol();
+  const admission = buildBatchAdmission(
+    connectorId,
+    targetWorkId,
+    preparedBundle,
+    submissionId,
+    rootDeliveryId,
+    requiredDeliveryProtocol,
+  );
   return reserveBatchSubmission(context, {
     admission,
     applicantId: user.internal_id,
     payloadFingerprint: preparedBundle.payloadFingerprint,
-    queueMessage: buildBatchQueueMessage(admission, user.internal_id),
+    queueMessage: buildTrackedBatchQueueMessage(admission, user.internal_id, requiredDeliveryProtocol),
+    rootDeliveryId,
+    requiredDeliveryProtocol,
     workOrigin,
     workTimestamp,
   });
+};
+
+const reserveRootBatchDelivery = async (context, submission) => {
+  let rootDelivery = await reserveBatchDelivery(context, {
+    deliveryId: submission.root_delivery_id,
+    submissionId: submission.internal_id,
+    parentDeliveryId: null,
+    deliveryKind: BatchDeliveryKind.Root,
+    branchKind: BatchDeliveryBranchKind.Root,
+    branchSequence: 0,
+    branchOrdinal: 0,
+    payloadFingerprint: submission.payload_fingerprint,
+    queueMessage: readBatchSubmissionQueueMessage(submission),
+    requiredWorkerProtocol: submission.required_delivery_protocol,
+  });
+  if (
+    isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.Published)
+    && !isBatchDeliveryStateAtLeast(rootDelivery, BatchDeliveryState.Published)
+  ) {
+    rootDelivery = await advanceBatchDeliveryState(context, rootDelivery, BatchDeliveryState.Published, {
+      published_at: submission.published_at ?? now(),
+    });
+  }
+  return rootDelivery;
+};
+
+const assertBatchDeliveryPublicationProtocolAvailable = async (submission) => {
+  if (submission.required_delivery_protocol !== BatchDeliveryProtocol.V2) {
+    return;
+  }
+  const liveProtocol = await resolveRequiredBatchDeliveryProtocol();
+  if (liveProtocol !== BatchDeliveryProtocol.V2) {
+    throw FunctionalError('Batch delivery protocol v2 publication is unavailable', {
+      submission_id: submission.internal_id,
+      root_delivery_id: submission.root_delivery_id,
+      required_delivery_protocol: submission.required_delivery_protocol,
+      live_delivery_protocol: liveProtocol,
+    });
+  }
 };
 
 const bindBatchSubmissionWork = async (context, user, connector, submission) => {
@@ -138,6 +225,7 @@ const bindBatchSubmissionWork = async (context, user, connector, submission) => 
 
 const submitExplicitBatch = async (context, user, connector, connectorId, workId, preparedBundle) => {
   let submission = await reserveOrLoadBatchSubmission(context, user, connector, connectorId, workId, preparedBundle);
+  let rootDelivery = await reserveRootBatchDelivery(context, submission);
   submission = await bindBatchSubmissionWork(context, user, connector, submission);
   if (!isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.ExpectationRecorded)) {
     if (submission.execution_mode !== BatchExecutionMode.LegacySplit) {
@@ -149,11 +237,20 @@ const submitExplicitBatch = async (context, user, connector, connectorId, workId
   }
   if (!isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.Published)) {
     try {
-      await pushToWorkerForConnector(submission.connector_id, readBatchSubmissionQueueMessage(submission));
+      await assertBatchDeliveryPublicationProtocolAvailable(submission);
+      await pushToWorkerForConnector(submission.connector_id, readBatchDeliveryQueueMessage(rootDelivery));
+      rootDelivery = await advanceBatchDeliveryState(context, rootDelivery, BatchDeliveryState.Published, {
+        published_at: now(),
+      });
       submission = await advanceBatchSubmissionState(context, submission, BatchSubmissionState.Published, {
         published_at: now(),
       });
     } catch (error) {
+      try {
+        await recordBatchDeliveryError(context, rootDelivery, error);
+      } catch {
+        // Keep the original dispatch error as the retry signal.
+      }
       try {
         await recordBatchSubmissionError(context, submission, error);
       } catch {

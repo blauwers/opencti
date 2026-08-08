@@ -1,6 +1,7 @@
 import functools
 import os
 import signal
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ running_ingestion_units_gauge = meter.create_gauge(
     name="opencti_running_ingestion_units",
     description="Number of running ingestion units",
 )
+BATCH_DELIVERY_PROTOCOL_MAX = 2
 
 
 def is_priority_connector(connector_priority_group: str) -> bool:
@@ -125,6 +127,12 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
             config,
             default=None,
         )
+        self.worker_id = get_config_variable(
+            "WORKER_ID",
+            ["worker", "id"],
+            config,
+            default=f"{socket.gethostname()}-{os.getpid()}",
+        )
         # Load worker config
         self.log_level = get_config_variable(
             "WORKER_LOG_LEVEL",
@@ -206,6 +214,15 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
         )
         self.worker_logger = self.api.logger_class("worker")
 
+    def worker_runtime_capability(self) -> Dict[str, Any]:
+        return {
+            "worker_id": self.worker_id,
+            "batch_delivery_protocol_max": BATCH_DELIVERY_PROTOCOL_MAX,
+        }
+
+    def fetch_connectors_for_worker(self) -> List[Any]:
+        return self.api.connector.list(worker_runtime=self.worker_runtime_capability())
+
     def build_pika_parameters(
         self, connector_config: Dict[str, Any]
     ) -> pika.ConnectionParameters:
@@ -270,7 +287,7 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
 
                 # Fetch queue configuration from API
                 queues: List[Any] = []
-                connectors: List[Any] = self.api.connector.list()
+                connectors: List[Any] = self.fetch_connectors_for_worker()
 
                 # Check if all queues are consumed
                 for connector in connectors:

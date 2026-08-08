@@ -25344,6 +25344,11 @@ export type QueryConnectorMigrationAssessmentArgs = {
 };
 
 
+export type QueryConnectorsForWorkerArgs = {
+  workerRuntime?: InputMaybe<WorkerRuntimeCapabilityInput>;
+};
+
+
 export type QueryContainerArgs = {
   id?: InputMaybe<Scalars['String']['input']>;
 };
@@ -38346,6 +38351,11 @@ export type WorkTracking = {
   import_processed_number?: Maybe<Scalars['Int']['output']>;
 };
 
+export type WorkerRuntimeCapabilityInput = {
+  batch_delivery_protocol_max?: InputMaybe<Scalars['Int']['input']>;
+  worker_id?: InputMaybe<Scalars['String']['input']>;
+};
+
 export type WorkflowActionConfig = {
   __typename?: 'WorkflowActionConfig';
   params?: Maybe<Scalars['JSON']['output']>;
@@ -40858,6 +40868,7 @@ export type ResolversTypes = ResolversObject<{
   WorkErrorInput: WorkErrorInput;
   WorkMessage: ResolverTypeWrapper<WorkMessage>;
   WorkTracking: ResolverTypeWrapper<WorkTracking>;
+  WorkerRuntimeCapabilityInput: WorkerRuntimeCapabilityInput;
   WorkflowActionConfig: ResolverTypeWrapper<WorkflowActionConfig>;
   WorkflowActionError: ResolverTypeWrapper<WorkflowActionError>;
   WorkflowDefinitionMutationResult: ResolverTypeWrapper<WorkflowDefinitionMutationResult>;
@@ -41858,6 +41869,7 @@ export type ResolversParentTypes = ResolversObject<{
   WorkErrorInput: WorkErrorInput;
   WorkMessage: WorkMessage;
   WorkTracking: WorkTracking;
+  WorkerRuntimeCapabilityInput: WorkerRuntimeCapabilityInput;
   WorkflowActionConfig: WorkflowActionConfig;
   WorkflowActionError: WorkflowActionError;
   WorkflowDefinitionMutationResult: WorkflowDefinitionMutationResult;
@@ -49710,7 +49722,7 @@ export type QueryResolvers<ContextType = any, ParentType extends ResolversParent
   connectorsForImport?: Resolver<Maybe<Array<Maybe<ResolversTypes['Connector']>>>, ParentType, ContextType>;
   connectorsForManagers?: Resolver<Maybe<Array<ResolversTypes['ManagedConnector']>>, ParentType, ContextType>;
   connectorsForNotification?: Resolver<Maybe<Array<Maybe<ResolversTypes['Connector']>>>, ParentType, ContextType>;
-  connectorsForWorker?: Resolver<Maybe<Array<Maybe<ResolversTypes['Connector']>>>, ParentType, ContextType>;
+  connectorsForWorker?: Resolver<Maybe<Array<Maybe<ResolversTypes['Connector']>>>, ParentType, ContextType, Partial<QueryConnectorsForWorkerArgs>>;
   container?: Resolver<Maybe<ResolversTypes['Container']>, ParentType, ContextType, Partial<QueryContainerArgs>>;
   containers?: Resolver<Maybe<ResolversTypes['ContainerConnection']>, ParentType, ContextType, Partial<QueryContainersArgs>>;
   containersAskAiSummary?: Resolver<Maybe<ResolversTypes['AiSummary']>, ParentType, ContextType, Partial<QueryContainersAskAiSummaryArgs>>;

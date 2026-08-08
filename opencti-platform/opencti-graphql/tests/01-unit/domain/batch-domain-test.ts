@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BatchAdmissionErrorCode,
+  BatchDeliveryProtocol,
+  BatchDeliveryState,
   BatchExecutionMode,
   BatchExecutionPreference,
   BatchExecutionReason,
@@ -14,12 +16,20 @@ import {
   prepareBundleSubmission,
 } from '../../../src/modules/batch/batch-domain';
 import {
+  advanceBatchDeliveryState,
+  buildRootBatchDeliveryId,
+  recordBatchDeliveryError,
+  reserveBatchDelivery,
+} from '../../../src/modules/batch/batch-delivery-domain';
+import {
   advanceBatchSubmissionState,
   buildBatchSubmissionId,
+  ensureBatchSubmissionDeliveryMetadata,
   loadBatchSubmission,
   recordBatchSubmissionError,
   reserveBatchSubmission,
 } from '../../../src/modules/batch/batch-submission-domain';
+import { resolveRequiredBatchDeliveryProtocol } from '../../../src/modules/batch/batch-worker-runtime-domain';
 import { sendStixBundle, submitStixBundle } from '../../../src/domain/stix';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { pushToWorkerForConnector } from '../../../src/database/rabbitmq';
@@ -62,9 +72,28 @@ vi.mock('../../../src/modules/batch/batch-submission-domain', async (importOrigi
   return {
     ...actual,
     advanceBatchSubmissionState: vi.fn(),
+    ensureBatchSubmissionDeliveryMetadata: vi.fn(),
     loadBatchSubmission: vi.fn(),
     recordBatchSubmissionError: vi.fn(),
     reserveBatchSubmission: vi.fn(),
+  };
+});
+
+vi.mock('../../../src/modules/batch/batch-delivery-domain', async (importOriginal) => {
+  const actual: object = await importOriginal();
+  return {
+    ...actual,
+    advanceBatchDeliveryState: vi.fn(),
+    recordBatchDeliveryError: vi.fn(),
+    reserveBatchDelivery: vi.fn(),
+  };
+});
+
+vi.mock('../../../src/modules/batch/batch-worker-runtime-domain', async (importOriginal) => {
+  const actual: object = await importOriginal();
+  return {
+    ...actual,
+    resolveRequiredBatchDeliveryProtocol: vi.fn(),
   };
 });
 
@@ -287,11 +316,13 @@ describe('batch admission contract', () => {
 
 describe('submitStixBundle', () => {
   let submission: Record<string, any> | null;
+  let rootDelivery: Record<string, any> | null;
   let generatedWork: Record<string, any> | null;
 
   beforeEach(() => {
     vi.clearAllMocks();
     submission = null;
+    rootDelivery = null;
     generatedWork = null;
     mockStoreLoadById.mockResolvedValue({
       id: 'connector-1',
@@ -299,6 +330,15 @@ describe('submitStixBundle', () => {
       name: 'Connector 1',
     });
     vi.mocked(loadBatchSubmission).mockImplementation(async () => submission as any);
+    vi.mocked(resolveRequiredBatchDeliveryProtocol).mockResolvedValue(BatchDeliveryProtocol.V1);
+    vi.mocked(ensureBatchSubmissionDeliveryMetadata).mockImplementation(async (_context, currentSubmission: any, rootDeliveryId: string) => {
+      submission = {
+        ...currentSubmission,
+        root_delivery_id: currentSubmission.root_delivery_id ?? rootDeliveryId,
+        required_delivery_protocol: currentSubmission.required_delivery_protocol ?? BatchDeliveryProtocol.V1,
+      };
+      return submission as any;
+    });
     vi.mocked(reserveBatchSubmission).mockImplementation(async (_context, input: any) => {
       submission = {
         id: input.admission.submissionId,
@@ -316,6 +356,8 @@ describe('submitStixBundle', () => {
         eligible_execution_modes: input.admission.eligibleExecutionModes,
         wait_until: input.admission.waitUntil,
         cleanup_inconsistent_bundle: input.admission.cleanupInconsistentBundle,
+        root_delivery_id: input.rootDeliveryId,
+        required_delivery_protocol: input.requiredDeliveryProtocol,
         state: BatchSubmissionState.Reserved,
         queue_payload: JSON.stringify(input.queueMessage),
         queue_message_version: 1,
@@ -326,6 +368,25 @@ describe('submitStixBundle', () => {
       };
       return submission as any;
     });
+    vi.mocked(reserveBatchDelivery).mockImplementation(async (_context, input: any) => {
+      if (rootDelivery) {
+        return rootDelivery as any;
+      }
+      rootDelivery = {
+        internal_id: input.deliveryId,
+        submission_id: input.submissionId,
+        parent_delivery_id: input.parentDeliveryId,
+        delivery_kind: input.deliveryKind,
+        branch_kind: input.branchKind,
+        branch_sequence: input.branchSequence,
+        branch_ordinal: input.branchOrdinal,
+        payload_fingerprint: input.payloadFingerprint,
+        queue_payload: JSON.stringify(input.queueMessage),
+        required_worker_protocol: input.requiredWorkerProtocol,
+        state: BatchDeliveryState.Ready,
+      };
+      return rootDelivery as any;
+    });
     vi.mocked(advanceBatchSubmissionState).mockImplementation(async (_context, currentSubmission: any, state: any, patch: any = {}) => {
       submission = {
         ...currentSubmission,
@@ -333,6 +394,14 @@ describe('submitStixBundle', () => {
         state,
       };
       return submission as any;
+    });
+    vi.mocked(advanceBatchDeliveryState).mockImplementation(async (_context, currentDelivery: any, state: any, patch: any = {}) => {
+      rootDelivery = {
+        ...currentDelivery,
+        ...patch,
+        state,
+      };
+      return rootDelivery as any;
     });
     vi.mocked(loadWorkById).mockImplementation(async (_context, _user, workId) => (generatedWork?.id === workId ? generatedWork as any : null as any));
     vi.mocked(createWork).mockImplementation(async (_context, _user, _connector, _workName, _sourceId, args: any) => {
@@ -391,9 +460,12 @@ describe('submitStixBundle', () => {
       workId: firstAdmission.workId,
       idempotencyKey: firstAdmission.idempotencyKey,
       submissionId: firstAdmission.submissionId,
+      rootDeliveryId: firstAdmission.rootDeliveryId,
     });
     expect(firstAdmission.submissionId).toBe(buildBatchSubmissionId('connector-1', options.idempotencyKey));
+    expect(firstAdmission.rootDeliveryId).toBe(buildRootBatchDeliveryId(firstAdmission.submissionId as string));
     expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
+    expect(reserveBatchDelivery).toHaveBeenCalledTimes(2);
     expect(createWork).toHaveBeenCalledTimes(1);
     expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
     expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
@@ -408,12 +480,78 @@ describe('submitStixBundle', () => {
     expect(replayAdmission).toMatchObject({
       workId: 'work-caller-1',
       submissionId: firstAdmission.submissionId,
+      rootDeliveryId: firstAdmission.rootDeliveryId,
     });
     expect(submission?.work_origin).toBe(BatchSubmissionWorkOrigin.CallerProvided);
     expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
+    expect(reserveBatchDelivery).toHaveBeenCalledTimes(2);
     expect(createWork).not.toHaveBeenCalled();
     expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
     expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it('backfills a pre-bootstrap submission as v1 without rewriting its stored queue contract', async () => {
+    const options = { idempotencyKey: 'feed-run-legacy-row' };
+    const prepared = prepareBundleSubmission(bundle, options);
+    const submissionId = buildBatchSubmissionId('connector-1', options.idempotencyKey);
+    const legacyAdmission = buildBatchAdmission('connector-1', 'work-legacy', prepared, submissionId);
+    submission = {
+      id: submissionId,
+      internal_id: submissionId,
+      connector_id: 'connector-1',
+      idempotency_key: options.idempotencyKey,
+      payload_fingerprint: prepared.payloadFingerprint,
+      bundle_id: prepared.bundleId,
+      work_id: 'work-legacy',
+      work_origin: BatchSubmissionWorkOrigin.CallerProvided,
+      work_timestamp: null,
+      execution_preference: prepared.executionPreference,
+      execution_mode: prepared.executionMode,
+      execution_reason: prepared.executionReason,
+      eligible_execution_modes: prepared.eligibleExecutionModes,
+      wait_until: prepared.waitUntil,
+      cleanup_inconsistent_bundle: prepared.cleanupInconsistentBundle,
+      state: BatchSubmissionState.Reserved,
+      queue_payload: JSON.stringify(buildBatchQueueMessage(legacyAdmission, ADMIN_USER.internal_id)),
+      queue_message_version: 1,
+      created_at: '2026-08-08T18:00:00.000Z',
+      expectation_recorded_at: null,
+      published_at: null,
+      last_error: null,
+    };
+
+    const admission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', reorderedBundle, 'work-new', options);
+
+    expect(ensureBatchSubmissionDeliveryMetadata).toHaveBeenCalledWith(
+      testContext,
+      expect.objectContaining({ internal_id: submissionId }),
+      buildRootBatchDeliveryId(submissionId),
+    );
+    expect(admission).toMatchObject({
+      submissionId,
+      rootDeliveryId: buildRootBatchDeliveryId(submissionId),
+      requiredDeliveryProtocol: BatchDeliveryProtocol.V1,
+      workId: 'work-legacy',
+    });
+    expect(resolveRequiredBatchDeliveryProtocol).not.toHaveBeenCalled();
+    expect(reserveBatchDelivery).toHaveBeenCalledWith(
+      testContext,
+      expect.objectContaining({
+        deliveryId: buildRootBatchDeliveryId(submissionId),
+        requiredWorkerProtocol: BatchDeliveryProtocol.V1,
+        queueMessage: expect.not.objectContaining({
+          delivery_id: expect.any(String),
+          delivery_protocol_version: BatchDeliveryProtocol.V2,
+        }),
+      }),
+    );
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.not.objectContaining({
+        delivery_id: expect.any(String),
+        delivery_protocol_version: BatchDeliveryProtocol.V2,
+      }),
+    );
   });
 
   it('rejects conflicting normalized payload reuse before duplicating expectation or publication', async () => {
@@ -449,6 +587,7 @@ describe('submitStixBundle', () => {
     expect(retryAdmission).toMatchObject({
       workId: 'work-caller-1',
       submissionId: buildBatchSubmissionId('connector-1', options.idempotencyKey),
+      rootDeliveryId: buildRootBatchDeliveryId(buildBatchSubmissionId('connector-1', options.idempotencyKey)),
     });
     expect(reserveBatchSubmission).toHaveBeenCalledTimes(1);
     expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
@@ -460,7 +599,89 @@ describe('submitStixBundle', () => {
       }),
     );
     expect(recordBatchSubmissionError).toHaveBeenCalledTimes(1);
+    expect(recordBatchDeliveryError).toHaveBeenCalledTimes(1);
     expect(submission?.state).toBe(BatchSubmissionState.Published);
+  });
+
+  it('keeps v1 publication as the default even after root delivery reservation', async () => {
+    const admission = await submitStixBundle(
+      testContext,
+      ADMIN_USER,
+      'connector-1',
+      bundle,
+      'work-caller-1',
+      { idempotencyKey: 'feed-run-v1' },
+    );
+
+    expect(admission.requiredDeliveryProtocol).toBe(BatchDeliveryProtocol.V1);
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.not.objectContaining({
+        delivery_id: expect.any(String),
+        delivery_protocol_version: BatchDeliveryProtocol.V2,
+      }),
+    );
+  });
+
+  it('emits a v2 root envelope only when the protocol gate resolves to v2', async () => {
+    vi.mocked(resolveRequiredBatchDeliveryProtocol).mockResolvedValue(BatchDeliveryProtocol.V2);
+
+    const admission = await submitStixBundle(
+      testContext,
+      ADMIN_USER,
+      'connector-1',
+      bundle,
+      'work-caller-1',
+      { idempotencyKey: 'feed-run-v2' },
+    );
+
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.objectContaining({
+        delivery_id: admission.rootDeliveryId,
+        parent_delivery_id: null,
+        delivery_kind: 'ROOT',
+        delivery_protocol_version: BatchDeliveryProtocol.V2,
+        delivery_branch_kind: 'ROOT',
+        delivery_branch_sequence: 0,
+        delivery_branch_ordinal: 0,
+      }),
+    );
+  });
+
+  it('does not republish a persisted v2 root after the live fleet floor falls back to v1', async () => {
+    vi.mocked(resolveRequiredBatchDeliveryProtocol)
+      .mockResolvedValueOnce(BatchDeliveryProtocol.V2)
+      .mockResolvedValueOnce(BatchDeliveryProtocol.V2)
+      .mockResolvedValueOnce(BatchDeliveryProtocol.V1);
+    vi.mocked(pushToWorkerForConnector)
+      .mockRejectedValueOnce(new Error('rabbit unavailable'));
+
+    await expect(submitStixBundle(
+      testContext,
+      ADMIN_USER,
+      'connector-1',
+      bundle,
+      'work-caller-1',
+      { idempotencyKey: 'feed-run-v2-retry' },
+    )).rejects.toThrow('rabbit unavailable');
+
+    await expect(submitStixBundle(
+      testContext,
+      ADMIN_USER,
+      'connector-1',
+      reorderedBundle,
+      'work-caller-2',
+      { idempotencyKey: 'feed-run-v2-retry' },
+    )).rejects.toThrow('Batch delivery protocol v2 publication is unavailable');
+
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.objectContaining({
+        delivery_protocol_version: BatchDeliveryProtocol.V2,
+      }),
+    );
   });
 
   it('lets the compatibility mutation request committed-only execution', async () => {

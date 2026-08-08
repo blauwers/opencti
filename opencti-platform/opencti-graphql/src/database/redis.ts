@@ -18,6 +18,7 @@ import { enrichWithRemoteCredentials } from '../config/credentials';
 import type { ExclusionListCacheItem } from './exclusionListCache';
 import { refreshLocalCacheForEntity } from './cache';
 import { schemaRelationsRefDefinition } from '../schema/schema-relationsRef';
+import type { BatchWorkerRuntimeCapability } from '../modules/batch/batch-types';
 
 const USE_SSL = booleanConf('redis:use_ssl', false);
 const REDIS_CA = conf.get('redis:ca').map((path: string) => loadCert(path));
@@ -563,6 +564,38 @@ export const redisApplyBatchSubmissionExpectation = async (workId: string, submi
     `${expectation}`,
   );
   return Number(result) === 1;
+};
+const BATCH_WORKER_RUNTIME_CAPABILITY_TTL = 180;
+const BATCH_WORKER_RUNTIME_CAPABILITY_MAX_LENGTH = 10000;
+const BATCH_WORKER_RUNTIME_CAPABILITY_LIST_KEY = 'batch_worker_runtime_capabilities';
+const batchWorkerRuntimeCapabilityKey = (workerId: string) => `batch_worker_runtime_capability:${workerId}`;
+export interface BatchWorkerRuntimeCapabilitySnapshot {
+  capabilities: BatchWorkerRuntimeCapability[];
+  atCapacity: boolean;
+}
+export const redisSetBatchWorkerRuntimeCapability = async (capability: BatchWorkerRuntimeCapability): Promise<BatchWorkerRuntimeCapability> => {
+  return setKeyWithList(
+    batchWorkerRuntimeCapabilityKey(capability.worker_id),
+    [BATCH_WORKER_RUNTIME_CAPABILITY_LIST_KEY],
+    capability,
+    BATCH_WORKER_RUNTIME_CAPABILITY_TTL,
+    BATCH_WORKER_RUNTIME_CAPABILITY_MAX_LENGTH,
+  );
+};
+export const redisGetBatchWorkerRuntimeCapabilitySnapshot = async (): Promise<BatchWorkerRuntimeCapabilitySnapshot> => {
+  const capabilities = await keysFromList(
+    BATCH_WORKER_RUNTIME_CAPABILITY_LIST_KEY,
+    BATCH_WORKER_RUNTIME_CAPABILITY_TTL,
+    BATCH_WORKER_RUNTIME_CAPABILITY_MAX_LENGTH,
+  );
+  return {
+    capabilities: capabilities.map((capability) => ({
+      worker_id: capability.worker_id,
+      batch_delivery_protocol_max: capability.batch_delivery_protocol_max,
+      observed_at: capability.observed_at,
+    })),
+    atCapacity: capabilities.length >= BATCH_WORKER_RUNTIME_CAPABILITY_MAX_LENGTH,
+  };
 };
 export const redisInitializeWork = async (workId: string, isMultiPartWork: boolean) => {
   await redisTx(getClientBase(), async (tx) => {

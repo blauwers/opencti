@@ -2,15 +2,24 @@ import base64
 import json
 from unittest.mock import MagicMock
 
+import pytest
 from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
 from requests import ConnectionError
 
 from src import push_handler
 from src.push_handler import (
+    BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+    BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+    BATCH_DELIVERY_KIND_CHILD,
+    BATCH_DELIVERY_KIND_ROOT,
+    BATCH_DELIVERY_PROTOCOL_V2,
     PushHandler,
     batch_replay_count,
+    build_child_delivery_id,
     build_batch_expectation_error,
+    build_root_delivery_id,
     is_batch_payload_too_large_error,
+    parse_batch_delivery_envelope,
     should_add_legacy_default_split_expectations,
     should_dead_letter_rejected_item,
     should_replay_intact_bundle,
@@ -53,6 +62,22 @@ def build_message(**overrides):
     }
     message.update(overrides)
     return json.dumps(message)
+
+
+def build_v2_message(**overrides):
+    submission_id = "batch-submission--1"
+    message = {
+        "submission_id": submission_id,
+        "delivery_id": build_root_delivery_id(submission_id),
+        "parent_delivery_id": None,
+        "delivery_kind": BATCH_DELIVERY_KIND_ROOT,
+        "delivery_protocol_version": BATCH_DELIVERY_PROTOCOL_V2,
+        "delivery_branch_kind": "ROOT",
+        "delivery_branch_sequence": 0,
+        "delivery_branch_ordinal": 0,
+    }
+    message.update(overrides)
+    return build_message(**message)
 
 
 def test_handler_passes_request_timeouts_to_api_client(monkeypatch):
@@ -99,6 +124,40 @@ def test_bundle_transport_is_unsplit_by_default():
     assert should_split_bundles({}, content) is False
     assert should_split_bundles({"no_split": False}, content) is False
     assert should_split_bundles({"no_split": True}, content) is False
+
+
+def test_worker_parses_v1_and_v2_delivery_envelopes_without_reinterpreting_v1():
+    assert (
+        parse_batch_delivery_envelope({"submission_id": "batch-submission--1"}) is None
+    )
+
+    envelope = parse_batch_delivery_envelope(json.loads(build_v2_message()))
+    assert envelope is not None
+    assert envelope.delivery_id == build_root_delivery_id("batch-submission--1")
+    assert envelope.delivery_kind == BATCH_DELIVERY_KIND_ROOT
+    assert envelope.parent_delivery_id is None
+
+
+def test_worker_rejects_v2_delivery_ids_that_do_not_match_lineage():
+    with pytest.raises(ValueError, match="Invalid root batch delivery envelope"):
+        parse_batch_delivery_envelope(
+            json.loads(build_v2_message(delivery_id="batch-delivery--wrong"))
+        )
+
+    root_id = build_root_delivery_id("batch-submission--1")
+    with pytest.raises(ValueError, match="Invalid child batch delivery envelope"):
+        parse_batch_delivery_envelope(
+            json.loads(
+                build_v2_message(
+                    delivery_id="batch-delivery--wrong",
+                    parent_delivery_id=root_id,
+                    delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+                    delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                    delivery_branch_sequence=0,
+                    delivery_branch_ordinal=0,
+                )
+            )
+        )
 
 
 def test_split_bundles_requires_positive_opt_in():
@@ -204,6 +263,16 @@ def test_handler_imports_default_multi_object_bundle_without_requeue(monkeypatch
         "bundle--11111111-1111-4111-8111-111111111111"
     )
     assert len(json.loads(imported_raw_content)["objects"]) == 2
+
+
+def test_handler_processes_v2_root_messages_on_the_existing_unsplit_route():
+    handler = build_handler()
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    handler.api.stix2.import_bundle_from_json.assert_not_called()
+    handler.api.stix2.import_bundle_from_json_batch.assert_called_once()
 
 
 def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
@@ -356,6 +425,47 @@ def test_handler_republishes_intact_bundle_for_retryable_batch_failures(monkeypa
     handler.api.set_retry_number.assert_any_call(None)
 
 
+def test_handler_republishes_v2_intact_replays_with_deterministic_child_ids(
+    monkeypatch,
+):
+    handler = build_handler()
+    handler.send_bundle_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [],
+        [
+            {
+                "id": "relationship--1",
+                "rejection_info": {
+                    "reject_reason": "MISSING_REFERENCE",
+                    "retryable": True,
+                },
+            }
+        ],
+    )
+
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    replay_data = handler.send_bundle_to_specific_queue.call_args.args[3]
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    assert replay_data["delivery_id"] == build_child_delivery_id(
+        root_delivery_id,
+        BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
+        1,
+        0,
+    )
+    assert replay_data["parent_delivery_id"] == root_delivery_id
+    assert replay_data["delivery_kind"] == BATCH_DELIVERY_KIND_CHILD
+
+
 def test_handler_reports_retryable_batch_failure_after_replay_budget(monkeypatch):
     handler = build_handler()
     handler.api.stix2.import_bundle_from_json_batch.return_value = (
@@ -502,3 +612,48 @@ def test_handler_requeues_child_bundles_only_for_explicit_split(monkeypatch):
     handler.api.stix2.import_bundle_from_json_batch.assert_not_called()
     handler.api.work.add_expectations.assert_called_once_with("work--1", 2)
     assert handler.send_bundle_to_specific_queue.call_count == 2
+
+
+def test_handler_requeues_v2_split_children_with_stable_sibling_ids(monkeypatch):
+    handler = build_handler()
+    handler.send_bundle_to_specific_queue = MagicMock()
+
+    split_bundles = [
+        {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
+        {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--2"}]},
+    ]
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2Splitter,
+        "split_bundle_with_expectations",
+        lambda *args, **kwargs: (2, [], split_bundles),
+    )
+
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_v2_message(split_bundles=True, work_id="work--1")
+    )
+
+    assert result == "ack"
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    first_child = handler.send_bundle_to_specific_queue.call_args_list[0].args[3]
+    second_child = handler.send_bundle_to_specific_queue.call_args_list[1].args[3]
+    assert first_child["delivery_id"] == build_child_delivery_id(
+        root_delivery_id,
+        BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+        0,
+        0,
+    )
+    assert second_child["delivery_id"] == build_child_delivery_id(
+        root_delivery_id,
+        BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+        0,
+        1,
+    )
+    assert first_child["delivery_id"] != second_child["delivery_id"]
