@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import jsonCanonicalize from 'canonicalize';
 import { FunctionalError } from '../../config/errors';
+import { hashSHA256 } from '../../utils/hash';
 import {
   BatchAdmissionErrorCode,
   BatchAdmissionStatus,
@@ -17,6 +19,14 @@ import { planStixBundleObjects } from './batch-bundle-planner';
 const BUNDLE_PREFIX = 'bundle--';
 const batchContractError = (message: string, code: BatchAdmissionErrorCode, data: Record<string, unknown> = {}) => {
   return FunctionalError(message, { batch_error_code: code, ...data });
+};
+
+const buildPayloadFingerprint = (normalizedBundle: Record<string, any>): string => {
+  const canonicalPayload = jsonCanonicalize(normalizedBundle);
+  if (typeof canonicalPayload !== 'string') {
+    throw batchContractError('Invalid stix bundle payload', BatchAdmissionErrorCode.InvalidBundle);
+  }
+  return hashSHA256(canonicalPayload);
 };
 
 const normalizeBundleId = (bundleId: unknown): string => {
@@ -114,6 +124,28 @@ const normalizeIdempotencyKey = (idempotencyKey: BatchSubmitOptions['idempotency
   return idempotencyKey;
 };
 
+export const hasExplicitBatchIdempotencyKey = (options: BatchSubmitOptions): boolean => {
+  return typeof options.idempotencyKey === 'string' && options.idempotencyKey.length > 0;
+};
+
+export const buildBatchReplayLockId = (connectorId: string, idempotencyKey: string): string => {
+  return `batch-submission:${connectorId}:${hashSHA256(idempotencyKey)}`;
+};
+
+export const assertBatchReplayPayload = (prepared: PreparedBundleSubmission, existingFingerprint: unknown): void => {
+  if (existingFingerprint !== prepared.payloadFingerprint) {
+    throw batchContractError(
+      'Batch idempotency key is already associated with a different payload',
+      BatchAdmissionErrorCode.IdempotencyKeyConflict,
+      {
+        idempotency_key: prepared.idempotencyKey,
+        existing_payload_fingerprint: existingFingerprint,
+        payload_fingerprint: prepared.payloadFingerprint,
+      },
+    );
+  }
+};
+
 export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOptions = {}): PreparedBundleSubmission => {
   if (typeof bundle !== 'string') {
     throw batchContractError('Invalid stix bundle payload', BatchAdmissionErrorCode.InvalidBundle);
@@ -135,6 +167,7 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
   const { executionPreference, executionMode, executionReason, eligibleExecutionModes } = normalizeExecutionPreference(options);
   const waitUntil = normalizeWaitUntil(options.waitUntil);
   const idempotencyKey = normalizeIdempotencyKey(options.idempotencyKey, bundleId);
+  const payloadFingerprint = buildPayloadFingerprint(normalizedBundle);
   let bundlePlan;
   try {
     bundlePlan = planStixBundleObjects(jsonBundle.objects, {
@@ -160,6 +193,7 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
     eligibleExecutionModes,
     waitUntil,
     idempotencyKey,
+    payloadFingerprint,
     cleanupInconsistentBundle: options.cleanupInconsistentBundle === true,
   };
 };

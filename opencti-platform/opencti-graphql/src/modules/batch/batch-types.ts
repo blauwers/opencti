@@ -37,6 +37,7 @@ export enum BatchAdmissionErrorCode {
   InvalidBundleId = 'INVALID_BUNDLE_ID',
   InvalidConnectorId = 'INVALID_CONNECTOR_ID',
   InvalidIdempotencyKey = 'INVALID_IDEMPOTENCY_KEY',
+  IdempotencyKeyConflict = 'IDEMPOTENCY_KEY_CONFLICT',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
   UnsupportedExecutionPreference = 'UNSUPPORTED_EXECUTION_PREFERENCE',
   ExecutionPreferenceNotEligible = 'EXECUTION_PREFERENCE_NOT_ELIGIBLE',
@@ -63,6 +64,7 @@ export interface PreparedBundleSubmission {
   eligibleExecutionModes: BatchExecutionMode[];
   waitUntil: BatchWaitUntil;
   idempotencyKey: string;
+  payloadFingerprint: string;
   cleanupInconsistentBundle: boolean;
 }
 

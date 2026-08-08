@@ -14,7 +14,8 @@ import {
 import { sendStixBundle, submitStixBundle } from '../../../src/domain/stix';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { pushToWorkerForConnector } from '../../../src/database/rabbitmq';
-import { createWork, updateExpectationsNumber } from '../../../src/domain/work';
+import { createWork, findWorkForBatchSubmission, updateExpectationsNumber } from '../../../src/domain/work';
+import { lockResources } from '../../../src/lock/master-lock';
 
 const { mockStoreLoadById } = vi.hoisted(() => ({
   mockStoreLoadById: vi.fn(),
@@ -41,7 +42,16 @@ vi.mock('../../../src/domain/work', async (importOriginal) => {
   return {
     ...actual,
     createWork: vi.fn(),
+    findWorkForBatchSubmission: vi.fn(),
     updateExpectationsNumber: vi.fn(),
+  };
+});
+
+vi.mock('../../../src/lock/master-lock', async (importOriginal) => {
+  const actual: object = await importOriginal();
+  return {
+    ...actual,
+    lockResources: vi.fn(),
   };
 });
 
@@ -52,6 +62,26 @@ const bundle = JSON.stringify({
     { type: 'identity', id: 'identity--11111111-1111-4111-8111-111111111111' },
     { type: 'indicator', id: 'indicator--11111111-1111-4111-8111-111111111111', created_by_ref: 'identity--11111111-1111-4111-8111-111111111111' },
     { type: 'indicator', id: 'indicator--22222222-2222-4222-8222-222222222222', created_by_ref: 'identity--11111111-1111-4111-8111-111111111111' },
+  ],
+});
+
+const reorderedBundle = JSON.stringify({
+  objects: [
+    { id: 'identity--11111111-1111-4111-8111-111111111111', type: 'identity' },
+    { created_by_ref: 'identity--11111111-1111-4111-8111-111111111111', id: 'indicator--11111111-1111-4111-8111-111111111111', type: 'indicator' },
+    { created_by_ref: 'identity--11111111-1111-4111-8111-111111111111', id: 'indicator--22222222-2222-4222-8222-222222222222', type: 'indicator' },
+  ],
+  id: 'bundle--11111111-1111-4111-8111-111111111111',
+  type: 'bundle',
+});
+
+const conflictingBundle = JSON.stringify({
+  type: 'bundle',
+  id: 'bundle--11111111-1111-4111-8111-111111111111',
+  objects: [
+    { type: 'identity', id: 'identity--11111111-1111-4111-8111-111111111111' },
+    { type: 'indicator', id: 'indicator--11111111-1111-4111-8111-111111111111', created_by_ref: 'identity--11111111-1111-4111-8111-111111111111' },
+    { type: 'indicator', id: 'indicator--33333333-3333-4333-8333-333333333333', created_by_ref: 'identity--11111111-1111-4111-8111-111111111111' },
   ],
 });
 
@@ -85,6 +115,15 @@ describe('batch admission contract', () => {
     expect(prepared.executionReason).toBe(BatchExecutionReason.ExplicitLegacySplit);
     expect(prepared.waitUntil).toBe(BatchWaitUntil.Committed);
     expect(prepared.idempotencyKey).toBe('feed-run-2026-08-01');
+  });
+
+  it('fingerprints equivalent normalized payloads consistently while distinguishing conflicting payloads', () => {
+    const first = prepareBundleSubmission(bundle, { idempotencyKey: 'feed-run-2026-08-08' });
+    const reordered = prepareBundleSubmission(reorderedBundle, { idempotencyKey: 'feed-run-2026-08-08' });
+    const conflicting = prepareBundleSubmission(conflictingBundle, { idempotencyKey: 'feed-run-2026-08-08' });
+
+    expect(reordered.payloadFingerprint).toBe(first.payloadFingerprint);
+    expect(conflicting.payloadFingerprint).not.toBe(first.payloadFingerprint);
   });
 
   it('assigns a stable bundle id when a caller omits one', () => {
@@ -225,14 +264,26 @@ describe('batch admission contract', () => {
 });
 
 describe('submitStixBundle', () => {
+  let replayWork: Record<string, unknown> | null;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    replayWork = null;
     mockStoreLoadById.mockResolvedValue({
       id: 'connector-1',
       internal_id: 'connector-1',
       name: 'Connector 1',
     });
-    vi.mocked(createWork).mockResolvedValue({ id: 'work-created' } as any);
+    vi.mocked(findWorkForBatchSubmission).mockImplementation(async () => replayWork as any);
+    vi.mocked(createWork).mockImplementation(async (_context, _user, _connector, _workName, _sourceId, args: any) => {
+      replayWork = {
+        id: 'work-created',
+        batch_idempotency_key: args?.batchSubmission?.idempotencyKey,
+        batch_payload_fingerprint: args?.batchSubmission?.payloadFingerprint,
+      };
+      return replayWork as any;
+    });
+    vi.mocked(lockResources).mockResolvedValue({ unlock: vi.fn() } as any);
   });
 
   it('returns a structured admission and forwards batch metadata to the worker', async () => {
@@ -267,6 +318,41 @@ describe('submitStixBundle', () => {
     expect(createWork).toHaveBeenCalledTimes(1);
     expect(admission.workId).toBe('work-created');
     expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-created', 1);
+  });
+
+  it('reuses one logical admission, work, and publication for an explicit-key replay of the same normalized payload', async () => {
+    const options = { idempotencyKey: 'feed-run-2026-08-08' };
+
+    const firstAdmission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, undefined, options);
+    const replayAdmission = await submitStixBundle(testContext, ADMIN_USER, 'connector-1', reorderedBundle, undefined, options);
+
+    expect(replayAdmission).toMatchObject({
+      batchId: firstAdmission.batchId,
+      bundleId: firstAdmission.bundleId,
+      workId: firstAdmission.workId,
+      idempotencyKey: firstAdmission.idempotencyKey,
+    });
+    expect(createWork).toHaveBeenCalledTimes(1);
+    expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects conflicting normalized payload reuse of an explicit idempotency key before duplicating work or publication', async () => {
+    const options = { idempotencyKey: 'feed-run-2026-08-08' };
+
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, undefined, options);
+
+    await expect(submitStixBundle(testContext, ADMIN_USER, 'connector-1', conflictingBundle, undefined, options))
+      .rejects.toThrowError(expect.objectContaining({
+        extensions: expect.objectContaining({
+          data: expect.objectContaining({
+            batch_error_code: BatchAdmissionErrorCode.IdempotencyKeyConflict,
+          }),
+        }),
+      }));
+    expect(createWork).toHaveBeenCalledTimes(1);
+    expect(updateExpectationsNumber).toHaveBeenCalledTimes(1);
+    expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
   });
 
   it('lets the compatibility mutation request committed-only execution', async () => {

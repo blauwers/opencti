@@ -7,7 +7,7 @@ import { FunctionalError, UnsupportedError } from '../config/errors';
 import { connectorsForExport } from './connector';
 import { findById as findMarkingDefinitionById, markingDefinitionDeleteAndUpdateGroups } from './markingDefinition';
 import { now, observableValue } from '../utils/format';
-import { createWork, updateExpectationsNumber } from './work';
+import { createWork, findWorkForBatchSubmission, updateExpectationsNumber } from './work';
 import { pushToConnector, pushToWorkerForConnector } from '../database/rabbitmq';
 import { isStixDomainObjectShareableContainer } from '../schema/stixDomainObject';
 import { ABSTRACT_STIX_CORE_OBJECT, ABSTRACT_STIX_OBJECT, buildRefRelationKey, CONNECTOR_INTERNAL_EXPORT_FILE, INPUT_GRANTED_REFS } from '../schema/general';
@@ -29,8 +29,16 @@ import { objectOrganization, RELATION_GRANTED_TO } from '../schema/stixRefRelati
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../modules/organization/organization-types';
 import { elFindByIds } from '../database/engine';
 import { addExportGeneratedCount } from '../manager/telemetryManager';
-import { buildBatchAdmission, buildBatchQueueMessage, prepareBundleSubmission } from '../modules/batch/batch-domain';
+import {
+  assertBatchReplayPayload,
+  buildBatchAdmission,
+  buildBatchQueueMessage,
+  buildBatchReplayLockId,
+  hasExplicitBatchIdempotencyKey,
+  prepareBundleSubmission,
+} from '../modules/batch/batch-domain';
 import { BatchExecutionMode } from '../modules/batch/batch-types';
+import { lockResources } from '../lock/master-lock';
 
 export const stixDelete = async (context, user, id, opts = {}) => {
   const element = await internalLoadById(context, user, id);
@@ -70,18 +78,43 @@ export const submitStixBundle = async (
   if (!connector) {
     throw UnsupportedError('Invalid connector', { connectorId });
   }
-  let target_work_id = work_id;
-  if (isEmptyField(work_id)) {
-    const workName = `${connector.name} run @ ${now()}`;
-    const work = await createWork(context, user, connector, workName, connector.internal_id, { receivedTime: now() });
-    target_work_id = work.id;
+  const replayProtected = isEmptyField(work_id) && hasExplicitBatchIdempotencyKey(options);
+  let replayLock;
+  try {
+    if (replayProtected) {
+      replayLock = await lockResources([buildBatchReplayLockId(connectorId, preparedBundle.idempotencyKey)]);
+      const existingWork = await findWorkForBatchSubmission(context, user, connectorId, preparedBundle.idempotencyKey);
+      if (existingWork) {
+        assertBatchReplayPayload(preparedBundle, existingWork.batch_payload_fingerprint);
+        return buildBatchAdmission(connectorId, existingWork.id ?? existingWork.internal_id, preparedBundle);
+      }
+    }
+
+    let target_work_id = work_id;
+    if (isEmptyField(work_id)) {
+      const workName = `${connector.name} run @ ${now()}`;
+      const work = await createWork(context, user, connector, workName, connector.internal_id, {
+        receivedTime: now(),
+        ...(replayProtected ? {
+          batchSubmission: {
+            idempotencyKey: preparedBundle.idempotencyKey,
+            payloadFingerprint: preparedBundle.payloadFingerprint,
+          },
+        } : {}),
+      });
+      target_work_id = work.id;
+    }
+    const admission = buildBatchAdmission(connectorId, target_work_id, preparedBundle);
+    if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
+      await updateExpectationsNumber(context, user, target_work_id, 1);
+    }
+    await pushToWorkerForConnector(connectorId, buildBatchQueueMessage(admission, user.internal_id));
+    return admission;
+  } finally {
+    if (replayLock) {
+      await replayLock.unlock();
+    }
   }
-  const admission = buildBatchAdmission(connectorId, target_work_id, preparedBundle);
-  if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
-    await updateExpectationsNumber(context, user, target_work_id, 1);
-  }
-  await pushToWorkerForConnector(connectorId, buildBatchQueueMessage(admission, user.internal_id));
-  return admission;
 };
 
 export const sendStixBundle = async (

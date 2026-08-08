@@ -81,6 +81,12 @@ export const worksForConnector = async (context, user, connectorId, args = {}) =
   });
 };
 
+export const findWorkForBatchSubmission = async (context, user, connectorId, idempotencyKey) => {
+  const filters = addFilter(null, 'batch_idempotency_key', idempotencyKey);
+  const works = await worksForConnector(context, user, connectorId, { first: 1, filters });
+  return works[0] ?? null;
+};
+
 export const worksForDraft = async (context, user, draftId, args = {}) => {
   const { first = ES_MINIMUM_FIXED_PAGINATION } = args;
   const worksForDraftFilter = {
@@ -223,6 +229,7 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
     background_task_id,
     fileMarkings = [],
     draftContext,
+    batchSubmission,
   } = args;
   const isMultiPartWork = args.isMultiPartWork === true;
   // Create the work and an initial job
@@ -254,6 +261,10 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   };
   if (draftContext) {
     work.draft_context = draftContext;
+  }
+  if (batchSubmission) {
+    work.batch_idempotency_key = batchSubmission.idempotencyKey;
+    work.batch_payload_fingerprint = batchSubmission.payloadFingerprint;
   }
   await elIndex(INDEX_HISTORY, work, { context });
   const createdWork = await loadWorkById(context, user, workId);
