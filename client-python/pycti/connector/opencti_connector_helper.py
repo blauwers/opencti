@@ -2142,7 +2142,9 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             "CONNECTOR_ENRICHMENT_RESOLUTION",
             ["connector", "enrichment_resolution"],
             config,
-            default="none",
+            # New platforms can skip server-side STIX serialization that pycti
+            # rebuilds locally anyway; old platforms still treat this like "none".
+            default="deferred",
         )
         self.bundle_send_to_queue = get_config_variable(
             "CONNECTOR_SEND_TO_QUEUE",

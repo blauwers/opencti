@@ -51,6 +51,8 @@ export const CONNECTOR_INTERNAL_ANALYSIS = 'INTERNAL_ANALYSIS'; // Analysis to s
 export const CONNECTOR_INTERNAL_EXPORT_FILE = 'INTERNAL_EXPORT_FILE'; // Files mime types to generate (application/pdf, ...) -> export-
 export const CONNECTOR_INTERNAL_NOTIFICATION = 'INTERNAL_NOTIFICATION'; // Notifier connectors -> notifier-
 export const CONNECTOR_INTERNAL_INGESTION = 'INTERNAL_INGESTION'; // Currently only used for draft validation
+export const ENRICHMENT_RESOLUTION_STIX_BUNDLE = 'stix_bundle';
+export const ENRICHMENT_RESOLUTION_DEFERRED = 'deferred';
 
 // General UUID
 export const OASIS_NAMESPACE = '00abedb4-aa42-466c-9c01-fed23315a9b7';

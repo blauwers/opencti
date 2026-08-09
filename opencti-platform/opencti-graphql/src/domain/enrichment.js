@@ -5,7 +5,7 @@ import { pushToConnector } from '../database/rabbitmq';
 import { ENTITY_TYPE_CONNECTOR } from '../schema/internalObject';
 import { isStixObject } from '../schema/stixCoreObject';
 import { getEntitiesListFromCache } from '../database/cache';
-import { CONNECTOR_INTERNAL_ENRICHMENT } from '../schema/general';
+import { CONNECTOR_INTERNAL_ENRICHMENT, ENRICHMENT_RESOLUTION_DEFERRED, ENRICHMENT_RESOLUTION_STIX_BUNDLE } from '../schema/general';
 import { isStixMatchFilterGroup } from '../utils/filtering/filtering-stix/stix-filtering';
 import { isFilterGroupNotEmpty } from '../utils/filtering/filtering-utils';
 import { isUserCanAccessStoreElement, SYSTEM_USER } from '../utils/access';
@@ -41,9 +41,9 @@ const publishEventToConnectors = async (context, user, element, targetConnectors
     const workListElement = workList[index];
     const { connector, work } = workListElement;
     let stix_objects = null;
-    const stixResolutionMode = connector.enrichment_resolution ?? 'stix_bundle';
-    const stix_entity = await loadStixEntity();
-    if (stixResolutionMode === 'stix_bundle') {
+    const stixResolutionMode = connector.enrichment_resolution ?? ENRICHMENT_RESOLUTION_STIX_BUNDLE;
+    const stix_entity = stixResolutionMode === ENRICHMENT_RESOLUTION_DEFERRED ? null : await loadStixEntity();
+    if (stixResolutionMode === ENRICHMENT_RESOLUTION_STIX_BUNDLE) {
       stix_objects = await loadStixObjects();
     }
     const message = {

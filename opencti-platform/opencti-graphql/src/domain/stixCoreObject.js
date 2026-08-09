@@ -31,6 +31,8 @@ import {
   buildRefRelationKey,
   CONNECTOR_INTERNAL_ANALYSIS,
   CONNECTOR_INTERNAL_ENRICHMENT,
+  ENRICHMENT_RESOLUTION_DEFERRED,
+  ENRICHMENT_RESOLUTION_STIX_BUNDLE,
   ENTITY_TYPE_CONTAINER,
   INPUT_EXTERNAL_REFS,
   INPUT_MARKINGS,
@@ -387,13 +389,16 @@ export const askElementEnrichmentForConnectors = async (context, user, enrichedI
   const draftContext = getDraftContext(context, user);
   const contextOutOfDraft = { ...context, draft_context: '' };
   let stix_objects;
+  let stix_entity;
   const workMessage = draftContext ? `Manual enrichment in draft ${draftContext}` : 'Manual enrichment';
-  const stix_entity = JSON.stringify(convertStoreToStix_2_1(element));
   const works = [];
   for (let index = 0; index < connectors.length; index += 1) {
     const connector = connectors[index];
-    const stixResolutionMode = connector.enrichment_resolution ?? 'stix_bundle';
-    if (stixResolutionMode === 'stix_bundle' && stix_objects === undefined) {
+    const stixResolutionMode = connector.enrichment_resolution ?? ENRICHMENT_RESOLUTION_STIX_BUNDLE;
+    if (stixResolutionMode !== ENRICHMENT_RESOLUTION_DEFERRED && stix_entity === undefined) {
+      stix_entity = JSON.stringify(convertStoreToStix_2_1(element));
+    }
+    if (stixResolutionMode === ENRICHMENT_RESOLUTION_STIX_BUNDLE && stix_objects === undefined) {
       stix_objects = await stixBundleByIdStringify(context, user, element.entity_type, element.internal_id);
     }
     const work = await createWork(contextOutOfDraft, user, connector, workMessage, element.standard_id, { draftContext });
@@ -409,8 +414,8 @@ export const askElementEnrichmentForConnectors = async (context, user, enrichedI
         event_type: CONNECTOR_INTERNAL_ENRICHMENT,
         entity_id: element.standard_id,
         entity_type: element.entity_type,
-        stix_entity,
-        stix_objects: stixResolutionMode === 'stix_bundle' ? stix_objects : null,
+        stix_entity: stixResolutionMode === ENRICHMENT_RESOLUTION_DEFERRED ? null : stix_entity,
+        stix_objects: stixResolutionMode === ENRICHMENT_RESOLUTION_STIX_BUNDLE ? stix_objects : null,
       },
     };
     await pushToConnector(connector.internal_id, message);
