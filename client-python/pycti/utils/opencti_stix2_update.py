@@ -3,6 +3,8 @@ from pycti.utils.constants import StixCyberObservableTypes
 OBJECT_REF_CREATE_BATCH_SIZE = 100
 EXTERNAL_REFERENCE_RELATION_CREATE_BATCH_SIZE = 100
 KILL_CHAIN_PHASE_RELATION_CREATE_BATCH_SIZE = 100
+LABEL_PREFETCH_BATCH_SIZE = 1000
+LABEL_RELATION_CREATE_BATCH_SIZE = 100
 _OBJECT_REF_ENTITY_ATTRIBUTES = {
     "report": "report",
     "note": "note",
@@ -475,21 +477,124 @@ class OpenCTIStix2Update:
         :param version: Version of the patch format (default: 2)
         :type version: int
         """
+        normalized_labels = [
+            label["value"] if version == 2 else label for label in labels
+        ]
+        if len(normalized_labels) == 0:
+            return
+
+        add_label = self._get_label_adder(entity_type)
+        if len(normalized_labels) == 1 or any(
+            not isinstance(label, str) for label in normalized_labels
+        ):
+            for label in normalized_labels:
+                add_label(id=entity_id, label_name=label)
+            return
+
+        add_many = self._get_label_relation_add_many(entity_type)
+        if add_many is None:
+            for label in normalized_labels:
+                add_label(id=entity_id, label_name=label)
+            return
+
+        prefetched_labels = self._prefetch_patch_labels(normalized_labels)
+        if prefetched_labels is None:
+            for label in normalized_labels:
+                add_label(id=entity_id, label_name=label)
+            return
+
+        pending_label_ids = []
+        for label in normalized_labels:
+            normalized_label = self._normalize_patch_label_value(label)
+            label_data = prefetched_labels.get(normalized_label)
+            if label_data is None:
+                label_data = self.opencti.label.create(value=label)
+                prefetched_labels[normalized_label] = label_data
+            pending_label_ids.append(label_data["id"])
+            if len(pending_label_ids) >= LABEL_RELATION_CREATE_BATCH_SIZE:
+                self._flush_label_relation_batch(
+                    entity_id,
+                    pending_label_ids,
+                    add_label,
+                    add_many,
+                )
+                pending_label_ids = []
+        self._flush_label_relation_batch(
+            entity_id,
+            pending_label_ids,
+            add_label,
+            add_many,
+        )
+
+    def _get_label_adder(self, entity_type):
+        if entity_type == "relationship":
+            return self.opencti.stix_core_relationship.add_label
+        if StixCyberObservableTypes.has_value(entity_type):
+            return self.opencti.stix_cyber_observable.add_label
+        return self.opencti.stix_domain_object.add_label
+
+    def _get_label_relation_add_many(self, entity_type):
+        nested_ref_relationship = getattr(
+            self.opencti, "stix_nested_ref_relationship", None
+        )
+        if entity_type == "relationship":
+            return getattr(
+                nested_ref_relationship, "add_many_to_stix_core_relationship", None
+            )
+        return getattr(nested_ref_relationship, "add_many_to_stix_core_object", None)
+
+    @staticmethod
+    def _normalize_patch_label_value(value):
+        return value.lower().strip() if isinstance(value, str) else value
+
+    def _prefetch_patch_labels(self, labels):
+        if len(labels) <= 1:
+            return None
+
+        unique_labels = []
+        seen_labels = set()
         for label in labels:
-            if version == 2:
-                label = label["value"]
-            if entity_type == "relationship":
-                self.opencti.stix_core_relationship.add_label(
-                    id=entity_id, label_name=label
+            normalized_label = self._normalize_patch_label_value(label)
+            if normalized_label in seen_labels:
+                continue
+            seen_labels.add(normalized_label)
+            unique_labels.append(normalized_label)
+
+        try:
+            prefetched_labels = {}
+            for start_index in range(0, len(unique_labels), LABEL_PREFETCH_BATCH_SIZE):
+                batch_labels = unique_labels[
+                    start_index : start_index + LABEL_PREFETCH_BATCH_SIZE
+                ]
+                label_data_list = (
+                    self.opencti.label.list(
+                        filters={
+                            "mode": "and",
+                            "filters": [{"key": "value", "values": batch_labels}],
+                            "filterGroups": [],
+                        },
+                        first=len(batch_labels),
+                        getAll=True,
+                    )
+                    or []
                 )
-            elif StixCyberObservableTypes.has_value(entity_type):
-                self.opencti.stix_cyber_observable.add_label(
-                    id=entity_id, label_name=label
-                )
-            else:
-                self.opencti.stix_domain_object.add_label(
-                    id=entity_id, label_name=label
-                )
+                for label_data in label_data_list:
+                    prefetched_labels[
+                        self._normalize_patch_label_value(label_data["value"])
+                    ] = label_data
+            return prefetched_labels
+        except Exception:
+            return None
+
+    @staticmethod
+    def _flush_label_relation_batch(entity_id, label_ids, add_label, add_many):
+        if len(label_ids) == 0:
+            return
+        if add_many is None or len(label_ids) == 1:
+            for label_id in label_ids:
+                add_label(id=entity_id, label_id=label_id)
+            return
+        add_many(entity_id, label_ids, "object-label")
 
     def remove_labels(self, entity_type, entity_id, labels, version=2):
         """Remove labels from an entity.
