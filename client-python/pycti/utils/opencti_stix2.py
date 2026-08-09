@@ -996,6 +996,219 @@ class OpenCTIStix2:
             return [tag["value"] for tag in stix_object["x_opencti_tags"]]
         return []
 
+    def _ensure_vocabulary_definition_fields(self) -> List[Dict]:
+        mapping_cache_permanent = self._get_mapping_cache_permanent()
+        vocabulary_definition_fields = mapping_cache_permanent.get(
+            "vocabularies_definition_fields"
+        )
+        if vocabulary_definition_fields is not None:
+            return vocabulary_definition_fields
+
+        query = """
+                query getVocabCategories {
+                  vocabularyCategories {
+                    key
+                    entity_types
+                    fields{
+                      key
+                      required
+                      multiple
+                    }
+                  }
+                }
+            """
+        result = self.opencti.query(query)
+        vocabulary_definition_fields = []
+        for category in result["data"]["vocabularyCategories"]:
+            for field in category["fields"]:
+                vocabulary_definition_fields.append(
+                    {
+                        "key": field["key"],
+                        "required": field["required"],
+                        "multiple": field.get("multiple"),
+                        "category": category["key"],
+                        "entity_types": category.get("entity_types") or [],
+                    }
+                )
+        mapping_cache_permanent["vocabularies_definition_fields"] = (
+            vocabulary_definition_fields
+        )
+        return vocabulary_definition_fields
+
+    def _get_import_vocabulary_fields(
+        self,
+        stix_object: Dict,
+        vocabulary_definition_fields: Optional[List[Dict]] = None,
+    ) -> List[Dict]:
+        if vocabulary_definition_fields is None:
+            vocabulary_definition_fields = self._ensure_vocabulary_definition_fields()
+        if not vocabulary_definition_fields:
+            return []
+
+        stix_object_entity_type = (
+            stix_object.get("x_opencti_type")
+            or self.opencti.get_attribute_in_extension("type", stix_object)
+            or stix_object.get("type")
+        )
+        normalized_stix_object_entity_type = (
+            stix_object_entity_type.lower()
+            if isinstance(stix_object_entity_type, str)
+            else None
+        )
+        return [
+            field
+            for field in vocabulary_definition_fields
+            if field["key"] in stix_object
+            and (
+                not field.get("entity_types")
+                or normalized_stix_object_entity_type
+                in [entity_type.lower() for entity_type in field["entity_types"]]
+            )
+        ]
+
+    @staticmethod
+    def _get_import_vocabulary_cache_key(
+        vocabulary_value: str, vocabulary_category: Optional[str]
+    ) -> str:
+        return (
+            f"vocab_{vocabulary_category}_{vocabulary_value}"
+            if vocabulary_category is not None
+            else "vocab_" + vocabulary_value
+        )
+
+    def _prefetch_import_vocabularies(self, stix_objects: Iterable[Dict]) -> None:
+        mapping_cache_permanent = self._get_mapping_cache_permanent()
+        vocabulary_definition_fields = None
+        uncached_vocabulary_values = []
+        seen_vocabulary_values = set()
+        requested_categories_by_value = {}
+        try:
+            for stix_object in stix_objects:
+                if vocabulary_definition_fields is None:
+                    vocabulary_definition_fields = (
+                        self._ensure_vocabulary_definition_fields()
+                    )
+                for field in self._get_import_vocabulary_fields(
+                    stix_object, vocabulary_definition_fields
+                ):
+                    vocabulary_value = stix_object.get(field["key"])
+                    if vocabulary_value is None:
+                        continue
+                    if (
+                        hasattr(vocabulary_value, "__len__")
+                        and len(vocabulary_value) == 0
+                    ):
+                        continue
+                    values = (
+                        vocabulary_value
+                        if isinstance(vocabulary_value, list)
+                        else [vocabulary_value]
+                    )
+                    vocabulary_category = field.get("category")
+                    for value in values:
+                        cache_key = self._get_import_vocabulary_cache_key(
+                            value, vocabulary_category
+                        )
+                        if cache_key in mapping_cache_permanent:
+                            continue
+                        requested_categories_by_value.setdefault(value, set()).add(
+                            vocabulary_category
+                        )
+                        if value not in seen_vocabulary_values:
+                            seen_vocabulary_values.add(value)
+                            uncached_vocabulary_values.append(value)
+
+            if len(uncached_vocabulary_values) <= 1:
+                return
+
+            for start_index in range(
+                0, len(uncached_vocabulary_values), IMPORT_PREFETCH_BATCH_SIZE
+            ):
+                batch_vocabulary_values = uncached_vocabulary_values[
+                    start_index : start_index + IMPORT_PREFETCH_BATCH_SIZE
+                ]
+                vocabulary_data_list = (
+                    self.opencti.vocabulary.list(
+                        filters={
+                            "mode": "and",
+                            "filters": [
+                                {
+                                    "key": "name",
+                                    "values": batch_vocabulary_values,
+                                }
+                            ],
+                            "filterGroups": [],
+                        },
+                        first=IMPORT_PREFETCH_BATCH_SIZE,
+                        getAll=True,
+                    )
+                    or []
+                )
+                batch_candidates_by_normalized_value = {}
+                for vocabulary_value in batch_vocabulary_values:
+                    normalized_vocabulary_value = self._normalize_import_prefetch_value(
+                        vocabulary_value
+                    )
+                    batch_candidates_by_normalized_value.setdefault(
+                        normalized_vocabulary_value, []
+                    ).extend(
+                        (vocabulary_value, vocabulary_category)
+                        for vocabulary_category in requested_categories_by_value.get(
+                            vocabulary_value, {None}
+                        )
+                    )
+                for vocabulary_data in vocabulary_data_list:
+                    vocabulary_name = vocabulary_data["name"]
+                    matching_candidates = batch_candidates_by_normalized_value.get(
+                        self._normalize_import_prefetch_value(vocabulary_name), []
+                    )
+                    vocabulary_category = (
+                        (vocabulary_data.get("category") or {}).get("key")
+                        if isinstance(vocabulary_data, dict)
+                        else None
+                    )
+                    response_has_category = vocabulary_category is not None
+                    if vocabulary_category is None:
+                        requested_categories = {
+                            category for _, category in matching_candidates
+                        }
+                        if len(requested_categories) != 1:
+                            continue
+                        vocabulary_category = next(iter(requested_categories))
+                    mapping_cache_permanent[
+                        self._get_import_vocabulary_cache_key(
+                            vocabulary_name, vocabulary_category
+                        )
+                    ] = vocabulary_data
+                    if not response_has_category:
+                        mapping_cache_permanent["vocab_" + vocabulary_name] = (
+                            vocabulary_data
+                        )
+                    for (
+                        matching_vocabulary_value,
+                        matching_vocabulary_category,
+                    ) in matching_candidates:
+                        if (
+                            vocabulary_category is not None
+                            and matching_vocabulary_category is not None
+                            and matching_vocabulary_category != vocabulary_category
+                        ):
+                            continue
+                        mapping_cache_permanent[
+                            self._get_import_vocabulary_cache_key(
+                                matching_vocabulary_value,
+                                matching_vocabulary_category,
+                            )
+                        ] = vocabulary_data
+                        if not response_has_category:
+                            mapping_cache_permanent[
+                                "vocab_" + matching_vocabulary_value
+                            ] = vocabulary_data
+        except Exception:
+            self.opencti.app_logger.warning(
+                "Cannot prefetch vocabularies during bundle import"
+            )
+
     def _prefetch_import_labels(self, stix_objects: Iterable[Dict]) -> None:
         uncached_label_values = []
         seen_label_values = set()
@@ -1248,58 +1461,7 @@ class OpenCTIStix2:
         # Open vocabularies
         object_open_vocabularies = {}
         mapping_cache_permanent = self._get_mapping_cache_permanent()
-        if mapping_cache_permanent.get("vocabularies_definition_fields") is None:
-            mapping_cache_permanent["vocabularies_definition_fields"] = []
-            query = """
-                    query getVocabCategories {
-                      vocabularyCategories {
-                        key
-                        entity_types
-                        fields{
-                          key
-                          required
-                          multiple
-                        }
-                      }
-                    }
-                """
-            result = self.opencti.query(query)
-            for category in result["data"]["vocabularyCategories"]:
-                for field in category["fields"]:
-                    mapping_cache_permanent["vocabularies_definition_fields"].append(
-                        {
-                            "key": field["key"],
-                            "required": field["required"],
-                            "multiple": field["multiple"],
-                            "category": category["key"],
-                            "entity_types": category["entity_types"],
-                        }
-                    )
-
-        # Open vocabulary field keys can exist on multiple entity types (for example: `roles`).
-        # We only resolve vocabularies for the current object entity type to avoid overriding
-        # values with unrelated categories.
-        stix_object_entity_type = (
-            stix_object.get("x_opencti_type")
-            or self.opencti.get_attribute_in_extension("type", stix_object)
-            or stix_object.get("type")
-        )
-        normalized_stix_object_entity_type = (
-            stix_object_entity_type.lower()
-            if isinstance(stix_object_entity_type, str)
-            else None
-        )
-
-        vocabulary_fields = [
-            field
-            for field in mapping_cache_permanent["vocabularies_definition_fields"]
-            if field["key"] in stix_object
-            and (
-                normalized_stix_object_entity_type
-                in [entity_type.lower() for entity_type in field["entity_types"]]
-                or not field["entity_types"]
-            )
-        ]
+        vocabulary_fields = self._get_import_vocabulary_fields(stix_object)
 
         if vocabulary_fields:
             for f in vocabulary_fields:
@@ -4498,6 +4660,7 @@ class OpenCTIStix2:
                 ordered_elements,
             ) = backend_preparation
         self._prefetch_import_external_references(ordered_elements)
+        self._prefetch_import_vocabularies(ordered_elements)
         self._prefetch_import_labels(ordered_elements)
         backend_execution_phases = self._build_backend_execution_phases(
             backend_batch_plan

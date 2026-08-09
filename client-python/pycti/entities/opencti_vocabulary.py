@@ -64,35 +64,76 @@ class Vocabulary:
 
         :param filters: the filters to apply
         :type filters: dict
+        :param first: return the first n rows from the after ID (or the beginning if not set)
+        :type first: int
+        :param after: ID of the first row for pagination
+        :type after: str
+        :param getAll: whether to retrieve all results
+        :type getAll: bool
+        :param withPagination: whether to include pagination info
+        :type withPagination: bool
         :return: List of Vocabulary objects
         :rtype: list
         """
         filters = kwargs.get("filters", None)
+        first = kwargs.get("first", 500)
+        after = kwargs.get("after", None)
+        get_all = kwargs.get("getAll", False)
+        with_pagination = kwargs.get("withPagination", False)
         self.opencti.app_logger.info(
             "Listing Vocabularies with filters", {"filters": json.dumps(filters)}
         )
         query = (
             """
-                    query Vocabularies($filters: FilterGroup) {
-                        vocabularies(filters: $filters) {
+                    query Vocabularies($filters: FilterGroup, $first: Int, $after: ID) {
+                        vocabularies(filters: $filters, first: $first, after: $after) {
                             edges {
                                 node {
                                     """
             + self.properties
             + """
+                            }
+                        }
+                        pageInfo {
+                            startCursor
+                            endCursor
+                            hasNextPage
+                            hasPreviousPage
+                            globalCount
                         }
                     }
                 }
-            }
         """
         )
         result = self.opencti.query(
             query,
             {
                 "filters": filters,
+                "first": first,
+                "after": after,
             },
         )
-        return self.opencti.process_multiple(result["data"]["vocabularies"])
+        if get_all:
+            final_data = []
+            data = self.opencti.process_multiple(result["data"]["vocabularies"])
+            final_data = final_data + data
+            while result["data"]["vocabularies"]["pageInfo"]["hasNextPage"]:
+                after = result["data"]["vocabularies"]["pageInfo"]["endCursor"]
+                self.opencti.app_logger.debug("Listing Vocabularies", {"after": after})
+                result = self.opencti.query(
+                    query,
+                    {
+                        "filters": filters,
+                        "first": first,
+                        "after": after,
+                    },
+                )
+                data = self.opencti.process_multiple(result["data"]["vocabularies"])
+                final_data = final_data + data
+            return final_data
+        return self.opencti.process_multiple(
+            result["data"]["vocabularies"], with_pagination
+        )
 
     def read(self, **kwargs):
         """Read a Vocabulary object.
