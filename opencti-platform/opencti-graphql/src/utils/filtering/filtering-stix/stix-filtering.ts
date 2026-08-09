@@ -45,6 +45,40 @@ export const validateFilterGroupForStixMatch = (filterGroup: FilterGroup) => {
 // ----------------------------------------------------------------------------------------------------------------------
 // STIX MATCH
 
+export type PreparedStixFilterMatchFn = (
+  stix: any,
+  eventContext?: FilterEventContext,
+) => Promise<boolean>;
+
+const buildPreparedStixMatchFilterGroup = (
+  context: AuthContext,
+  user: AuthUser,
+  filterGroup: FilterGroup | undefined,
+  resolutionMap: FilterResolutionMap,
+): PreparedStixFilterMatchFn => {
+  let resolvedFilterGroupPromise: Promise<FilterGroup> | undefined;
+
+  return async (stix: any, eventContext?: FilterEventContext): Promise<boolean> => {
+    // first check: user access right to the element (according to markings, organization, etc.)
+    const isUserHasAccessToElement = await isUserCanAccessStixElement(context, user, stix);
+    if (!isUserHasAccessToElement) {
+      return false;
+    }
+
+    // if no filters and the user has access: the stix always match
+    if (!filterGroup) return true;
+
+    // replace the ids in values if necessary, to adapt to the stix format
+    if (!resolvedFilterGroupPromise) {
+      resolvedFilterGroupPromise = resolveFilterGroup(context, user, filterGroup, resolutionMap);
+    }
+    const resolvedFilterGroup = await resolvedFilterGroupPromise;
+
+    // then call our boolean engine on the filter group using the stix testers
+    return testFilterGroup(stix, resolvedFilterGroup, FILTER_KEY_TESTERS_MAP, eventContext);
+  };
+};
+
 /**
  * Middleware function that allow us to make unit tests by mocking the resolution map.
  * This is necessary because the map is built thanks to the cache, not available in unit tests.
@@ -62,20 +96,35 @@ export const isStixMatchFilterGroup_MockableForUnitTests = async (
   // This check should thus not fail here, theoretically.
   if (filterGroup) validateFilterGroupForStixMatch(filterGroup);
 
-  // first check: user access right to the element (according to markings, organization, etc.)
-  const isUserHasAccessToElement = await isUserCanAccessStixElement(context, user, stix);
-  if (!isUserHasAccessToElement) {
-    return false;
-  }
+  const preparedMatcher = buildPreparedStixMatchFilterGroup(context, user, filterGroup, resolutionMap);
+  return preparedMatcher(stix, eventContext);
+};
 
-  // if no filters and the user has access: the stix always match
-  if (!filterGroup) return true;
+/**
+ * Prepare the request-scoped work needed to match one filter group against multiple stix objects.
+ *
+ * The returned matcher still checks access rights for each stix object. Filter resolution is delayed
+ * until the first accessible object so callers that never evaluate an object keep the existing
+ * short-circuit behavior.
+ */
+export const prepareStixMatchFilterGroup = async (
+  context: AuthContext,
+  user: AuthUser,
+  filterGroup?: FilterGroup,
+): Promise<PreparedStixFilterMatchFn> => {
+  // resolve some of the ids as we filter on their corresponding values or standard-id for instance
+  // the provided map will contain replacements for filter values, if any necessary.
+  // we use the entities stored in cache for the "Resolved-Filters" (all the entities used by the saved filters - stream, trigger, playbooks)
+  // see cacheManager.ts:platformResolvedFilters
+  const cache = await getEntitiesMapFromCache<StixObject>(context, SYSTEM_USER, ENTITY_TYPE_RESOLVED_FILTERS);
+  const map = filterGroup ? await buildResolutionMapForFilterGroup(context, user, filterGroup, cache) : new Map();
 
-  // replace the ids in values if necessary, to adapt to the stix format
-  const resolvedFilterGroup = await resolveFilterGroup(context, user, filterGroup, resolutionMap);
+  // we are limited to certain filter keys right now, so better throw an explicit error if a key is not compatible
+  // Note that similar check is done when saving a filter in stream, taxii, feed, or playbook node.
+  // This check should thus not fail here, theoretically.
+  if (filterGroup) validateFilterGroupForStixMatch(filterGroup);
 
-  // then call our boolean engine on the filter group using the stix testers
-  return testFilterGroup(stix, resolvedFilterGroup, FILTER_KEY_TESTERS_MAP, eventContext);
+  return buildPreparedStixMatchFilterGroup(context, user, filterGroup, map);
 };
 
 /**
@@ -98,12 +147,6 @@ export const isStixMatchFilterGroup = async (
   filterGroup?: FilterGroup,
   eventContext?: FilterEventContext,
 ): Promise<boolean> => {
-  // resolve some of the ids as we filter on their corresponding values or standard-id for instance
-  // the provided map will contain replacements for filter values, if any necessary.
-  // we use the entities stored in cache for the "Resolved-Filters" (all the entities used by the saved filters - stream, trigger, playbooks)
-  // see cacheManager.ts:platformResolvedFilters
-  const cache = await getEntitiesMapFromCache<StixObject>(context, SYSTEM_USER, ENTITY_TYPE_RESOLVED_FILTERS);
-  const map = filterGroup ? await buildResolutionMapForFilterGroup(context, user, filterGroup, cache) : new Map();
-
-  return isStixMatchFilterGroup_MockableForUnitTests(context, user, stix, filterGroup, map, eventContext);
+  const preparedMatcher = await prepareStixMatchFilterGroup(context, user, filterGroup);
+  return preparedMatcher(stix, eventContext);
 };

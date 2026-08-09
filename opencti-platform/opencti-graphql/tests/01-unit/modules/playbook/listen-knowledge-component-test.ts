@@ -21,6 +21,11 @@ const buildPlaybook = (componentId: string, configuration: object, playbookStart
   }),
 } as unknown as BasicStoreEntityPlaybook);
 
+const buildPlaybookWithFilters = () => buildPlaybook(
+  'PLAYBOOK_INTERNAL_DATA_STREAM',
+  { canEnrollManually: true, filters: JSON.stringify(emptyFilterGroup) },
+);
+
 const buildStixEntity = (internalId: string) => ({
   id: `malware--${internalId}`,
   type: 'malware',
@@ -259,6 +264,33 @@ describe('findPlaybooksForEnrollment', () => {
 
     expect(stixLoadSpy).not.toHaveBeenCalled();
   });
+
+  it('should not prepare filters when no entities are loaded', async () => {
+    vi.spyOn(cache, 'getEntitiesListFromCache').mockResolvedValue([buildPlaybookWithFilters()]);
+    const prepareSpy = vi.spyOn(stixFiltering, 'prepareStixMatchFilterGroup');
+
+    await findPlaybooksForEnrollment(testContext, SYSTEM_USER, []);
+
+    expect(prepareSpy).not.toHaveBeenCalled();
+  });
+
+  it('should prepare a playbook filter once and reuse it for every entity', async () => {
+    const playbook = buildPlaybookWithFilters();
+    const entities = [buildStixEntity('id-1'), buildStixEntity('id-2')];
+    vi.spyOn(cache, 'getEntitiesListFromCache').mockResolvedValue([playbook]);
+    vi.spyOn(middleware, 'stixLoadByIds').mockResolvedValue(entities as never);
+    const preparedMatcher = vi.fn().mockResolvedValue(true);
+    const prepareSpy = vi.spyOn(stixFiltering, 'prepareStixMatchFilterGroup').mockResolvedValue(preparedMatcher as never);
+
+    const result = await findPlaybooksForEnrollment(testContext, SYSTEM_USER, ['id-1', 'id-2']);
+
+    expect(result).toEqual([playbook]);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    expect(prepareSpy).toHaveBeenCalledWith(testContext, SYSTEM_USER, emptyFilterGroup);
+    expect(preparedMatcher).toHaveBeenCalledTimes(2);
+    expect(preparedMatcher).toHaveBeenNthCalledWith(1, entities[0]);
+    expect(preparedMatcher).toHaveBeenNthCalledWith(2, entities[1]);
+  });
 });
 
 describe('findPlaybooksForEnrollmentByFilters', () => {
@@ -315,33 +347,39 @@ describe('findPlaybooksForEnrollmentByFilters', () => {
     const playbook = buildPlaybook('PLAYBOOK_INTERNAL_DATA_STREAM', { canEnrollManually: true });
     vi.spyOn(cache, 'getEntitiesListFromCache').mockResolvedValue([playbook]);
     vi.spyOn(middleware, 'stixLoadByFilters').mockResolvedValue([buildStixEntity('id-1')] as never);
-    const isStixMatchFilterGroupSpy = vi.spyOn(stixFiltering, 'isStixMatchFilterGroup');
+    const prepareSpy = vi.spyOn(stixFiltering, 'prepareStixMatchFilterGroup');
 
     const result = await findPlaybooksForEnrollmentByFilters(testContext, SYSTEM_USER, null, null, []);
 
     expect(result).toEqual([playbook]);
-    expect(isStixMatchFilterGroupSpy).not.toHaveBeenCalled();
+    expect(prepareSpy).not.toHaveBeenCalled();
   });
 
-  it('should return matching playbooks when entity passes playbook filters', async () => {
-    vi.spyOn(cache, 'getEntitiesListFromCache').mockResolvedValue([
-      buildPlaybook('PLAYBOOK_INTERNAL_DATA_STREAM', { canEnrollManually: true }),
-    ]);
-    vi.spyOn(middleware, 'stixLoadByFilters').mockResolvedValue([buildStixEntity('id-1')] as never);
-    vi.spyOn(stixFiltering, 'isStixMatchFilterGroup').mockResolvedValue(true);
+  it('should prepare a playbook filter once and reuse it for every filtered entity', async () => {
+    const playbook = buildPlaybookWithFilters();
+    const entities = [buildStixEntity('id-1'), buildStixEntity('id-2')];
+    vi.spyOn(cache, 'getEntitiesListFromCache').mockResolvedValue([playbook]);
+    vi.spyOn(middleware, 'stixLoadByFilters').mockResolvedValue(entities as never);
+    const preparedMatcher = vi.fn().mockResolvedValue(true);
+    const prepareSpy = vi.spyOn(stixFiltering, 'prepareStixMatchFilterGroup').mockResolvedValue(preparedMatcher as never);
 
     const result = await findPlaybooksForEnrollmentByFilters(testContext, SYSTEM_USER, null, null, []);
 
-    expect(result).toHaveLength(1);
+    expect(result).toEqual([playbook]);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    expect(prepareSpy).toHaveBeenCalledWith(testContext, SYSTEM_USER, emptyFilterGroup);
+    expect(preparedMatcher).toHaveBeenCalledTimes(2);
+    expect(preparedMatcher).toHaveBeenNthCalledWith(1, entities[0]);
+    expect(preparedMatcher).toHaveBeenNthCalledWith(2, entities[1]);
   });
 
   it('should return empty when entity does not pass playbook filters', async () => {
-    const filters = JSON.stringify(emptyFilterGroup);
     vi.spyOn(cache, 'getEntitiesListFromCache').mockResolvedValue([
-      buildPlaybook('PLAYBOOK_INTERNAL_DATA_STREAM', { canEnrollManually: true, filters }),
+      buildPlaybookWithFilters(),
     ]);
     vi.spyOn(middleware, 'stixLoadByFilters').mockResolvedValue([buildStixEntity('id-1')] as never);
-    vi.spyOn(stixFiltering, 'isStixMatchFilterGroup').mockResolvedValue(false);
+    const preparedMatcher = vi.fn().mockResolvedValue(false);
+    vi.spyOn(stixFiltering, 'prepareStixMatchFilterGroup').mockResolvedValue(preparedMatcher as never);
 
     const result = await findPlaybooksForEnrollmentByFilters(testContext, SYSTEM_USER, null, null, []);
 

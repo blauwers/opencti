@@ -30,7 +30,7 @@ import xtmOneClient from '../xtm/one/xtm-one-client';
 import { getEnrollmentEligibility, excludeEntitiesByIds, matchPlaybooksToEntities, type StixFilterMatchFn, ENROLLMENT_PLAYBOOK_EVALUATION_LIMIT } from './playbook-enrollment';
 import { FunctionalError, UnsupportedError } from '../../config/errors';
 import { type BasicStoreEntityOrganization, ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
-import { isStixMatchFilterGroup } from '../../utils/filtering/filtering-stix/stix-filtering';
+import { isStixMatchFilterGroup, prepareStixMatchFilterGroup, type PreparedStixFilterMatchFn } from '../../utils/filtering/filtering-stix/stix-filtering';
 import { registerConnectorQueues, unregisterConnector } from '../../database/rabbitmq';
 import { getEntitiesListFromCache } from '../../database/cache';
 import { SYSTEM_USER } from '../../utils/access';
@@ -93,6 +93,20 @@ const getEligiblePlaybooksForEnrollment = async (context: AuthContext) => {
   return playbooks.map(getEnrollmentEligibility).filter((e): e is NonNullable<typeof e> => e !== null);
 };
 
+const createEnrollmentFilterMatcher = (context: AuthContext): StixFilterMatchFn => {
+  const preparedMatchers = new WeakMap<FilterGroup, Promise<PreparedStixFilterMatchFn>>();
+
+  return async (entity, filterGroup) => {
+    let preparedMatcherPromise = preparedMatchers.get(filterGroup);
+    if (!preparedMatcherPromise) {
+      preparedMatcherPromise = prepareStixMatchFilterGroup(context, SYSTEM_USER, filterGroup);
+      preparedMatchers.set(filterGroup, preparedMatcherPromise);
+    }
+    const preparedMatcher = await preparedMatcherPromise;
+    return preparedMatcher(entity);
+  };
+};
+
 export const findPlaybooksForEnrollment = async (
   context: AuthContext,
   user: AuthUser,
@@ -103,7 +117,7 @@ export const findPlaybooksForEnrollment = async (
   if (eligible.length === 0) return [];
   const cappedIds = ids.slice(0, ENROLLMENT_PLAYBOOK_EVALUATION_LIMIT);
   const stixEntities = await stixLoadByIds(context, user, cappedIds);
-  const isEntityMatchingFilterGroup: StixFilterMatchFn = (entity, filters) => isStixMatchFilterGroup(context, SYSTEM_USER, entity, filters);
+  const isEntityMatchingFilterGroup = createEnrollmentFilterMatcher(context);
   return matchPlaybooksToEntities(eligible, stixEntities, isEntityMatchingFilterGroup);
 };
 
@@ -124,7 +138,7 @@ export const findPlaybooksForEnrollmentByFilters = async (
   });
   const filteredEntities = excludeEntitiesByIds(stixEntities, excludedIds);
   if (filteredEntities.length === 0) return [];
-  const isEntityMatchingFilterGroup: StixFilterMatchFn = (entity, filterGroup) => isStixMatchFilterGroup(context, SYSTEM_USER, entity, filterGroup);
+  const isEntityMatchingFilterGroup = createEnrollmentFilterMatcher(context);
   return matchPlaybooksToEntities(eligible, filteredEntities, isEntityMatchingFilterGroup);
 };
 
