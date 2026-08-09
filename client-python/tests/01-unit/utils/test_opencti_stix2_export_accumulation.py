@@ -171,6 +171,21 @@ def _relationship_from_root(identifier, root_identifier, target_identifier):
     return relationship
 
 
+def _raw_relationship_from_root(identifier, root_identifier, target_identifier):
+    relationship = _relationship_from_root(
+        identifier, root_identifier, target_identifier
+    )
+    relationship["standard_id"] = relationship["id"]
+    relationship["id"] = relationship.pop("x_opencti_id")
+    relationship["entity_type"] = "uses"
+    relationship["parent_types"] = [
+        "basic-relationship",
+        "stix-relationship",
+        "stix-core-relationship",
+    ]
+    return relationship
+
+
 def _relationship_root(identifier):
     return {
         "id": f"relationship--root-{identifier}",
@@ -857,6 +872,168 @@ def test_export_list_prefetches_unique_top_level_related_object_exports_across_r
             "first": EXPORT_PREFETCH_BATCH_SIZE,
             "getAll": True,
         }
+    ]
+
+
+def test_export_selected_prefetches_nested_refs_for_raw_top_level_relationships_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _raw_relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, 4)
+        }
+    )
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": _related_object_data(f"target-{index}")
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {
+                        "key": "fromId",
+                        "values": [
+                            "internal-relationship--1",
+                            "internal-relationship--2",
+                            "internal-relationship--3",
+                            "target-target-1",
+                            "target-target-2",
+                            "target-target-3",
+                        ],
+                    }
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+    ]
+
+
+def test_export_list_prefetches_nested_refs_for_raw_top_level_relationships_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            "root-1": [
+                _raw_relationship_from_root("relationship--1", "root-1", "target-1")
+            ]
+        }
+    )
+    helper.opencti.stix_sighting_relationship = _CountingSightingRelationshipCollection(
+        {"root-2": [_raw_relationship_from_root("sighting--2", "root-2", "target-2")]}
+    )
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    lister = _CountingRelatedObjectLister(
+        {
+            "target-target-1": _related_object_data("target-1"),
+            "target-target-2": _related_object_data("target-2"),
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+    helper.export_entities_list = lambda **_kwargs: _root_entities(2)
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_list(entity_type="Indicator", mode="full")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [{"key": "fromId", "values": ["root-1", "root-2"]}],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {
+                        "key": "fromId",
+                        "values": [
+                            "internal-relationship--1",
+                            "internal-sighting--2",
+                            "target-target-1",
+                            "target-target-2",
+                        ],
+                    }
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+    ]
+
+
+def test_export_selected_prefetches_raw_top_level_relationship_nested_refs_without_lister():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _raw_relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, 3)
+        }
+    )
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    targets_by_id = {
+        f"target-target-{index}": _related_object_data(f"target-{index}")
+        for index in range(1, 3)
+    }
+    helper.get_lister = lambda resolve_type: None
+    helper.get_reader = lambda resolve_type: lambda filters: targets_by_id[filters]
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_selected(entities_list=_root_entities(2), mode="full")
+
+    assert [
+        kwargs["filters"]["filters"][0]["values"]
+        for kwargs in nested_ref_relationships.kwargs[:2]
+    ] == [
+        ["root-1", "root-2"],
+        ["internal-relationship--1", "internal-relationship--2"],
+    ]
+    assert nested_ref_relationships.kwargs[2:] == [
+        {"fromId": "target-target-1", "filters": None, "getAll": True},
+        {"fromId": "target-target-2", "filters": None, "getAll": True},
     ]
 
 
