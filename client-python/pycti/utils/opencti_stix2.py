@@ -11,6 +11,7 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
+from functools import wraps
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urljoin, urlparse
 
@@ -115,6 +116,18 @@ bundles_success_counter = meter.create_counter(
 )
 
 
+def _scope_missing_import_label_values(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        token = self._missing_import_label_values.set(set())
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._missing_import_label_values.reset(token)
+
+    return wrapped
+
+
 class OpenCTIStix2:
     """Python API for Stix2 in OpenCTI.
 
@@ -141,6 +154,10 @@ class OpenCTIStix2:
         )
         self._batch_mapping_cache_permanent = ContextVar(
             f"opencti_stix2_batch_mapping_cache_permanent_{id(self)}",
+            default=None,
+        )
+        self._missing_import_label_values = ContextVar(
+            f"opencti_stix2_missing_import_label_values_{id(self)}",
             default=None,
         )
 
@@ -959,6 +976,10 @@ class OpenCTIStix2:
             self.set_in_cache(name, author)
             return author
 
+    @staticmethod
+    def _normalize_import_prefetch_value(value):
+        return value.lower().strip() if isinstance(value, str) else value
+
     def _get_import_label_values(self, stix_object: Dict) -> List[str]:
         if "labels" in stix_object:
             return stix_object["labels"] or []
@@ -978,6 +999,7 @@ class OpenCTIStix2:
     def _prefetch_import_labels(self, stix_objects: Iterable[Dict]) -> None:
         uncached_label_values = []
         seen_label_values = set()
+        missing_label_values = self._missing_import_label_values.get()
         for stix_object in stix_objects:
             for label_value in self._get_import_label_values(stix_object):
                 if (
@@ -1014,9 +1036,36 @@ class OpenCTIStix2:
                     )
                     or []
                 )
+                batch_label_values_by_normalized_value = {}
+                for label_value in batch_label_values:
+                    normalized_label_value = self._normalize_import_prefetch_value(
+                        label_value
+                    )
+                    batch_label_values_by_normalized_value.setdefault(
+                        normalized_label_value, []
+                    ).append(label_value)
+                existing_label_values = set()
                 for label_data in label_data_list:
                     self.set_in_cache("label_" + label_data["value"], label_data)
+                    normalized_label_value = self._normalize_import_prefetch_value(
+                        label_data["value"]
+                    )
+                    for (
+                        matching_label_value
+                    ) in batch_label_values_by_normalized_value.get(
+                        normalized_label_value, []
+                    ):
+                        existing_label_values.add(matching_label_value)
+                        self.set_in_cache("label_" + matching_label_value, label_data)
+                if missing_label_values is not None:
+                    missing_label_values.update(
+                        label_value
+                        for label_value in batch_label_values
+                        if label_value not in existing_label_values
+                    )
         except Exception:
+            if missing_label_values is not None:
+                missing_label_values.clear()
             self.opencti.app_logger.warning(
                 "Cannot prefetch labels during bundle import"
             )
@@ -1140,6 +1189,28 @@ class OpenCTIStix2:
             self.opencti.app_logger.warning(
                 "Cannot prefetch external references during bundle import"
             )
+
+    def _resolve_import_label(
+        self, label: str, color: Optional[str] = None
+    ) -> Optional[Dict]:
+        label_key = "label_" + label
+        label_data = self.get_in_cache(label_key)
+        if label_data is None:
+            label_kwargs = {"value": label}
+            if color is not None:
+                label_kwargs["color"] = color
+            missing_label_values = self._missing_import_label_values.get()
+            if missing_label_values is not None and label in missing_label_values:
+                try:
+                    label_data = self.opencti.label.create(**label_kwargs)
+                except ValueError:
+                    label_data = None
+            else:
+                # Fail in label creation is allowed
+                label_data = self.opencti.label.read_or_create_unchecked(**label_kwargs)
+        if label_data is not None:
+            self.set_in_cache(label_key, label_data)
+        return label_data
 
     def extract_embedded_relationships(
         self, stix_object: Dict, types: List = None
@@ -1270,47 +1341,20 @@ class OpenCTIStix2:
             )
         if "labels" in stix_object:
             for label in stix_object["labels"]:
-                label_key = "label_" + label
-                label_in_cache = self.get_in_cache(label_key)
-                if label_in_cache is not None:
-                    label_data = label_in_cache
-                else:
-                    # Fail in label creation is allowed
-                    label_data = self.opencti.label.read_or_create_unchecked(
-                        value=label
-                    )
+                label_data = self._resolve_import_label(label)
                 if label_data is not None:
-                    self.set_in_cache(label_key, label_data)
                     object_label_ids.append(label_data["id"])
         elif "x_opencti_labels" in stix_object:
             for label in stix_object["x_opencti_labels"]:
-                label_key = "label_" + label
-                label_in_cache = self.get_in_cache(label_key)
-                if label_in_cache is not None:
-                    label_data = label_in_cache
-                else:
-                    # Fail in label creation is allowed
-                    label_data = self.opencti.label.read_or_create_unchecked(
-                        value=label
-                    )
+                label_data = self._resolve_import_label(label)
                 if label_data is not None:
-                    self.set_in_cache(label_key, label_data)
                     object_label_ids.append(label_data["id"])
         elif "x_opencti_tags" in stix_object:
             for tag in stix_object["x_opencti_tags"]:
                 label = tag["value"]
                 color = tag["color"] if "color" in tag else None
-                label_key = "label_" + label
-                label_in_cache = self.get_in_cache(label_key)
-                if label_in_cache is not None:
-                    label_data = label_in_cache
-                else:
-                    # Fail in label creation is allowed
-                    label_data = self.opencti.label.read_or_create_unchecked(
-                        value=label, color=color
-                    )
+                label_data = self._resolve_import_label(label, color)
                 if label_data is not None:
-                    self.set_in_cache(label_key, label_data)
                     object_label_ids.append(label_data["id"])
         # Kill Chain Phases
         kill_chain_phases_ids = []
@@ -4378,6 +4422,7 @@ class OpenCTIStix2:
         ]
         return ignored_object_count, incompatible_elements, ordered_elements
 
+    @_scope_missing_import_label_values
     def import_bundle(
         self,
         stix_bundle: Dict,

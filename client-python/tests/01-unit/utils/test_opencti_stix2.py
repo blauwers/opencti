@@ -516,15 +516,30 @@ class _LabelPrefetchRecorder:
     def __init__(self):
         self.list_filters = []
         self.read_or_create_calls = []
+        self.create_payloads = []
+        self.existing_values = None
+        self.list_result_values = None
 
     def list(self, **kwargs):
         values = kwargs["filters"]["filters"][0]["values"]
         self.list_filters.append(values)
-        return [{"id": f"label--{value}", "value": value} for value in values]
+        result_values = (
+            self.list_result_values if self.list_result_values is not None else values
+        )
+        return [
+            {"id": f"label--{value}", "value": value}
+            for value in result_values
+            if self.existing_values is None or value in self.existing_values
+        ]
 
     def read_or_create_unchecked(self, **kwargs):
         value = kwargs["value"]
         self.read_or_create_calls.append(value)
+        return {"id": f"label--{value}", "value": value}
+
+    def create(self, **kwargs):
+        self.create_payloads.append(kwargs)
+        value = kwargs["value"]
         return {"id": f"label--{value}", "value": value}
 
 
@@ -625,6 +640,98 @@ def test_import_bundle_prefetches_existing_labels_in_bounded_chunks():
     assert opencti.label.read_or_create_calls == []
 
 
+def test_import_bundle_skips_redundant_reads_for_labels_prefetched_as_missing():
+    opencti = _label_prefetch_opencti()
+    opencti.label.existing_values = set()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "labels": [f"label-{index}"],
+        }
+        for index in range(3)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.label.list_filters == [["label-0", "label-1", "label-2"]]
+    assert opencti.label.read_or_create_calls == []
+    assert [payload["value"] for payload in opencti.label.create_payloads] == [
+        "label-0",
+        "label-1",
+        "label-2",
+    ]
+
+
+def test_import_bundle_preserves_tag_color_for_labels_prefetched_as_missing():
+    opencti = _label_prefetch_opencti()
+    opencti.label.existing_values = set()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        [
+            {
+                "id": "malware--1",
+                "type": "malware",
+                "x_opencti_tags": [
+                    {"value": "tag-0", "color": "#123456"},
+                    {"value": "tag-1", "color": "#654321"},
+                ],
+            }
+        ],
+    )
+
+    assert opencti.label.read_or_create_calls == []
+    assert opencti.label.create_payloads == [
+        {"value": "tag-0", "color": "#123456"},
+        {"value": "tag-1", "color": "#654321"},
+    ]
+
+
+def test_import_bundle_reuses_normalized_label_prefetch_matches():
+    opencti = _label_prefetch_opencti()
+    opencti.label.list_result_values = ["label-0", "label-1"]
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {"id": "malware--0", "type": "malware", "labels": ["LABEL-0"]},
+        {"id": "malware--1", "type": "malware", "labels": [" label-1 "]},
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.label.list_filters == [["LABEL-0", " label-1 "]]
+    assert opencti.label.read_or_create_calls == []
+    assert opencti.label.create_payloads == []
+    assert opencti_stix2.get_in_cache("label_LABEL-0")["id"] == "label--label-0"
+    assert opencti_stix2.get_in_cache("label_ label-1 ")["id"] == "label--label-1"
+
+
+def test_import_bundle_does_not_reuse_missing_label_proof_between_imports():
+    opencti = _label_prefetch_opencti()
+    opencti.label.existing_values = set()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        [
+            {"id": "malware--0", "type": "malware", "labels": ["label-0"]},
+            {"id": "malware--1", "type": "malware", "labels": ["label-1"]},
+        ],
+    )
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        [{"id": "malware--2", "type": "malware", "labels": ["label-2"]}],
+    )
+
+    assert [payload["value"] for payload in opencti.label.create_payloads] == [
+        "label-0",
+        "label-1",
+    ]
+    assert opencti.label.read_or_create_calls == ["label-2"]
+
+
 def test_import_bundle_falls_back_to_per_item_label_resolution_when_prefetch_fails():
     opencti = _label_prefetch_opencti()
     opencti_stix2 = OpenCTIStix2(opencti)
@@ -643,6 +750,7 @@ def test_import_bundle_falls_back_to_per_item_label_resolution_when_prefetch_fai
     _import_bundle_extracting_relationships(opencti_stix2, objects)
 
     assert opencti.label.read_or_create_calls == ["label-0", "label-1"]
+    assert opencti.label.create_payloads == []
 
 
 def test_pick_aliases(opencti_stix2: OpenCTIStix2) -> None:
