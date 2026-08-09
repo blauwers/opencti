@@ -97,18 +97,21 @@ class _CountingRelatedObjectLister:
         self.list_calls = 0
         self.filters = []
         self.firsts = []
+        self.kwargs = []
 
     def list(self, **kwargs):
         self.list_calls += 1
         self.filters.append(kwargs["filters"])
         self.firsts.append(kwargs["first"])
+        self.kwargs.append(kwargs)
         return [self.targets_by_id[target_id] for target_id in kwargs["filters"]]
 
 
 class _CountingAccessCollection:
-    def __init__(self):
+    def __init__(self, visible_ids=None):
         self.list_calls = 0
         self.kwargs = []
+        self.visible_ids = set(visible_ids) if visible_ids is not None else None
 
     def list(self, **kwargs):
         self.list_calls += 1
@@ -116,7 +119,11 @@ class _CountingAccessCollection:
         entity_ids = kwargs["filters"]
         if isinstance(entity_ids, str):
             entity_ids = [entity_ids]
-        return [{"id": entity_id} for entity_id in entity_ids]
+        return [
+            {"id": entity_id}
+            for entity_id in entity_ids
+            if self.visible_ids is None or entity_id in self.visible_ids
+        ]
 
 
 def _helper(entities=None):
@@ -162,6 +169,28 @@ def _relationship_from_root(identifier, root_identifier, target_identifier):
     relationship["from"]["id"] = root_identifier
     relationship["from"]["standard_id"] = f"indicator--{root_identifier}"
     return relationship
+
+
+def _related_object_data(target_identifier):
+    return {
+        "id": f"target-{target_identifier}",
+        "standard_id": f"malware--{target_identifier}",
+        "entity_type": "Malware",
+        "parent_types": ["Stix-Domain-Object"],
+    }
+
+
+def _configure_related_object_export_conversion(helper):
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    helper.generate_export = lambda entity: (
+        {
+            "id": entity["standard_id"],
+            "type": entity["entity_type"].lower(),
+            "x_opencti_id": entity["id"],
+        }
+        if "standard_id" in entity
+        else entity.copy()
+    )
 
 
 def _full_helper(relationships, access_collection=None):
@@ -666,6 +695,198 @@ def test_export_selected_prefetches_selected_roots_as_visible():
     helper.export_selected(entities_list=_root_entities(2), mode="full")
 
     assert access_collection.kwargs == []
+
+
+def test_export_selected_prefetches_unique_top_level_related_object_exports_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, 4)
+        }
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": _related_object_data(f"target-{index}")
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert lister.kwargs == [
+        {
+            "filters": ["target-target-1", "target-target-2", "target-target-3"],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [item["id"] for item in result["objects"]] == [
+        "indicator--root-1",
+        "relationship--1",
+        "malware--target-1",
+        "indicator--root-2",
+        "relationship--2",
+        "malware--target-2",
+        "indicator--root-3",
+        "relationship--3",
+        "malware--target-3",
+    ]
+
+
+def test_export_list_prefetches_unique_top_level_related_object_exports_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, 4)
+        }
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": _related_object_data(f"target-{index}")
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+    helper.export_entities_list = lambda **_kwargs: _root_entities(3)
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_list(entity_type="Indicator", mode="full")
+
+    assert lister.kwargs == [
+        {
+            "filters": ["target-target-1", "target-target-2", "target-target-3"],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+
+
+def test_export_selected_prefetches_top_level_related_object_exports_in_bounded_chunks():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, EXPORT_PREFETCH_BATCH_SIZE + 2)
+        }
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": _related_object_data(f"target-{index}")
+            for index in range(1, EXPORT_PREFETCH_BATCH_SIZE + 2)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_selected(
+        entities_list=_root_entities(EXPORT_PREFETCH_BATCH_SIZE + 1), mode="full"
+    )
+
+    assert [len(kwargs["filters"]) for kwargs in lister.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        1,
+    ]
+    assert [kwargs["first"] for kwargs in lister.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+    assert all(kwargs["getAll"] is True for kwargs in lister.kwargs)
+
+
+def test_export_selected_prefetches_only_proven_visible_top_level_related_object_exports():
+    helper = _full_helper(
+        [],
+        access_collection=_CountingAccessCollection(
+            visible_ids={"target-target-1", "target-target-2"}
+        ),
+    )
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, 4)
+        }
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": _related_object_data(f"target-{index}")
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return None
+
+    helper.get_reader = lambda resolve_type: read
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert lister.filters == [["target-target-1", "target-target-2"]]
+    assert read_calls == ["target-target-3"]
+    assert "malware--target-3" not in {item["id"] for item in result["objects"]}
+
+
+def test_export_selected_keeps_multi_root_related_object_reader_fallback_without_lister():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        {
+            f"root-{index}": [
+                _relationship_from_root(
+                    f"relationship--{index}", f"root-{index}", f"target-{index}"
+                )
+            ]
+            for index in range(1, 3)
+        }
+    )
+    targets_by_id = {
+        f"target-target-{index}": _related_object_data(f"target-{index}")
+        for index in range(1, 3)
+    }
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return targets_by_id[filters]
+
+    helper.get_lister = lambda resolve_type: None
+    helper.get_reader = lambda resolve_type: read
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_selected(entities_list=_root_entities(2), mode="full")
+
+    assert read_calls == ["target-target-1", "target-target-2"]
 
 
 def test_export_selected_reuses_related_object_reads_across_roots():
