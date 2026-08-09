@@ -206,3 +206,104 @@ class OpenCTIApiConnector:
             }
         """
         return self.api.query(query, {"id": _id})
+
+    def acquire_freshness(
+        self,
+        connector_id: str,
+        namespace: str,
+        keys: List[str],
+        lease_ttl_seconds: int,
+        force_refresh: bool = False,
+    ) -> List[Dict]:
+        """Acquire connector-scoped freshness leases for logical keys.
+
+        :param connector_id: connector id owning the freshness partition
+        :type connector_id: str
+        :param namespace: bounded connector-local freshness namespace
+        :type namespace: str
+        :param keys: logical lookup keys
+        :type keys: list[str]
+        :param lease_ttl_seconds: lease TTL in seconds
+        :type lease_ttl_seconds: int
+        :param force_refresh: bypass an existing fresh marker when True
+        :type force_refresh: bool
+        :return: freshness decisions for each logical key
+        :rtype: list[dict]
+        """
+        query = """
+            mutation ConnectorFreshnessAcquire($input: ConnectorFreshnessAcquireInput!) {
+                connectorFreshnessAcquire(input: $input) {
+                    key
+                    status
+                    lease_token
+                    retry_after_ms
+                }
+            }
+        """
+        result = self.api.query(
+            query,
+            {
+                "input": {
+                    "connector_id": connector_id,
+                    "namespace": namespace,
+                    "keys": keys,
+                    "lease_ttl_seconds": lease_ttl_seconds,
+                    "force_refresh": force_refresh,
+                }
+            },
+        )
+        return result["data"]["connectorFreshnessAcquire"]
+
+    def complete_freshness(
+        self,
+        connector_id: str,
+        namespace: str,
+        key: str,
+        lease_token: str,
+        freshness_ttl_seconds: int,
+    ) -> bool:
+        """Complete a connector-scoped freshness lease after a successful lookup."""
+        query = """
+            mutation ConnectorFreshnessComplete($input: ConnectorFreshnessCompleteInput!) {
+                connectorFreshnessComplete(input: $input)
+            }
+        """
+        result = self.api.query(
+            query,
+            {
+                "input": {
+                    "connector_id": connector_id,
+                    "namespace": namespace,
+                    "key": key,
+                    "lease_token": lease_token,
+                    "freshness_ttl_seconds": freshness_ttl_seconds,
+                }
+            },
+        )
+        return result["data"]["connectorFreshnessComplete"]
+
+    def release_freshness(
+        self,
+        connector_id: str,
+        namespace: str,
+        key: str,
+        lease_token: str,
+    ) -> bool:
+        """Release a connector-scoped freshness lease after an incomplete lookup."""
+        query = """
+            mutation ConnectorFreshnessRelease($input: ConnectorFreshnessReleaseInput!) {
+                connectorFreshnessRelease(input: $input)
+            }
+        """
+        result = self.api.query(
+            query,
+            {
+                "input": {
+                    "connector_id": connector_id,
+                    "namespace": namespace,
+                    "key": key,
+                    "lease_token": lease_token,
+                }
+            },
+        )
+        return result["data"]["connectorFreshnessRelease"]
