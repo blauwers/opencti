@@ -911,6 +911,171 @@ def test_export_selected_applies_nested_ref_relationships_only_to_source_roots()
     assert "sample_refs" not in root_objects["indicator--root-2"]
 
 
+def test_prepare_export_full_prefetches_recursive_nested_refs():
+    helper = _full_helper(
+        [
+            _relationship("relationship--1", "target-1"),
+            _relationship("relationship--2", "target-2"),
+            _relationship("relationship--3", "target-3"),
+        ]
+    )
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection(
+        {
+            "internal-relationship--1": [
+                _nested_ref_relationship(
+                    "nested-ref--relationship-1",
+                    "internal-relationship--1",
+                    "relationship-sample",
+                )
+            ],
+            "target-target-1": [
+                _nested_ref_relationship(
+                    "nested-ref--target-1", "target-target-1", "target-sample"
+                )
+            ],
+        }
+    )
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    helper.generate_export = lambda entity: (
+        {
+            "id": entity["standard_id"],
+            "type": entity["entity_type"].lower(),
+            "x_opencti_id": entity["id"],
+        }
+        if "standard_id" in entity
+        else entity.copy()
+    )
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+
+    result = helper.prepare_export(entity=_root_entities(1)[0], mode="full")
+    objects_by_id = {item["id"]: item for item in result}
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "fromId": "root-1",
+            "filters": None,
+            "getAll": True,
+        },
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {
+                        "key": "fromId",
+                        "values": [
+                            "internal-relationship--1",
+                            "internal-relationship--2",
+                            "internal-relationship--3",
+                            "target-target-1",
+                            "target-target-2",
+                            "target-target-3",
+                        ],
+                    }
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+    ]
+    assert objects_by_id["relationship--1"]["sample_refs"] == [
+        "malware--relationship-sample"
+    ]
+    assert objects_by_id["malware--target-1"]["sample_refs"] == [
+        "malware--target-sample"
+    ]
+
+
+def test_recursive_nested_ref_prefetch_extends_existing_map_without_refetching_known_ids():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    existing_map = {"known": []}
+
+    result = helper._prefetch_export_nested_ref_relationships_by_entity_ids(
+        ["known", "new-1", "new-2"],
+        access_filter=None,
+        relationships_by_entity_id=existing_map,
+    )
+
+    assert result is existing_map
+    assert sorted(result) == ["known", "new-1", "new-2"]
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [{"key": "fromId", "values": ["new-1", "new-2"]}],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+
+
+def test_recursive_nested_ref_prefetch_keeps_singleton_fallback():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    existing_map = {"known": []}
+
+    result = helper._prefetch_export_nested_ref_relationships_by_entity_ids(
+        ["known", "new-1"],
+        access_filter=None,
+        relationships_by_entity_id=existing_map,
+    )
+    helper.prepare_export(
+        entity={"id": "indicator--new-1", "type": "indicator", "x_opencti_id": "new-1"},
+        mode="simple",
+        stix_nested_ref_relationships_by_entity_id=result,
+    )
+
+    assert result is existing_map
+    assert nested_ref_relationships.kwargs == [
+        {
+            "fromId": "new-1",
+            "filters": None,
+        }
+    ]
+
+
+def test_recursive_nested_ref_prefetch_chunks_new_ids():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    existing_map = {"known": []}
+
+    helper._prefetch_export_nested_ref_relationships_by_entity_ids(
+        ["known"] + [f"new-{index}" for index in range(EXPORT_PREFETCH_BATCH_SIZE + 1)],
+        access_filter=None,
+        relationships_by_entity_id=existing_map,
+    )
+
+    assert [
+        len(kwargs["filters"]["filters"][0]["values"])
+        for kwargs in nested_ref_relationships.kwargs
+    ] == [EXPORT_PREFETCH_BATCH_SIZE, 1]
+    assert [kwargs["first"] for kwargs in nested_ref_relationships.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+
+
 def test_export_list_deduplicates_objects_and_rewrites_bundle_once():
     entities = [
         {"id": "indicator--1", "type": "indicator"},
