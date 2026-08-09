@@ -12,7 +12,11 @@ from pycti.api.opencti_api_batch import (
     BatchMutationPlanTooLarge,
     build_batch_result_token,
 )
-from pycti.utils.opencti_stix2 import IMPORT_PREFETCH_BATCH_SIZE, OpenCTIStix2
+from pycti.utils.opencti_stix2 import (
+    IMPORT_PREFETCH_BATCH_SIZE,
+    NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE,
+    OpenCTIStix2,
+)
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 
@@ -2088,6 +2092,227 @@ def test_import_observable_passes_embedded_flags_to_create(
     opencti_stix2.import_observable(stix_object, update=False)
 
     assert captured_kwargs.get("embedded") == [True]
+
+
+def test_import_observable_batches_nested_ref_relationship_creates(monkeypatch):
+    class _NestedRefCollection:
+        def __init__(self):
+            self.add_many_calls = []
+            self.create_calls = []
+
+        def add_many_to_stix_core_object(self, from_id, to_ids, relationship_type):
+            self.add_many_calls.append((from_id, list(to_ids), relationship_type))
+
+        def create(self, **kwargs):
+            self.create_calls.append(kwargs)
+
+    nested_ref_collection = _NestedRefCollection()
+    fake_opencti = SimpleNamespace(
+        get_attribute_in_extension=lambda attribute, entity: None,
+        get_draft_id=lambda: "",
+        stix_cyber_observable=SimpleNamespace(
+            create=lambda **kwargs: {
+                "id": "observable--1",
+                "entity_type": "Stix-Cyber-Observable",
+            }
+        ),
+        stix_nested_ref_relationship=nested_ref_collection,
+    )
+    opencti_stix2 = OpenCTIStix2(fake_opencti)
+    monkeypatch.setattr(
+        opencti_stix2,
+        "extract_embedded_relationships",
+        lambda stix_object, types=None: {
+            "created_by": None,
+            "object_marking": None,
+            "object_label": None,
+            "open_vocabs": {},
+            "granted_refs": [],
+            "kill_chain_phases": [],
+            "object_refs": [],
+            "external_references": [],
+            "reports": {},
+            "sample_refs": [],
+        },
+    )
+
+    ref_count = (NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE * 2) + 1
+    opencti_stix2.import_observable(
+        {
+            "id": "directory--1",
+            "type": "directory",
+            "path": "/benchmark",
+            "contains_refs": [f"artifact--{index}" for index in range(ref_count)],
+            "x_opencti_custom_ref": "identity--custom",
+        },
+        update=False,
+    )
+
+    assert [len(call[1]) for call in nested_ref_collection.add_many_calls] == [
+        NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE,
+        NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE,
+    ]
+    assert nested_ref_collection.add_many_calls[0] == (
+        "observable--1",
+        [
+            f"artifact--{index}"
+            for index in range(NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE)
+        ],
+        "contains",
+    )
+    assert nested_ref_collection.create_calls == [
+        {
+            "fromId": "observable--1",
+            "toId": f"artifact--{ref_count - 1}",
+            "relationship_type": "contains",
+        },
+        {
+            "fromId": "observable--1",
+            "toId": "identity--custom",
+            "relationship_type": "x_opencti_custom",
+        },
+    ]
+
+
+def test_import_observable_falls_back_to_singular_nested_ref_creates_without_bulk_helper(
+    monkeypatch,
+):
+    class _NestedRefCollection:
+        def __init__(self):
+            self.create_calls = []
+
+        def create(self, **kwargs):
+            self.create_calls.append(kwargs)
+
+    nested_ref_collection = _NestedRefCollection()
+    fake_opencti = SimpleNamespace(
+        get_attribute_in_extension=lambda attribute, entity: None,
+        get_draft_id=lambda: "",
+        stix_cyber_observable=SimpleNamespace(
+            create=lambda **kwargs: {
+                "id": "observable--1",
+                "entity_type": "Stix-Cyber-Observable",
+            }
+        ),
+        stix_nested_ref_relationship=nested_ref_collection,
+    )
+    opencti_stix2 = OpenCTIStix2(fake_opencti)
+    monkeypatch.setattr(
+        opencti_stix2,
+        "extract_embedded_relationships",
+        lambda stix_object, types=None: {
+            "created_by": None,
+            "object_marking": None,
+            "object_label": None,
+            "open_vocabs": {},
+            "granted_refs": [],
+            "kill_chain_phases": [],
+            "object_refs": [],
+            "external_references": [],
+            "reports": {},
+            "sample_refs": [],
+        },
+    )
+
+    opencti_stix2.import_observable(
+        {
+            "id": "directory--1",
+            "type": "directory",
+            "path": "/benchmark",
+            "contains_refs": ["artifact--1", "artifact--2"],
+        },
+        update=False,
+    )
+
+    assert nested_ref_collection.create_calls == [
+        {
+            "fromId": "observable--1",
+            "toId": "artifact--1",
+            "relationship_type": "contains",
+        },
+        {
+            "fromId": "observable--1",
+            "toId": "artifact--2",
+            "relationship_type": "contains",
+        },
+    ]
+
+
+def test_import_observable_preserves_mixed_nested_ref_relationship_order(monkeypatch):
+    class _NestedRefCollection:
+        def __init__(self):
+            self.calls = []
+
+        def add_many_to_stix_core_object(self, from_id, to_ids, relationship_type):
+            self.calls.append(("add_many", from_id, list(to_ids), relationship_type))
+
+        def create(self, **kwargs):
+            self.calls.append(("create", kwargs))
+
+    nested_ref_collection = _NestedRefCollection()
+    fake_opencti = SimpleNamespace(
+        get_attribute_in_extension=lambda attribute, entity: None,
+        get_draft_id=lambda: "",
+        stix_cyber_observable=SimpleNamespace(
+            create=lambda **kwargs: {
+                "id": "observable--1",
+                "entity_type": "Stix-Cyber-Observable",
+            }
+        ),
+        stix_nested_ref_relationship=nested_ref_collection,
+    )
+    opencti_stix2 = OpenCTIStix2(fake_opencti)
+    monkeypatch.setattr(
+        opencti_stix2,
+        "extract_embedded_relationships",
+        lambda stix_object, types=None: {
+            "created_by": None,
+            "object_marking": None,
+            "object_label": None,
+            "open_vocabs": {},
+            "granted_refs": [],
+            "kill_chain_phases": [],
+            "object_refs": [],
+            "external_references": [],
+            "reports": {},
+            "sample_refs": [],
+        },
+    )
+
+    opencti_stix2.import_observable(
+        {
+            "id": "directory--1",
+            "type": "directory",
+            "path": "/benchmark",
+            "contains_refs": ["artifact--1", "artifact--2"],
+            "x_opencti_custom_ref": "identity--custom",
+            "parent_refs": ["directory--2", "directory--3"],
+        },
+        update=False,
+    )
+
+    assert nested_ref_collection.calls == [
+        (
+            "add_many",
+            "observable--1",
+            ["artifact--1", "artifact--2"],
+            "contains",
+        ),
+        (
+            "create",
+            {
+                "fromId": "observable--1",
+                "toId": "identity--custom",
+                "relationship_type": "x_opencti_custom",
+            },
+        ),
+        (
+            "add_many",
+            "observable--1",
+            ["directory--2", "directory--3"],
+            "parent",
+        ),
+    ]
 
 
 def test_prepare_export_prefers_x_opencti_type_for_relative_embedded_markdown_image_uri(

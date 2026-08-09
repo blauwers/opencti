@@ -79,6 +79,7 @@ STIX_EXT_MITRE: str = "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329
 PROCESSING_COUNT: int = 4
 MAX_PROCESSING_COUNT: int = 100
 IMPORT_PREFETCH_BATCH_SIZE: int = 1000
+NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE: int = 100
 MARKDOWN_EXPORT_FIELDS: Tuple[str, ...] = (
     "description",
     "x_opencti_description",
@@ -2257,6 +2258,78 @@ class OpenCTIStix2:
                     )
         return stix_object_results
 
+    @staticmethod
+    def _nested_ref_relationship_type(key: str) -> str:
+        relationship_type = (
+            key.replace("_refs", "")
+            if key.endswith("_refs")
+            else key.replace("_ref", "")
+        )
+        if relationship_type.startswith("x_opencti_"):
+            relationship_type = relationship_type.split("x_opencti_", 1)[1]
+            relationship_type = relationship_type.replace("_", "-")
+            return "x_opencti_" + relationship_type
+        return relationship_type.replace("_", "-")
+
+    def _create_observable_nested_ref_relationships(
+        self, stix_object: Dict, stix_observable_id: str
+    ) -> None:
+        excluded_keys = {
+            "created_by_ref",
+            "object_marking_refs",
+            "x_opencti_created_by_ref",
+            "x_opencti_granted_refs",
+            "src_ref",
+            "dst_ref",
+        }
+        nested_ref_relationship = self.opencti.stix_nested_ref_relationship
+        add_many = getattr(
+            nested_ref_relationship, "add_many_to_stix_core_object", None
+        )
+        create_batch = []
+
+        def flush_create_batch() -> None:
+            if len(create_batch) == 0:
+                return
+            if add_many is not None and len(create_batch) > 1:
+                add_many(
+                    create_batch[0]["fromId"],
+                    [create_input["toId"] for create_input in create_batch],
+                    create_batch[0]["relationship_type"],
+                )
+            else:
+                for create_input in create_batch:
+                    nested_ref_relationship.create(**create_input)
+            create_batch.clear()
+
+        def append_create_input(to_id: str, relationship_type: str) -> None:
+            create_input = {
+                "fromId": stix_observable_id,
+                "toId": to_id,
+                "relationship_type": relationship_type,
+            }
+            if len(create_batch) > 0 and (
+                create_input["relationship_type"]
+                != create_batch[0]["relationship_type"]
+                or len(create_batch) >= NESTED_REF_RELATIONSHIP_CREATE_BATCH_SIZE
+            ):
+                flush_create_batch()
+            create_batch.append(create_input)
+
+        for key, value in stix_object.items():
+            if key in excluded_keys:
+                continue
+            if key.endswith("_ref"):
+                append_create_input(
+                    value,
+                    self._nested_ref_relationship_type(key),
+                )
+            elif key.endswith("_refs"):
+                relationship_type = self._nested_ref_relationship_type(key)
+                for ref_value in value:
+                    append_create_input(ref_value, relationship_type)
+        flush_create_batch()
+
     def import_observable(
         self, stix_object: Dict, update: bool = False, types: List = None
     ) -> None:
@@ -2425,47 +2498,9 @@ class OpenCTIStix2:
                     "type": stix_observable_result["entity_type"],
                 },
             )
-            # Iterate over refs to create appropriate relationships
-            for key in stix_object.keys():
-                if key not in [
-                    "created_by_ref",
-                    "object_marking_refs",
-                    "x_opencti_created_by_ref",
-                    "x_opencti_granted_refs",
-                    "src_ref",
-                    "dst_ref",
-                ]:
-                    if key.endswith("_ref"):
-                        relationship_type = key.replace("_ref", "")
-                        if relationship_type.startswith("x_opencti_"):
-                            relationship_type = relationship_type.split(
-                                "x_opencti_", 1
-                            )[1]
-                            relationship_type = relationship_type.replace("_", "-")
-                            relationship_type = "x_opencti_" + relationship_type
-                        else:
-                            relationship_type = relationship_type.replace("_", "-")
-                        self.opencti.stix_nested_ref_relationship.create(
-                            fromId=stix_observable_result["id"],
-                            toId=stix_object[key],
-                            relationship_type=relationship_type,
-                        )
-                    elif key.endswith("_refs"):
-                        relationship_type = key.replace("_refs", "")
-                        if relationship_type.startswith("x_opencti_"):
-                            relationship_type = relationship_type.split(
-                                "x_opencti_", 1
-                            )[1]
-                            relationship_type = relationship_type.replace("_", "-")
-                            relationship_type = "x_opencti_" + relationship_type
-                        else:
-                            relationship_type = relationship_type.replace("_", "-")
-                        for value in stix_object[key]:
-                            self.opencti.stix_nested_ref_relationship.create(
-                                fromId=stix_observable_result["id"],
-                                toId=value,
-                                relationship_type=relationship_type,
-                            )
+            self._create_observable_nested_ref_relationships(
+                stix_object, stix_observable_result["id"]
+            )
         else:
             return None
 
