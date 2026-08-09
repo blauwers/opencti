@@ -26,6 +26,11 @@ class _UploadResponse:
         return {"data": {"ok": True}}
 
 
+class _NullLogger:
+    def info(self, *args, **kwargs):
+        del args, kwargs
+
+
 class _TrackingFile(io.BytesIO):
     def __init__(self, payload):
         super().__init__(payload)
@@ -108,3 +113,42 @@ def test_query_stream_preserves_seekable_upload_position():
 
     assert b"payload" in session.body
     assert b"prefix-payload" not in session.body
+
+
+@pytest.mark.parametrize("method_name", ["upload_file", "upload_pending_file"])
+def test_path_upload_helpers_stream_file_data_and_close_handle(tmp_path, method_name):
+    upload_path = tmp_path / "payload.json"
+    upload_path.write_bytes(b"payload")
+    client = _client(None)
+    client.app_logger = _NullLogger()
+    captured = {}
+
+    def query(query, variables):
+        del query
+        upload = variables["file"]
+        captured["handle"] = upload.data
+        assert not upload.data.closed
+        assert upload.data.read() == b"payload"
+        upload.data.seek(0)
+        return {"data": {"ok": True}}
+
+    client.query = query
+
+    result = getattr(client, method_name)(file_name=str(upload_path))
+
+    assert result == {"data": {"ok": True}}
+    assert captured["handle"].closed
+
+
+@pytest.mark.parametrize("method_name", ["upload_file", "upload_pending_file"])
+def test_path_upload_helpers_leave_caller_data_open(tmp_path, method_name):
+    upload_path = tmp_path / "payload.json"
+    upload_path.write_bytes(b"payload")
+    client = _client(None)
+    client.app_logger = _NullLogger()
+    client.query = lambda query, variables: {"data": {"ok": True}}
+
+    with upload_path.open("rb") as data:
+        getattr(client, method_name)(file_name=str(upload_path), data=data)
+
+        assert not data.closed
