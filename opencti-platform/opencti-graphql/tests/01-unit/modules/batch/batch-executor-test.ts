@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
   BatchMutationKind,
   BatchSideEffectKind,
+  BatchSideEffectSealClass,
+  evaluateBatchSideEffectSeal,
   executeBatchMutations,
   executeSingleBatchMutation,
   getBatchExecutionMetadata,
@@ -240,6 +243,188 @@ describe('batch executor', () => {
     });
 
     expect(calls).toEqual(['write', 'commit', 'finalizer', 'side-effect']);
+  });
+
+  it('evaluates an exact ordered closed seal snapshot after finalizers and before materialization starts', async () => {
+    const calls: string[] = [];
+    let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
+
+    await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        calls.push('write');
+        registerBatchFinalizer({
+          key: 'finalizer-side-effect',
+          execute: async () => {
+            calls.push('finalizer');
+            await registerBatchSideEffect({
+              kind: BatchSideEffectKind.WorkLifecycle,
+              sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
+              execute: async () => {
+                calls.push('work-side-effect');
+              },
+            });
+          },
+        });
+        return 'result';
+      },
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.StreamPublication,
+        sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationRaw,
+        execute: async () => {
+          calls.push('stream-side-effect');
+        },
+      }],
+    }, {
+      onSideEffectSealEvaluated: (snapshot) => {
+        calls.push('seal-evaluated');
+        sealSnapshot = snapshot;
+      },
+      onMaterializationStarted: () => {
+        calls.push('materialization-started');
+      },
+    });
+
+    expect(sealSnapshot).toEqual([
+      BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationRaw,
+      BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
+    ]);
+    expect(Object.isFrozen(sealSnapshot)).toBe(true);
+    expect(Object.isFrozen(sealSnapshot?.[0])).toBe(true);
+    expect(calls).toEqual([
+      'write',
+      'finalizer',
+      'seal-evaluated',
+      'materialization-started',
+      'stream-side-effect',
+      'work-side-effect',
+    ]);
+  });
+
+  it('rejects missing, expanding, unclassified, and mismatched descriptors before sealing', async () => {
+    const execute = async () => undefined;
+    const unclassifiedDescriptor = {
+      contract_id: 'test.unclassified',
+      contract_version: 1,
+      kind: BatchSideEffectKind.StreamPublication,
+      seal_class: BatchSideEffectSealClass.Unclassified,
+    } as const;
+    const mismatchedDescriptor = {
+      contract_id: 'test.mismatched',
+      contract_version: 1,
+      kind: BatchSideEffectKind.WorkLifecycle,
+      seal_class: BatchSideEffectSealClass.Closed,
+    } as const;
+
+    expect(evaluateBatchSideEffectSeal([{
+      kind: BatchSideEffectKind.StreamPublication,
+      execute,
+    }])).toBeUndefined();
+    expect(evaluateBatchSideEffectSeal([{
+      kind: BatchSideEffectKind.AutoEnrichment,
+      sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
+      execute,
+    }])).toBeUndefined();
+    expect(evaluateBatchSideEffectSeal([{
+      kind: BatchSideEffectKind.StreamPublication,
+      sealDescriptor: unclassifiedDescriptor,
+      execute,
+    }])).toBeUndefined();
+    expect(evaluateBatchSideEffectSeal([{
+      kind: BatchSideEffectKind.StreamPublication,
+      sealDescriptor: mismatchedDescriptor,
+      execute,
+    }])).toBeUndefined();
+  });
+
+  it('rejects post-seal registration before nested execution and keeps the sealed snapshot unchanged', async () => {
+    const calls: string[] = [];
+    let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
+
+    await expect(executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => 'result',
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.StreamPublication,
+        sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationRaw,
+        execute: async () => {
+          calls.push('outer-side-effect');
+          await registerBatchSideEffect({
+            kind: BatchSideEffectKind.WorkLifecycle,
+            sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
+            execute: async () => {
+              calls.push('nested-side-effect');
+            },
+          });
+        },
+      }],
+    }, {
+      onSideEffectSealEvaluated: (snapshot) => {
+        sealSnapshot = snapshot;
+      },
+    })).rejects.toThrow('Cannot register batch side effect WORK_LIFECYCLE after pre-materialization seal');
+
+    expect(calls).toEqual(['outer-side-effect']);
+    expect(sealSnapshot).toEqual([BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationRaw]);
+    expect(() => (sealSnapshot as unknown as Array<unknown>).push('mutated')).toThrow();
+  });
+
+  it('keeps expanding auto enrichment unsealed so it can append Work and connector effects', async () => {
+    const calls: string[] = [];
+    let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
+
+    const execution = await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => 'result',
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.AutoEnrichment,
+        sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
+        execute: async () => {
+          calls.push('auto-enrichment');
+          await registerBatchSideEffect({
+            kind: BatchSideEffectKind.WorkLifecycle,
+            sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
+            execute: async () => {
+              calls.push('work-lifecycle');
+            },
+          });
+          await registerBatchSideEffect({
+            kind: BatchSideEffectKind.ConnectorDispatch,
+            sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.connectorDispatchConnectorSend,
+            execute: async () => {
+              calls.push('connector-dispatch');
+            },
+          });
+        },
+      }],
+    }, {
+      onSideEffectSealEvaluated: (snapshot) => {
+        sealSnapshot = snapshot;
+      },
+    });
+
+    expect(sealSnapshot).toBeUndefined();
+    expect(calls).toEqual(['auto-enrichment', 'work-lifecycle', 'connector-dispatch']);
+    expect(execution).toBe('result');
+  });
+
+  it('keeps compatibility projections unsealed until they have a narrow descriptor', async () => {
+    let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
+
+    await executeSingleBatchMutation({
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => 'result',
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.CompatibilityProjection,
+        execute: async () => undefined,
+      }],
+    }, {
+      onSideEffectSealEvaluated: (snapshot) => {
+        sealSnapshot = snapshot;
+      },
+    });
+
+    expect(sealSnapshot).toBeUndefined();
   });
 
   it('materializes ordered side effects before bounded auto enrichment and keeps nested effects inline', async () => {

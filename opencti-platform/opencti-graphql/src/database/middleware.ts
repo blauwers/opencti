@@ -185,6 +185,7 @@ import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
 import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
 import {
+  BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
   BatchMutationKind,
   BatchSideEffectKind,
   executeSingleBatchMutation,
@@ -1701,6 +1702,7 @@ const mergeEntitiesRaw = async (
         sourceEntity.x_opencti_files = movePlan.updatedXOpenctiFiles;
         await registerBatchSideEffect({
           kind: BatchSideEffectKind.FileLifecycle,
+          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleMoveAllFiles,
           execute: async () => {
             await materializeMoveAllFilesPlan(context, user, movePlan, { forceDelete: true });
           },
@@ -1879,6 +1881,7 @@ const mergeEntitiesRaw = async (
     const forceDeleteFilesAfterCommit = isBatchWriteBoundaryOpen();
     await registerBatchSideEffect({
       kind: BatchSideEffectKind.FileLifecycle,
+      sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleDeleteAllObjectFiles,
       execute: async () => {
         await deleteAllObjectFiles(context, SYSTEM_USER, sourceEntities[i], { forceDelete: forceDeleteFilesAfterCommit });
       },
@@ -3094,6 +3097,7 @@ const executeUpdateAttributeMutation = async <T extends StoreObject>(
     },
     sideEffects: (data) => (!opts.noEnrich && data.event ? [{
       kind: BatchSideEffectKind.AutoEnrichment,
+      sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
       execute: () => triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase),
     }] : []),
   }, { waitUntil });
@@ -4285,12 +4289,14 @@ export const createEntity = async (
       if (result.isCreation) {
         return [{
           kind: BatchSideEffectKind.AutoEnrichment,
+          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentCreateEntity,
           execute: () => triggerCreateEntityAutoEnrichment(context, user, result.element),
         }];
       }
       if (result.event !== null) {
         return [{
           kind: BatchSideEffectKind.AutoEnrichment,
+          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
           execute: () => triggerEntityUpdateAutoEnrichment(context, user, result.element),
         }];
       }
@@ -4457,6 +4463,7 @@ export const internalDeleteElementById = async <T extends StoreObject>(
         // mark indexed files as removed to exclude them from search
         await registerBatchSideEffect({
           kind: BatchSideEffectKind.FileLifecycle,
+          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleMarkRemoved,
           execute: async () => {
             await elUpdateRemovedFiles(element, true);
           },
@@ -4466,6 +4473,7 @@ export const internalDeleteElementById = async <T extends StoreObject>(
         const forceDeleteFilesAfterCommit = isBatchWriteBoundaryOpen();
         await registerBatchSideEffect({
           kind: BatchSideEffectKind.FileLifecycle,
+          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleDeleteAllObjectFiles,
           execute: async () => {
             await deleteAllObjectFiles(context, user, element, { forceDelete: forceDeleteFilesAfterCommit });
           },

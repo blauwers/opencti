@@ -24,7 +24,14 @@ import { getDraftContext } from '../../utils/draftContext';
 import { rawRedisStreamClient } from '../redis-stream';
 import { telemetry } from '../../config/tracing';
 import { logApp } from '../../config/conf';
-import { BatchSideEffectKind, getBatchExecutionMetadata, isBatchWriteBoundaryOpen, registerBatchSideEffect, setBatchExecutionMetadata } from '../../modules/batch/batch-executor';
+import {
+  BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
+  BatchSideEffectKind,
+  getBatchExecutionMetadata,
+  isBatchWriteBoundaryOpen,
+  registerBatchSideEffect,
+  setBatchExecutionMetadata,
+} from '../../modules/batch/batch-executor';
 
 const streamClient: RawStreamClient = rawRedisStreamClient;
 const BATCH_STREAM_PUBLICATIONS_METADATA_KEY = 'stream.publications';
@@ -99,6 +106,7 @@ const pushToStream = async <T extends BaseEvent> (context: AuthContext, user: Au
           state.publications.set(publicationKey, bufferedPublication);
           await registerBatchSideEffect({
             kind: BatchSideEffectKind.StreamPublication,
+            sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationKeyedCoalesced,
             execute: async () => {
               const publicationToPush = state.publications.get(publicationKey);
               if (!publicationToPush) {
@@ -115,6 +123,7 @@ const pushToStream = async <T extends BaseEvent> (context: AuthContext, user: Au
       }
       await registerBatchSideEffect({
         kind: BatchSideEffectKind.StreamPublication,
+        sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationRaw,
         execute: () => pushToStreamNow(context, user, eventToPush),
       });
       return;

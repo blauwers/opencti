@@ -12,7 +12,7 @@ import { fullEntitiesList } from './middleware-loader';
 import { ENTITY_TYPE_BACKGROUND_TASK, ENTITY_TYPE_CONNECTOR, ENTITY_TYPE_SYNC } from '../schema/internalObject';
 import { ENTITY_TYPE_PLAYBOOK } from '../modules/playbook/playbook-types';
 import { s3ConnectionConfig } from './raw-file-storage';
-import { BatchSideEffectKind, hasActiveBatchExecution, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import { BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind, hasActiveBatchExecution, registerBatchSideEffect } from '../modules/batch/batch-executor';
 
 export const CONNECTOR_EXCHANGE = `${RABBIT_QUEUE_PREFIX}amqp.connector.exchange`;
 export const WORKER_EXCHANGE = `${RABBIT_QUEUE_PREFIX}amqp.worker.exchange`;
@@ -733,6 +733,7 @@ export const pushToWorkerForConnector = (connectorId, message) => {
   }
   return registerBatchSideEffect({
     kind: BatchSideEffectKind.ConnectorDispatch,
+    sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.connectorDispatchWorkerSend,
     execute: () => pushToWorkerForConnectorNow(connectorId, message),
   });
 };
@@ -747,6 +748,7 @@ export const pushToConnector = (connectorId, message) => {
   }
   return registerBatchSideEffect({
     kind: BatchSideEffectKind.ConnectorDispatch,
+    sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.connectorDispatchConnectorSend,
     execute: () => pushToConnectorNow(connectorId, message),
   });
 };

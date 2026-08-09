@@ -22,7 +22,7 @@ import { lockResources } from '../../lock/master-lock';
 import { RULE_PREFIX } from '../../schema/general';
 import { createRuleContent } from '../../rules/rules-utils';
 import { controlUserRestrictDeleteAgainstElement } from '../../utils/access';
-import { BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../batch/batch-executor';
+import { BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../batch/batch-executor';
 
 type ConfirmDeleteOptions = {
   isRestoring?: boolean;
@@ -255,6 +255,7 @@ export const processDeleteOperation = async (context: AuthContext, user: AuthUse
       // cluster restored: flag the files available for search again
       await registerBatchSideEffect({
         kind: BatchSideEffectKind.FileLifecycle,
+        sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleMarkRestored,
         execute: async () => {
           await elUpdateRemovedFiles(mainDeletedEntity, false);
         },
@@ -264,6 +265,7 @@ export const processDeleteOperation = async (context: AuthContext, user: AuthUse
       const forceDeleteFilesAfterCommit = isBatchWriteBoundaryOpen();
       await registerBatchSideEffect({
         kind: BatchSideEffectKind.FileLifecycle,
+        sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleDeleteAllObjectFiles,
         execute: async () => {
           await deleteAllObjectFiles(context, user, mainDeletedEntity, { forceDelete: forceDeleteFilesAfterCommit });
         },

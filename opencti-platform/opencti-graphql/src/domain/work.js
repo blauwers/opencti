@@ -27,7 +27,7 @@ import { RELATION_OBJECT_MARKING } from '../schema/stixRefRelationship';
 import { addFilter } from '../utils/filtering/filtering-utils';
 import { now, sinceNowInMinutes } from '../utils/format';
 import { addIngestionObjectsProcessedCount } from '../manager/telemetryManager';
-import { BatchSideEffectKind, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import { BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind, registerBatchSideEffect } from '../modules/batch/batch-executor';
 
 export const workToExportFile = (work) => {
   const lastModifiedSinceMin = sinceNowInMinutes(work.updated_at);
@@ -263,6 +263,7 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   if (createdWork) {
     await registerBatchSideEffect({
       kind: BatchSideEffectKind.WorkLifecycle,
+      sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
       execute: () => redisInitializeWork(createdWork.id, isMultiPartWork),
     });
   }

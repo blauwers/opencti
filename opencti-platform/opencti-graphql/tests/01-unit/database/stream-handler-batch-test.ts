@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as jsonpatch from 'fast-json-patch';
-import { BatchMutationKind, BatchSideEffectKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
+import {
+  BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
+  BatchMutationKind,
+  BatchSideEffectKind,
+  evaluateBatchSideEffectSeal,
+  executeBatchMutations,
+} from '../../../src/modules/batch/batch-executor';
 import { STIX_EXT_OCTI } from '../../../src/types/stix-2-1-extensions';
 
 const { mockRawAppendOrReturnLiveStreamPublicationProof, mockRawPushToStream } = vi.hoisted(() => ({
@@ -56,6 +62,8 @@ describe('stream handler batch publication', () => {
   });
 
   it('publishes stream events after batch commit', async () => {
+    let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
+
     const execution = await executeBatchMutations([
       {
         kind: BatchMutationKind.CreateEntity,
@@ -65,9 +73,14 @@ describe('stream handler batch publication', () => {
           return null;
         },
       },
-    ]);
+    ], {
+      onSideEffectSealEvaluated: (snapshot) => {
+        sealSnapshot = snapshot;
+      },
+    });
 
     expect(execution.sideEffectKinds).toContain(BatchSideEffectKind.StreamPublication);
+    expect(sealSnapshot).toEqual([BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationRaw]);
     expect(mockRawPushToStream).toHaveBeenCalledWith({
       ...event,
       event_id: context.eventId,
@@ -76,6 +89,7 @@ describe('stream handler batch publication', () => {
   });
 
   it('coalesces create and update publications for the same object inside a batch', async () => {
+    let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
     const created = {
       data: { id: 'indicator--1', name: 'created' },
       message: 'Create indicator',
@@ -108,8 +122,13 @@ describe('stream handler batch publication', () => {
           return null;
         },
       },
-    ]);
+    ], {
+      onSideEffectSealEvaluated: (snapshot) => {
+        sealSnapshot = snapshot;
+      },
+    });
 
+    expect(sealSnapshot).toEqual([BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.streamPublicationKeyedCoalesced]);
     expect(mockRawPushToStream).toHaveBeenCalledTimes(1);
     expect(mockRawPushToStream).toHaveBeenCalledWith({
       ...created,

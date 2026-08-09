@@ -22,8 +22,93 @@ export enum BatchSideEffectKind {
   StreamPublication = 'STREAM_PUBLICATION',
 }
 
+export enum BatchSideEffectSealClass {
+  Closed = 'CLOSED',
+  Expanding = 'EXPANDING',
+  Unclassified = 'UNCLASSIFIED',
+}
+
+export interface BatchSideEffectSealDescriptor {
+  readonly contract_id: string;
+  readonly contract_version: number;
+  readonly kind: BatchSideEffectKind;
+  readonly seal_class: BatchSideEffectSealClass;
+}
+
+export type BatchSideEffectSealSnapshot = readonly BatchSideEffectSealDescriptor[];
+
+const createBatchSideEffectSealDescriptor = (
+  contractId: string,
+  kind: BatchSideEffectKind,
+  sealClass: BatchSideEffectSealClass,
+): BatchSideEffectSealDescriptor => Object.freeze({
+  contract_id: contractId,
+  contract_version: 1,
+  kind,
+  seal_class: sealClass,
+});
+
+export const BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS = Object.freeze({
+  autoEnrichmentCreateEntity: createBatchSideEffectSealDescriptor(
+    'auto-enrichment.create-entity',
+    BatchSideEffectKind.AutoEnrichment,
+    BatchSideEffectSealClass.Expanding,
+  ),
+  autoEnrichmentUpdateEntity: createBatchSideEffectSealDescriptor(
+    'auto-enrichment.update-entity',
+    BatchSideEffectKind.AutoEnrichment,
+    BatchSideEffectSealClass.Expanding,
+  ),
+  connectorDispatchConnectorSend: createBatchSideEffectSealDescriptor(
+    'connector-dispatch.connector-send',
+    BatchSideEffectKind.ConnectorDispatch,
+    BatchSideEffectSealClass.Closed,
+  ),
+  connectorDispatchWorkerSend: createBatchSideEffectSealDescriptor(
+    'connector-dispatch.worker-send',
+    BatchSideEffectKind.ConnectorDispatch,
+    BatchSideEffectSealClass.Closed,
+  ),
+  fileLifecycleDeleteAllObjectFiles: createBatchSideEffectSealDescriptor(
+    'file-lifecycle.delete-all-object-files',
+    BatchSideEffectKind.FileLifecycle,
+    BatchSideEffectSealClass.Closed,
+  ),
+  fileLifecycleMarkRemoved: createBatchSideEffectSealDescriptor(
+    'file-lifecycle.mark-removed',
+    BatchSideEffectKind.FileLifecycle,
+    BatchSideEffectSealClass.Closed,
+  ),
+  fileLifecycleMarkRestored: createBatchSideEffectSealDescriptor(
+    'file-lifecycle.mark-restored',
+    BatchSideEffectKind.FileLifecycle,
+    BatchSideEffectSealClass.Closed,
+  ),
+  fileLifecycleMoveAllFiles: createBatchSideEffectSealDescriptor(
+    'file-lifecycle.move-all-files',
+    BatchSideEffectKind.FileLifecycle,
+    BatchSideEffectSealClass.Closed,
+  ),
+  streamPublicationKeyedCoalesced: createBatchSideEffectSealDescriptor(
+    'stream-publication.keyed-coalesced',
+    BatchSideEffectKind.StreamPublication,
+    BatchSideEffectSealClass.Closed,
+  ),
+  streamPublicationRaw: createBatchSideEffectSealDescriptor(
+    'stream-publication.raw',
+    BatchSideEffectKind.StreamPublication,
+    BatchSideEffectSealClass.Closed,
+  ),
+  workLifecycleRedisInitialize: createBatchSideEffectSealDescriptor(
+    'work-lifecycle.redis-initialize',
+    BatchSideEffectKind.WorkLifecycle,
+    BatchSideEffectSealClass.Closed,
+  ),
+});
+
 export interface BatchSideEffect {
   kind: BatchSideEffectKind;
+  sealDescriptor?: BatchSideEffectSealDescriptor;
   execute: () => Promise<void>;
 }
 
@@ -46,6 +131,7 @@ export interface BatchMutation<T> {
 export interface BatchExecutionOptions {
   executionMode?: BatchExecutionMode;
   onMaterializationStarted?: () => Promise<void> | void;
+  onSideEffectSealEvaluated?: (snapshot: BatchSideEffectSealSnapshot | undefined) => Promise<void> | void;
   performanceTraceId?: string;
   waitUntil?: BatchWaitUntil | string;
 }
@@ -69,6 +155,7 @@ interface BatchExecutionState {
   finalizersRun: boolean;
   materializationState?: BatchSideEffectMaterializationState;
   metadata: Map<string, unknown>;
+  sideEffectSealSnapshot?: BatchSideEffectSealSnapshot;
   sideEffects: BatchSideEffect[];
   sideEffectKinds: BatchSideEffectKind[];
   writeBoundaryOpen: boolean;
@@ -106,6 +193,7 @@ const BATCH_EXECUTION_LOG_MESSAGE = '[BATCH] Execution phase';
 const BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY = 'batch.performance-trace-id';
 const BATCH_SIDE_EFFECT_PROGRESS_INTERVAL_MS = 5000;
 const BATCH_SIDE_EFFECT_DEFAULT_MAX_ACTIVE_AUTO_ENRICHMENTS = 4;
+const BATCH_SIDE_EFFECT_SEAL_CLASS_VALUES = new Set(Object.values(BatchSideEffectSealClass));
 const configuredBatchMaxActiveAutoEnrichments = Number(conf.get('app:concurrency:batch_max_active_auto_enrichments'));
 const BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS = Number.isInteger(configuredBatchMaxActiveAutoEnrichments)
   && configuredBatchMaxActiveAutoEnrichments > 0
@@ -166,6 +254,45 @@ const mapOldestActiveSideEffectDurationMs = (
   }));
 };
 
+const isValidBatchSideEffectSealDescriptor = (
+  descriptor: BatchSideEffectSealDescriptor | undefined,
+): descriptor is BatchSideEffectSealDescriptor => {
+  return descriptor !== undefined
+    && typeof descriptor.contract_id === 'string'
+    && descriptor.contract_id.length > 0
+    && Number.isInteger(descriptor.contract_version)
+    && descriptor.contract_version > 0
+    && Object.values(BatchSideEffectKind).includes(descriptor.kind)
+    && BATCH_SIDE_EFFECT_SEAL_CLASS_VALUES.has(descriptor.seal_class);
+};
+
+const cloneBatchSideEffectSealDescriptor = (
+  descriptor: BatchSideEffectSealDescriptor,
+): BatchSideEffectSealDescriptor => Object.freeze({
+  contract_id: descriptor.contract_id,
+  contract_version: descriptor.contract_version,
+  kind: descriptor.kind,
+  seal_class: descriptor.seal_class,
+});
+
+export const evaluateBatchSideEffectSeal = (
+  sideEffects: readonly BatchSideEffect[],
+): BatchSideEffectSealSnapshot | undefined => {
+  const snapshot: BatchSideEffectSealDescriptor[] = [];
+  for (const sideEffect of sideEffects) {
+    const descriptor = sideEffect.sealDescriptor;
+    if (
+      !isValidBatchSideEffectSealDescriptor(descriptor)
+      || descriptor.kind !== sideEffect.kind
+      || descriptor.seal_class !== BatchSideEffectSealClass.Closed
+    ) {
+      return undefined;
+    }
+    snapshot.push(cloneBatchSideEffectSealDescriptor(descriptor));
+  }
+  return Object.freeze(snapshot);
+};
+
 const logBatchSideEffectProgress = (state: BatchExecutionState) => {
   const materializationState = state.materializationState;
   if (!BATCH_EXECUTION_PERFORMANCE_LOG || !materializationState?.active) {
@@ -222,6 +349,9 @@ const executeBatchSideEffect = async (state: BatchExecutionState, sideEffect: Ba
 };
 
 const scheduleBatchSideEffect = async (state: BatchExecutionState, sideEffect: BatchSideEffect): Promise<void> => {
+  if (state.sideEffectSealSnapshot) {
+    throw new Error(`Cannot register batch side effect ${sideEffect.kind} after pre-materialization seal`);
+  }
   state.sideEffectKinds.push(sideEffect.kind);
   if (state.materializationState?.active) {
     await executeBatchSideEffect(state, sideEffect);
@@ -331,6 +461,20 @@ const runFinalizers = async (state: BatchExecutionState) => {
   if (firstError) {
     throw firstError;
   }
+};
+
+const evaluatePreMaterializationSideEffectSeal = async (
+  state: BatchExecutionState,
+  options: BatchExecutionOptions,
+) => {
+  if (!options.onSideEffectSealEvaluated) {
+    return;
+  }
+  const snapshot = evaluateBatchSideEffectSeal(state.sideEffects);
+  if (snapshot) {
+    state.sideEffectSealSnapshot = snapshot;
+  }
+  await options.onSideEffectSealEvaluated(snapshot);
 };
 
 export const hasActiveBatchExecution = (): boolean => {
@@ -475,6 +619,7 @@ export const executeBatchMutations = async <T>(
       const finalizersStartedAt = Date.now();
       await runFinalizers(state);
       logBatchExecutionPhase(state, 'run_finalizers', Date.now() - finalizersStartedAt);
+      await evaluatePreMaterializationSideEffectSeal(state, options);
       const hasSideEffects = state.sideEffects.length > 0;
       if (hasSideEffects) {
         await options.onMaterializationStarted?.();
