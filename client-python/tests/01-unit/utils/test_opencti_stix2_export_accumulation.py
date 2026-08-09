@@ -171,6 +171,26 @@ def _relationship_from_root(identifier, root_identifier, target_identifier):
     return relationship
 
 
+def _relationship_root(identifier):
+    return {
+        "id": f"relationship--root-{identifier}",
+        "type": "uses",
+        "x_opencti_id": f"relationship-root-{identifier}",
+        "from": {
+            "id": f"source-{identifier}",
+            "standard_id": f"malware--source-{identifier}",
+            "entity_type": "Malware",
+            "parent_types": ["Stix-Domain-Object"],
+        },
+        "to": {
+            "id": f"target-{identifier}",
+            "standard_id": f"malware--target-{identifier}",
+            "entity_type": "Malware",
+            "parent_types": ["Stix-Domain-Object"],
+        },
+    }
+
+
 def _related_object_data(target_identifier):
     return {
         "id": f"target-{target_identifier}",
@@ -887,6 +907,241 @@ def test_export_selected_keeps_multi_root_related_object_reader_fallback_without
     helper.export_selected(entities_list=_root_entities(2), mode="full")
 
     assert read_calls == ["target-target-1", "target-target-2"]
+
+
+def test_export_selected_prefetches_relationship_root_endpoint_work_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    lister = _CountingRelatedObjectLister(
+        {
+            f"{side}-{index}": {
+                "id": f"{side}-{index}",
+                "standard_id": f"malware--{side}-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+            for side in ("source", "target")
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError(
+            "batchable relationship-root endpoints should not use the reader"
+        )
+    )
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_selected(
+        entities_list=[_relationship_root(index) for index in range(1, 4)],
+        mode="full",
+    )
+
+    assert helper.opencti.opencti_stix_object_or_stix_relationship.kwargs == [
+        {
+            "filters": [
+                "source-1",
+                "target-1",
+                "source-2",
+                "target-2",
+                "source-3",
+                "target-3",
+            ],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+            "customAttributes": EXPORT_ACCESS_LISTER_ATTRIBUTES,
+        }
+    ]
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {
+                        "key": "fromId",
+                        "values": [
+                            "relationship-root-1",
+                            "relationship-root-2",
+                            "relationship-root-3",
+                        ],
+                    }
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {
+                        "key": "fromId",
+                        "values": [
+                            "source-1",
+                            "target-1",
+                            "source-2",
+                            "target-2",
+                            "source-3",
+                            "target-3",
+                        ],
+                    }
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+    ]
+    assert lister.kwargs == [
+        {
+            "filters": [
+                "source-1",
+                "target-1",
+                "source-2",
+                "target-2",
+                "source-3",
+                "target-3",
+            ],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [item["id"] for item in result["objects"]] == [
+        "relationship--root-1",
+        "malware--source-1",
+        "malware--target-1",
+        "relationship--root-2",
+        "malware--source-2",
+        "malware--target-2",
+        "relationship--root-3",
+        "malware--source-3",
+        "malware--target-3",
+    ]
+
+
+def test_export_list_prefetches_relationship_root_endpoint_work_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection()
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"{side}-{index}": {
+                "id": f"{side}-{index}",
+                "standard_id": f"malware--{side}-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+            for side in ("source", "target")
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError(
+            "batchable relationship-root endpoints should not use the reader"
+        )
+    )
+    helper.export_entities_list = lambda **_kwargs: [
+        _relationship_root(index) for index in range(1, 4)
+    ]
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_list(entity_type="stix-core-relationship", mode="full")
+
+    assert lister.filters == [
+        ["source-1", "target-1", "source-2", "target-2", "source-3", "target-3"]
+    ]
+    assert [item["id"] for item in result["objects"]] == [
+        "relationship--root-1",
+        "malware--source-1",
+        "malware--target-1",
+        "relationship--root-2",
+        "malware--source-2",
+        "malware--target-2",
+        "relationship--root-3",
+        "malware--source-3",
+        "malware--target-3",
+    ]
+
+
+def test_export_selected_prefetches_relationship_root_endpoints_in_bounded_chunks():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection()
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"{side}-{index}": {
+                "id": f"{side}-{index}",
+                "standard_id": f"malware--{side}-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, (EXPORT_PREFETCH_BATCH_SIZE // 2) + 2)
+            for side in ("source", "target")
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError(
+            "batchable relationship-root endpoints should not use the reader"
+        )
+    )
+    _configure_related_object_export_conversion(helper)
+    root_count = (EXPORT_PREFETCH_BATCH_SIZE // 2) + 1
+
+    helper.export_selected(
+        entities_list=[_relationship_root(index) for index in range(1, root_count + 1)],
+        mode="full",
+    )
+
+    assert [
+        len(kwargs["filters"])
+        for kwargs in helper.opencti.opencti_stix_object_or_stix_relationship.kwargs
+    ] == [EXPORT_PREFETCH_BATCH_SIZE, 2]
+    assert [len(kwargs["filters"]) for kwargs in lister.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        2,
+    ]
+    assert [kwargs["first"] for kwargs in lister.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+    assert all(kwargs["getAll"] is True for kwargs in lister.kwargs)
+
+
+def test_prepare_export_full_does_not_reread_relationship_root_endpoints_as_refs():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    targets_by_id = {
+        f"{side}-1": {
+            "id": f"{side}-1",
+            "standard_id": f"malware--{side}-1",
+            "entity_type": "Malware",
+            "parent_types": ["Stix-Domain-Object"],
+        }
+        for side in ("source", "target")
+    }
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return targets_by_id[filters]
+
+    helper.get_lister = lambda resolve_type: None
+    helper.get_reader = lambda resolve_type: read
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.prepare_export(entity=_relationship_root(1), mode="full")
+
+    assert read_calls == ["source-1", "target-1"]
+    assert [item["id"] for item in result] == [
+        "relationship--root-1",
+        "malware--source-1",
+        "malware--target-1",
+    ]
 
 
 def test_export_selected_reuses_related_object_reads_across_roots():

@@ -3175,6 +3175,21 @@ class OpenCTIStix2:
 
         related_object_ids = []
         seen_related_object_ids = set()
+
+        def add_unseen_related_object_id(entity_id):
+            if (
+                entity_id not in related_object_access_cache
+                and entity_id not in seen_related_object_ids
+            ):
+                seen_related_object_ids.add(entity_id)
+                related_object_ids.append(entity_id)
+
+        for entity in entities_list:
+            for endpoint in ("from", "to"):
+                entity_object = entity.get(endpoint)
+                if entity_object is not None:
+                    add_unseen_related_object_id(entity_object["id"])
+
         seen_relationship_ids = set()
         for relationships_by_entity_id in (
             stix_core_relationships_by_entity_id,
@@ -3189,13 +3204,7 @@ class OpenCTIStix2:
                         continue
                     seen_relationship_ids.add(relationship_id)
                     for endpoint in ("from", "to"):
-                        endpoint_id = stix_relationship[endpoint]["id"]
-                        if (
-                            endpoint_id not in related_object_access_cache
-                            and endpoint_id not in seen_related_object_ids
-                        ):
-                            seen_related_object_ids.add(endpoint_id)
-                            related_object_ids.append(endpoint_id)
+                        add_unseen_related_object_id(stix_relationship[endpoint]["id"])
 
         self._prefetch_exportable_related_objects(
             related_object_ids,
@@ -3232,6 +3241,30 @@ class OpenCTIStix2:
 
         uncached_object_ids_by_type = {}
         seen_read_object_keys = set()
+
+        def add_uncached_entity_object(entity_object):
+            entity_id = entity_object["id"]
+            if entity_id in top_level_entity_ids:
+                return
+            resolve_type = self._get_export_related_object_resolve_type(entity_object)
+            read_object_key = (resolve_type, entity_id)
+            if (
+                read_object_key in related_object_export_cache
+                or read_object_key in seen_read_object_keys
+            ):
+                return
+            seen_read_object_keys.add(read_object_key)
+            uncached_object_ids_by_type.setdefault(resolve_type, []).append(entity_id)
+
+        for entity in entities_list:
+            for endpoint in ("from", "to"):
+                entity_object = entity.get(endpoint)
+                if (
+                    entity_object is not None
+                    and related_object_access_cache.get(entity_object["id"]) is True
+                ):
+                    add_uncached_entity_object(entity_object)
+
         for relationships_by_entity_id in (
             stix_core_relationships_by_entity_id,
             stix_sighting_relationships_by_entity_id,
@@ -3248,19 +3281,7 @@ class OpenCTIStix2:
                             or related_object_access_cache.get(entity_id) is not True
                         ):
                             continue
-                        resolve_type = self._get_export_related_object_resolve_type(
-                            entity_object
-                        )
-                        read_object_key = (resolve_type, entity_id)
-                        if (
-                            read_object_key in related_object_export_cache
-                            or read_object_key in seen_read_object_keys
-                        ):
-                            continue
-                        seen_read_object_keys.add(read_object_key)
-                        uncached_object_ids_by_type.setdefault(resolve_type, []).append(
-                            entity_id
-                        )
+                        add_uncached_entity_object(entity_object)
 
         batchable_object_ids_by_type = {}
         for resolve_type, entity_ids in uncached_object_ids_by_type.items():
@@ -3547,6 +3568,13 @@ class OpenCTIStix2:
             related_object_access_cache[entity["x_opencti_id"]] = True
         result = []
         objects_to_get = []
+        already_queued_reference_values = set()
+
+        def queue_known_related_object(entity_object):
+            objects_to_get.append(entity_object)
+            if "standard_id" in entity_object:
+                already_queued_reference_values.add(entity_object["standard_id"])
+
         self._rewrite_embedded_image_uris_for_export(entity)
 
         # CreatedByRef
@@ -3737,7 +3765,7 @@ class OpenCTIStix2:
             ):
                 entity["sighting_of_ref"] = entity["from"]["standard_id"]
                 # handle from and to separately like Stix Core Relationship and call 2 requests
-                objects_to_get.append(
+                queue_known_related_object(
                     entity["from"]
                 )  # what happen with unauthorized objects ?
 
@@ -3745,7 +3773,7 @@ class OpenCTIStix2:
                 entity["to"]["id"], access_filter, related_object_access_cache
             ):
                 entity["where_sighted_refs"] = [entity["to"]["standard_id"]]
-                objects_to_get.append(entity["to"])
+                queue_known_related_object(entity["to"])
 
             del entity["from"]
             del entity["to"]
@@ -3758,7 +3786,7 @@ class OpenCTIStix2:
             ):
                 entity["source_ref"] = entity["from"]["standard_id"]
                 # handle from and to separately like Stix Core Relationship and call 2 requests
-                objects_to_get.append(
+                queue_known_related_object(
                     entity["from"]
                 )  # what happen with unauthorized objects ?
             del entity["from"]
@@ -3767,7 +3795,7 @@ class OpenCTIStix2:
                 entity["to"]["id"], access_filter, related_object_access_cache
             ):
                 entity["target_ref"] = entity["to"]["standard_id"]
-                objects_to_get.append(entity["to"])
+                queue_known_related_object(entity["to"])
             del entity["to"]
         # Stix Domain Object
         if "attribute_abstract" in entity:
@@ -3896,6 +3924,8 @@ class OpenCTIStix2:
             # Get extra refs
             for key in entity.keys():
                 if key.endswith("_ref"):
+                    if entity[key] in already_queued_reference_values:
+                        continue
                     stix_type = entity[key].split("--")[0]
                     if stix_type in STIX_CYBER_OBSERVABLE_MAPPING:
                         objects_to_get.append(
@@ -3915,6 +3945,8 @@ class OpenCTIStix2:
                         )
                 elif key.endswith("_refs"):
                     for value in entity[key]:
+                        if value in already_queued_reference_values:
+                            continue
                         stix_type = value.split("--")[0]
                         if stix_type in STIX_CYBER_OBSERVABLE_MAPPING:
                             objects_to_get.append(
