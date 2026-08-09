@@ -3257,6 +3257,8 @@ class OpenCTIStix2:
             uncached_object_ids_by_type.setdefault(resolve_type, []).append(entity_id)
 
         for entity in entities_list:
+            for entity_object in entity.get("objects") or []:
+                add_uncached_entity_object(entity_object)
             for endpoint in ("from", "to"):
                 entity_object = entity.get(endpoint)
                 if (
@@ -3688,7 +3690,7 @@ class OpenCTIStix2:
             and len(entity["objects"]) > 0
         ):
             entity["object_refs"] = []
-            objects_to_get = entity["objects"]  # To do differently
+            objects_to_get.extend(entity["objects"])
             for entity_object in entity["objects"]:
                 if (
                     entity["type"] == "report"
@@ -3752,6 +3754,7 @@ class OpenCTIStix2:
                     and "stix-ref-relationship" not in entity_object["parent_types"]
                 ):
                     entity["object_refs"].append(entity_object["standard_id"])
+            already_queued_reference_values.update(entity["object_refs"])
         if "objects" in entity:
             del entity["objects"]
             del entity["objectsIds"]
