@@ -4908,6 +4908,43 @@ export enum ConnectorCurrentStatus {
   Stopped = 'stopped'
 }
 
+export type ConnectorFreshnessAcquireInput = {
+  connector_id: Scalars['String']['input'];
+  force_refresh?: InputMaybe<Scalars['Boolean']['input']>;
+  keys: Array<Scalars['String']['input']>;
+  lease_ttl_seconds: Scalars['Int']['input'];
+  namespace: Scalars['String']['input'];
+};
+
+export type ConnectorFreshnessCompleteInput = {
+  connector_id: Scalars['String']['input'];
+  freshness_ttl_seconds: Scalars['Int']['input'];
+  key: Scalars['String']['input'];
+  lease_token: Scalars['String']['input'];
+  namespace: Scalars['String']['input'];
+};
+
+export type ConnectorFreshnessDecision = {
+  __typename?: 'ConnectorFreshnessDecision';
+  key: Scalars['String']['output'];
+  lease_token?: Maybe<Scalars['String']['output']>;
+  retry_after_ms: Scalars['Int']['output'];
+  status: ConnectorFreshnessStatus;
+};
+
+export type ConnectorFreshnessReleaseInput = {
+  connector_id: Scalars['String']['input'];
+  key: Scalars['String']['input'];
+  lease_token: Scalars['String']['input'];
+  namespace: Scalars['String']['input'];
+};
+
+export enum ConnectorFreshnessStatus {
+  Acquired = 'ACQUIRED',
+  Fresh = 'FRESH',
+  InFlight = 'IN_FLIGHT'
+}
+
 export type ConnectorHealthMetrics = {
   __typename?: 'ConnectorHealthMetrics';
   is_in_reboot_loop: Scalars['Boolean']['output'];
@@ -17429,6 +17466,9 @@ export type Mutation = {
   cityAdd?: Maybe<City>;
   cityEdit?: Maybe<CityEditMutations>;
   clearWorkflowPendingState: WorkflowInstance;
+  connectorFreshnessAcquire: Array<ConnectorFreshnessDecision>;
+  connectorFreshnessComplete: Scalars['Boolean']['output'];
+  connectorFreshnessRelease: Scalars['Boolean']['output'];
   connectorJWT: Scalars['String']['output'];
   connectorMigrateToManaged: ManagedConnector;
   contactUsXtmHub: Success;
@@ -18224,6 +18264,21 @@ export type MutationCityEditArgs = {
 
 export type MutationClearWorkflowPendingStateArgs = {
   entityId: Scalars['String']['input'];
+};
+
+
+export type MutationConnectorFreshnessAcquireArgs = {
+  input: ConnectorFreshnessAcquireInput;
+};
+
+
+export type MutationConnectorFreshnessCompleteArgs = {
+  input: ConnectorFreshnessCompleteInput;
+};
+
+
+export type MutationConnectorFreshnessReleaseArgs = {
+  input: ConnectorFreshnessReleaseInput;
 };
 
 
@@ -40164,6 +40219,11 @@ export type ResolversTypes = ResolversObject<{
   ConnectorConfiguration: ResolverTypeWrapper<ConnectorConfiguration>;
   ConnectorContractConfiguration: ResolverTypeWrapper<ConnectorContractConfiguration>;
   ConnectorCurrentStatus: ConnectorCurrentStatus;
+  ConnectorFreshnessAcquireInput: ConnectorFreshnessAcquireInput;
+  ConnectorFreshnessCompleteInput: ConnectorFreshnessCompleteInput;
+  ConnectorFreshnessDecision: ResolverTypeWrapper<ConnectorFreshnessDecision>;
+  ConnectorFreshnessReleaseInput: ConnectorFreshnessReleaseInput;
+  ConnectorFreshnessStatus: ConnectorFreshnessStatus;
   ConnectorHealthMetrics: ResolverTypeWrapper<ConnectorHealthMetrics>;
   ConnectorInfo: ResolverTypeWrapper<ConnectorInfo>;
   ConnectorInfoInput: ConnectorInfoInput;
@@ -41314,6 +41374,10 @@ export type ResolversParentTypes = ResolversObject<{
   ConnectorConfig: ConnectorConfig;
   ConnectorConfiguration: ConnectorConfiguration;
   ConnectorContractConfiguration: ConnectorContractConfiguration;
+  ConnectorFreshnessAcquireInput: ConnectorFreshnessAcquireInput;
+  ConnectorFreshnessCompleteInput: ConnectorFreshnessCompleteInput;
+  ConnectorFreshnessDecision: ConnectorFreshnessDecision;
+  ConnectorFreshnessReleaseInput: ConnectorFreshnessReleaseInput;
   ConnectorHealthMetrics: ConnectorHealthMetrics;
   ConnectorInfo: ConnectorInfo;
   ConnectorInfoInput: ConnectorInfoInput;
@@ -43805,6 +43869,13 @@ export type ConnectorContractConfigurationResolvers<ContextType = any, ParentTyp
   encrypted?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType>;
   key?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   value?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+}>;
+
+export type ConnectorFreshnessDecisionResolvers<ContextType = any, ParentType extends ResolversParentTypes['ConnectorFreshnessDecision'] = ResolversParentTypes['ConnectorFreshnessDecision']> = ResolversObject<{
+  key?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  lease_token?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  retry_after_ms?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  status?: Resolver<ResolversTypes['ConnectorFreshnessStatus'], ParentType, ContextType>;
 }>;
 
 export type ConnectorHealthMetricsResolvers<ContextType = any, ParentType extends ResolversParentTypes['ConnectorHealthMetrics'] = ResolversParentTypes['ConnectorHealthMetrics']> = ResolversObject<{
@@ -48205,6 +48276,9 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   cityAdd?: Resolver<Maybe<ResolversTypes['City']>, ParentType, ContextType, RequireFields<MutationCityAddArgs, 'input'>>;
   cityEdit?: Resolver<Maybe<ResolversTypes['CityEditMutations']>, ParentType, ContextType, RequireFields<MutationCityEditArgs, 'id'>>;
   clearWorkflowPendingState?: Resolver<ResolversTypes['WorkflowInstance'], ParentType, ContextType, RequireFields<MutationClearWorkflowPendingStateArgs, 'entityId'>>;
+  connectorFreshnessAcquire?: Resolver<Array<ResolversTypes['ConnectorFreshnessDecision']>, ParentType, ContextType, RequireFields<MutationConnectorFreshnessAcquireArgs, 'input'>>;
+  connectorFreshnessComplete?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationConnectorFreshnessCompleteArgs, 'input'>>;
+  connectorFreshnessRelease?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationConnectorFreshnessReleaseArgs, 'input'>>;
   connectorJWT?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   connectorMigrateToManaged?: Resolver<ResolversTypes['ManagedConnector'], ParentType, ContextType, RequireFields<MutationConnectorMigrateToManagedArgs, 'input'>>;
   contactUsXtmHub?: Resolver<ResolversTypes['Success'], ParentType, ContextType, RequireFields<MutationContactUsXtmHubArgs, 'message'>>;
@@ -54163,6 +54237,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   ConnectorConfig?: ConnectorConfigResolvers<ContextType>;
   ConnectorConfiguration?: ConnectorConfigurationResolvers<ContextType>;
   ConnectorContractConfiguration?: ConnectorContractConfigurationResolvers<ContextType>;
+  ConnectorFreshnessDecision?: ConnectorFreshnessDecisionResolvers<ContextType>;
   ConnectorHealthMetrics?: ConnectorHealthMetricsResolvers<ContextType>;
   ConnectorInfo?: ConnectorInfoResolvers<ContextType>;
   ConnectorManager?: ConnectorManagerResolvers<ContextType>;

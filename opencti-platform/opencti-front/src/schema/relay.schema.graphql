@@ -10820,6 +10820,9 @@ type Mutation {
   batchMutationsExecute(operations: [BatchGraphqlOperationInput!]!, options: BatchExecuteOptionsInput): BatchMutationExecution!
   batchDeliveryReserveChildren(parent_delivery_id: ID!, children: [BatchDeliveryChildReservationInput!]!): BatchDeliveryHandoff!
   batchDeliveryMarkChildrenPublished(parent_delivery_id: ID!, child_delivery_ids: [ID!]!): BatchDeliveryHandoff!
+  connectorFreshnessAcquire(input: ConnectorFreshnessAcquireInput!): [ConnectorFreshnessDecision!]!
+  connectorFreshnessComplete(input: ConnectorFreshnessCompleteInput!): Boolean!
+  connectorFreshnessRelease(input: ConnectorFreshnessReleaseInput!): Boolean!
 }
 
 enum WorkflowExecutionStatus {
@@ -17262,4 +17265,40 @@ type BatchExecutionReconciliation {
   created_at: DateTime!
   updated_at: DateTime!
   last_error: String
+}
+
+enum ConnectorFreshnessStatus {
+  FRESH
+  ACQUIRED
+  IN_FLIGHT
+}
+
+input ConnectorFreshnessAcquireInput {
+  connector_id: String!
+  namespace: String!
+  keys: [String!]!
+  lease_ttl_seconds: Int!
+  force_refresh: Boolean
+}
+
+input ConnectorFreshnessCompleteInput {
+  connector_id: String!
+  namespace: String!
+  key: String!
+  lease_token: String!
+  freshness_ttl_seconds: Int!
+}
+
+input ConnectorFreshnessReleaseInput {
+  connector_id: String!
+  namespace: String!
+  key: String!
+  lease_token: String!
+}
+
+type ConnectorFreshnessDecision {
+  key: String!
+  status: ConnectorFreshnessStatus!
+  lease_token: String
+  retry_after_ms: Int!
 }

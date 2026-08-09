@@ -1,0 +1,41 @@
+enum ConnectorFreshnessStatus {
+  FRESH
+  ACQUIRED
+  IN_FLIGHT
+}
+
+input ConnectorFreshnessAcquireInput {
+  connector_id: String!
+  namespace: String!
+  keys: [String!]!
+  lease_ttl_seconds: Int!
+  force_refresh: Boolean
+}
+
+input ConnectorFreshnessCompleteInput {
+  connector_id: String!
+  namespace: String!
+  key: String!
+  lease_token: String!
+  freshness_ttl_seconds: Int!
+}
+
+input ConnectorFreshnessReleaseInput {
+  connector_id: String!
+  namespace: String!
+  key: String!
+  lease_token: String!
+}
+
+type ConnectorFreshnessDecision {
+  key: String!
+  status: ConnectorFreshnessStatus!
+  lease_token: String
+  retry_after_ms: Int!
+}
+
+extend type Mutation {
+  connectorFreshnessAcquire(input: ConnectorFreshnessAcquireInput!): [ConnectorFreshnessDecision!]! @auth(for: [CONNECTORAPI])
+  connectorFreshnessComplete(input: ConnectorFreshnessCompleteInput!): Boolean! @auth(for: [CONNECTORAPI])
+  connectorFreshnessRelease(input: ConnectorFreshnessReleaseInput!): Boolean! @auth(for: [CONNECTORAPI])
+}

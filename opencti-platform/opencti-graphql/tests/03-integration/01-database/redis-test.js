@@ -22,12 +22,16 @@ import {
   redisGetIngestionLogHistory,
   redisGetTelemetry,
   redisGetXtmAgentResponse,
+  redisAcquireConnectorFreshness,
+  redisCompleteConnectorFreshness,
+  redisReleaseConnectorFreshness,
   redisInit,
   redisPushIngestionLog,
   redisPlaybookUpdate,
   redisSetForgotPasswordOtp,
   redisSetTelemetryAdd,
   redisSetXtmAgentResponse,
+  CONNECTOR_FRESHNESS_STATUS,
   setEditContext,
 } from '../../../src/database/redis';
 import { OPENCTI_ADMIN_UUID } from '../../../src/schema/general';
@@ -244,6 +248,46 @@ describe('Redis XTM agent response cache', () => {
       const cached = await redisGetXtmAgentResponse(cacheKey);
       expect(cached, `payload ${payload} should be rejected`).toBeNull();
     }
+  });
+});
+
+describe('Redis connector freshness leases', () => {
+  it('should move from acquired to in-flight to fresh only for the matching token', async () => {
+    const connectorId = `connector-${uuid()}`;
+    const namespace = 'shodan-internetdb';
+    const key = `ipv4-${uuid()}`;
+
+    const first = await redisAcquireConnectorFreshness(connectorId, namespace, key, 60);
+    expect(first.status).toEqual(CONNECTOR_FRESHNESS_STATUS.Acquired);
+    expect(first.leaseToken).toBeTruthy();
+
+    const duplicate = await redisAcquireConnectorFreshness(connectorId, namespace, key, 60);
+    expect(duplicate.status).toEqual(CONNECTOR_FRESHNESS_STATUS.InFlight);
+    expect(duplicate.leaseToken).toBeNull();
+
+    await expect(redisCompleteConnectorFreshness(connectorId, namespace, key, 'wrong-token', 60)).resolves.toBe(false);
+    await expect(redisCompleteConnectorFreshness(connectorId, namespace, key, first.leaseToken, 60)).resolves.toBe(true);
+
+    const fresh = await redisAcquireConnectorFreshness(connectorId, namespace, key, 60);
+    expect(fresh.status).toEqual(CONNECTOR_FRESHNESS_STATUS.Fresh);
+    expect(fresh.leaseToken).toBeNull();
+  });
+
+  it('should let a forced refresh acquire a fresh key and release it for immediate retry', async () => {
+    const connectorId = `connector-${uuid()}`;
+    const namespace = 'shodan-internetdb';
+    const key = `ipv4-${uuid()}`;
+
+    const initial = await redisAcquireConnectorFreshness(connectorId, namespace, key, 60);
+    await expect(redisCompleteConnectorFreshness(connectorId, namespace, key, initial.leaseToken, 60)).resolves.toBe(true);
+
+    const forced = await redisAcquireConnectorFreshness(connectorId, namespace, key, 60, true);
+    expect(forced.status).toEqual(CONNECTOR_FRESHNESS_STATUS.Acquired);
+    await expect(redisReleaseConnectorFreshness(connectorId, namespace, key, 'wrong-token')).resolves.toBe(false);
+    await expect(redisReleaseConnectorFreshness(connectorId, namespace, key, forced.leaseToken)).resolves.toBe(true);
+
+    const retry = await redisAcquireConnectorFreshness(connectorId, namespace, key, 60, true);
+    expect(retry.status).toEqual(CONNECTOR_FRESHNESS_STATUS.Acquired);
   });
 });
 

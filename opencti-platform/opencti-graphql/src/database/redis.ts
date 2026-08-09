@@ -3,6 +3,7 @@ import type { ChainableCommander, CommonRedisOptions, ClusterOptions, RedisOptio
 import { Redlock } from '@sesamecare-oss/redlock';
 import { RedisPubSub } from 'graphql-redis-subscriptions';
 import * as R from 'ramda';
+import { createHash, randomUUID } from 'node:crypto';
 import conf, { booleanConf, configureCA, DEV_MODE, getStoppingState, loadCert, logApp, REDIS_PREFIX, TOPIC_PREFIX } from '../config/conf';
 import { isNotEmptyField } from './utils';
 import { DatabaseError, LockTimeoutError, TYPE_LOCK_ERROR } from '../config/errors';
@@ -746,6 +747,162 @@ const WORK_COMPLETION_FLAG_TTL = 86400; // 1 day, works complete well within it
 export const redisAcquireWorkCompletionFlag = async (workId: string): Promise<boolean> => {
   const result = await getClientBase().set(`work_completion_counted:${workId}`, '1', 'EX', WORK_COMPLETION_FLAG_TTL, 'NX');
   return result === 'OK';
+};
+// endregion
+
+// region connector freshness leases
+export const CONNECTOR_FRESHNESS_STATUS = {
+  Fresh: 'FRESH',
+  Acquired: 'ACQUIRED',
+  InFlight: 'IN_FLIGHT',
+} as const;
+
+export type ConnectorFreshnessStatus = typeof CONNECTOR_FRESHNESS_STATUS[keyof typeof CONNECTOR_FRESHNESS_STATUS];
+
+export interface ConnectorFreshnessDecision {
+  key: string;
+  status: ConnectorFreshnessStatus;
+  leaseToken: string | null;
+  retryAfterMs: number;
+}
+
+const CONNECTOR_FRESHNESS_KEY_PREFIX = 'connector_freshness:';
+
+const CONNECTOR_FRESHNESS_ACQUIRE_SCRIPT = `
+local fresh_key = KEYS[1]
+local lease_key = KEYS[2]
+local lease_token = ARGV[1]
+local lease_ttl_seconds = tonumber(ARGV[2])
+local force_refresh = ARGV[3] == '1'
+
+if not force_refresh and redis.call('EXISTS', fresh_key) == 1 then
+  local fresh_ttl_ms = redis.call('PTTL', fresh_key)
+  if fresh_ttl_ms < 0 then
+    fresh_ttl_ms = 0
+  end
+  return { 'FRESH', '', tostring(fresh_ttl_ms) }
+end
+
+if redis.call('SET', lease_key, lease_token, 'EX', lease_ttl_seconds, 'NX') then
+  return { 'ACQUIRED', lease_token, tostring(lease_ttl_seconds * 1000) }
+end
+
+local lease_ttl_ms = redis.call('PTTL', lease_key)
+if lease_ttl_ms < 0 then
+  lease_ttl_ms = 0
+end
+return { 'IN_FLIGHT', '', tostring(lease_ttl_ms) }
+`;
+
+const CONNECTOR_FRESHNESS_COMPLETE_SCRIPT = `
+local fresh_key = KEYS[1]
+local lease_key = KEYS[2]
+local lease_token = ARGV[1]
+local freshness_ttl_seconds = tonumber(ARGV[2])
+local fresh_value = ARGV[3]
+
+if redis.call('GET', lease_key) ~= lease_token then
+  return 0
+end
+
+redis.call('SET', fresh_key, fresh_value, 'EX', freshness_ttl_seconds)
+redis.call('DEL', lease_key)
+return 1
+`;
+
+const CONNECTOR_FRESHNESS_RELEASE_SCRIPT = `
+local lease_key = KEYS[1]
+local lease_token = ARGV[1]
+
+if redis.call('GET', lease_key) ~= lease_token then
+  return 0
+end
+
+return redis.call('DEL', lease_key)
+`;
+
+const connectorFreshnessKeyPair = (connectorId: string, namespace: string, key: string) => {
+  const digest = createHash('sha256').update(JSON.stringify([connectorId, namespace, key])).digest('hex');
+  const slot = `{${digest}}`;
+  return {
+    freshKey: `${CONNECTOR_FRESHNESS_KEY_PREFIX}${slot}:fresh`,
+    leaseKey: `${CONNECTOR_FRESHNESS_KEY_PREFIX}${slot}:lease`,
+  };
+};
+
+const parseConnectorFreshnessDecision = (key: string, rawDecision: unknown): ConnectorFreshnessDecision => {
+  if (!Array.isArray(rawDecision) || rawDecision.length < 3) {
+    throw DatabaseError('Invalid connector freshness decision from Redis', { key });
+  }
+  const status = String(rawDecision[0]) as ConnectorFreshnessStatus;
+  if (!Object.values(CONNECTOR_FRESHNESS_STATUS).includes(status)) {
+    throw DatabaseError('Invalid connector freshness status from Redis', { key, status });
+  }
+  const rawLeaseToken = String(rawDecision[1] ?? '');
+  const retryAfterMs = Math.max(0, Number(rawDecision[2]) || 0);
+  return {
+    key,
+    status,
+    leaseToken: rawLeaseToken.length > 0 ? rawLeaseToken : null,
+    retryAfterMs,
+  };
+};
+
+export const redisAcquireConnectorFreshness = async (
+  connectorId: string,
+  namespace: string,
+  key: string,
+  leaseTtlSeconds: number,
+  forceRefresh = false,
+): Promise<ConnectorFreshnessDecision> => {
+  const { freshKey, leaseKey } = connectorFreshnessKeyPair(connectorId, namespace, key);
+  const leaseToken = randomUUID();
+  const rawDecision = await getClientBase().eval(
+    CONNECTOR_FRESHNESS_ACQUIRE_SCRIPT,
+    2,
+    freshKey,
+    leaseKey,
+    leaseToken,
+    String(leaseTtlSeconds),
+    forceRefresh ? '1' : '0',
+  );
+  return parseConnectorFreshnessDecision(key, rawDecision);
+};
+
+export const redisCompleteConnectorFreshness = async (
+  connectorId: string,
+  namespace: string,
+  key: string,
+  leaseToken: string,
+  freshnessTtlSeconds: number,
+): Promise<boolean> => {
+  const { freshKey, leaseKey } = connectorFreshnessKeyPair(connectorId, namespace, key);
+  const result = await getClientBase().eval(
+    CONNECTOR_FRESHNESS_COMPLETE_SCRIPT,
+    2,
+    freshKey,
+    leaseKey,
+    leaseToken,
+    String(freshnessTtlSeconds),
+    new Date().toISOString(),
+  );
+  return Number(result) === 1;
+};
+
+export const redisReleaseConnectorFreshness = async (
+  connectorId: string,
+  namespace: string,
+  key: string,
+  leaseToken: string,
+): Promise<boolean> => {
+  const { leaseKey } = connectorFreshnessKeyPair(connectorId, namespace, key);
+  const result = await getClientBase().eval(
+    CONNECTOR_FRESHNESS_RELEASE_SCRIPT,
+    1,
+    leaseKey,
+    leaseToken,
+  );
+  return Number(result) === 1;
 };
 // endregion
 // region async calls tracking
