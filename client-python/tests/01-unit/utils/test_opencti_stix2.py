@@ -339,6 +339,117 @@ def _import_bundle_extracting_relationships(opencti_stix2, objects):
     )
 
 
+def test_import_bundle_reuses_exact_file_upload_external_reference_across_items():
+    opencti = _external_reference_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": "https://example.test/reference",
+                    "external_id": "REF-1",
+                    "x_opencti_files": [
+                        {
+                            "name": "payload.txt",
+                            "data": base64.b64encode(b"payload").decode("ascii"),
+                            "mime_type": "text/plain",
+                        }
+                    ],
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.create_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("field_name", "second_value"),
+    [
+        pytest.param("name", "attachment.txt", id="name"),
+        pytest.param("data", base64.b64encode(b"second").decode("ascii"), id="payload"),
+        pytest.param("mime_type", "application/json", id="mime-type"),
+        pytest.param(
+            "object_marking_refs",
+            ["marking-definition--2"],
+            id="object-marking-refs",
+        ),
+        pytest.param("no_trigger_import", True, id="no-trigger-import"),
+        pytest.param("embedded", True, id="embedded"),
+    ],
+)
+def test_import_bundle_keeps_changed_file_upload_external_reference_uncached(
+    field_name, second_value
+):
+    opencti = _external_reference_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    first_file = {
+        "name": "payload.txt",
+        "data": base64.b64encode(b"payload").decode("ascii"),
+        "mime_type": "text/plain",
+        "object_marking_refs": ["marking-definition--1"],
+        "no_trigger_import": False,
+        "embedded": False,
+    }
+    second_file = dict(first_file)
+    second_file[field_name] = second_value
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": "https://example.test/reference",
+                    "external_id": "REF-1",
+                    "x_opencti_files": [file_obj],
+                }
+            ],
+        }
+        for index, file_obj in enumerate((first_file, second_file))
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.create_calls == 2
+
+
+def test_import_bundle_does_not_reuse_file_upload_external_reference_across_bundles():
+    opencti = _external_reference_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": "malware--shared",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": "https://example.test/reference",
+                    "external_id": "REF-1",
+                    "x_opencti_files": [
+                        {
+                            "name": "payload.txt",
+                            "data": base64.b64encode(b"payload").decode("ascii"),
+                            "mime_type": "text/plain",
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.create_calls == 2
+
+
 @pytest.mark.parametrize(
     "field_name", ["external_references", "x_opencti_external_references"]
 )

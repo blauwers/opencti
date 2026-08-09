@@ -95,6 +95,9 @@ _EXPORT_CREATED_BY_CACHE: ContextVar[Optional[Dict[str, Dict]]] = ContextVar(
 _EXPORT_DATA_SOURCE_CACHE: ContextVar[Optional[Dict[str, Dict]]] = ContextVar(
     "_export_data_source_cache", default=None
 )
+_EXTERNAL_REFERENCE_FILE_REUSE_CACHE: ContextVar[
+    Optional[Dict[Tuple[Any, ...], str]]
+] = ContextVar("_external_reference_file_reuse_cache", default=None)
 EXPORT_ENTITY_LISTER_ATTRIBUTES: Dict[str, str] = {
     "Stix-Core-Object": "stix_core_object",
     "Stix-Domain-Object": "stix_domain_object",
@@ -198,6 +201,20 @@ def _scope_missing_import_vocabulary_values(method):
             return method(self, *args, **kwargs)
         finally:
             self._missing_import_vocabulary_values.reset(token)
+
+    return wrapped
+
+
+def _reuse_external_reference_file_reuse_cache(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        if _EXTERNAL_REFERENCE_FILE_REUSE_CACHE.get() is not None:
+            return method(self, *args, **kwargs)
+        token = _EXTERNAL_REFERENCE_FILE_REUSE_CACHE.set({})
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _EXTERNAL_REFERENCE_FILE_REUSE_CACHE.reset(token)
 
     return wrapped
 
@@ -383,6 +400,45 @@ class OpenCTIStix2:
             description,
         )
 
+    @staticmethod
+    def _external_reference_file_cache_key(
+        external_reference_cache_key: Tuple[Any, ...], file_objs: List[Dict]
+    ) -> Optional[Tuple[Any, ...]]:
+        file_signatures = []
+        has_upload_data = False
+        for file_obj in file_objs:
+            if not isinstance(file_obj, dict):
+                return None
+            if "data" in file_obj:
+                has_upload_data = True
+            object_marking_refs = file_obj.get("object_marking_refs")
+            if object_marking_refs is None:
+                object_marking_refs_key = None
+            elif isinstance(object_marking_refs, list):
+                object_marking_refs_key = tuple(object_marking_refs)
+            else:
+                return None
+            file_signature = (
+                file_obj.get("name"),
+                file_obj.get("data"),
+                file_obj.get("mime_type", "application/octet-stream"),
+                object_marking_refs_key,
+                file_obj.get("no_trigger_import", False),
+                file_obj.get("embedded", False),
+            )
+            try:
+                hash(file_signature)
+            except TypeError:
+                return None
+            file_signatures.append(file_signature)
+        if not has_upload_data:
+            return None
+        return (
+            "external_reference_with_files",
+            external_reference_cache_key,
+            tuple(file_signatures),
+        )
+
     def _get_external_reference_generated_id(self, url, source_name, external_id):
         if not all(
             value is None or isinstance(value, str)
@@ -417,6 +473,21 @@ class OpenCTIStix2:
         )
         if external_reference_cache_data is not None:
             return external_reference_cache_data["id"]
+
+        file_reuse_cache = _EXTERNAL_REFERENCE_FILE_REUSE_CACHE.get()
+        file_reuse_cache_key = (
+            self._external_reference_file_cache_key(
+                external_reference_cache_key, file_objs
+            )
+            if file_reuse_cache is not None and file_objs
+            else None
+        )
+        if (
+            file_reuse_cache is not None
+            and file_reuse_cache_key is not None
+            and file_reuse_cache_key in file_reuse_cache
+        ):
+            return file_reuse_cache[file_reuse_cache_key]
 
         files_to_upload = []
         files_markings = []
@@ -459,6 +530,8 @@ class OpenCTIStix2:
             external_reference_cache_key,
             {"id": external_reference_id},
         )
+        if file_reuse_cache is not None and file_reuse_cache_key is not None:
+            file_reuse_cache[file_reuse_cache_key] = external_reference_id
         return external_reference_id
 
     ######### UTILS
@@ -5598,6 +5671,7 @@ class OpenCTIStix2:
 
     @_scope_missing_import_label_values
     @_scope_missing_import_vocabulary_values
+    @_reuse_external_reference_file_reuse_cache
     def import_bundle(
         self,
         stix_bundle: Dict,
