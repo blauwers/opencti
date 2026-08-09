@@ -8,7 +8,7 @@ import { pageEntitiesOrRelationsConnection, storeLoadByIdWithRefs, transformPatc
 import { notify } from '../database/redis';
 import { BUS_TOPICS } from '../config/conf';
 import type { AuthContext, AuthUser } from '../types/user';
-import { type StixRefRelationshipAddInput, type StixRefRelationshipsAddInput } from '../generated/graphql';
+import { type StixRefRelationshipAddInput, type StixRefRelationshipsAddInput, type StixRefRelationshipsDeleteInput } from '../generated/graphql';
 import type { BasicStoreCommon, BasicStoreObject, BasicConnection } from '../types/store';
 import { schemaRelationsRefDefinition } from '../schema/schema-relationsRef';
 import { buildRelationData } from '../database/data-builder';
@@ -106,4 +106,22 @@ export const stixObjectOrRelationshipDeleteRefRelation = async (
     throw FunctionalError(`Only ${ABSTRACT_STIX_REF_RELATIONSHIP} can be deleted through this method.`, { id: stixObjectOrRelationshipId });
   }
   return patchElementWithRefRelationships(context, user, stixObjectOrRelationshipId, type, relationshipType, [toId], UPDATE_OPERATION_REMOVE, opts);
+};
+
+export const stixObjectOrRelationshipDeleteRefRelations = async (
+  context: AuthContext,
+  user: AuthUser,
+  stixObjectOrRelationshipId: string,
+  input: StixRefRelationshipsDeleteInput,
+  type: string,
+  opts = {},
+): Promise<any> => { // TODO remove any when all resolvers in ts
+  const stixObjectOrRelationship = await storeLoadById(context, user, stixObjectOrRelationshipId, type);
+  if (!stixObjectOrRelationship) {
+    throw FunctionalError('Cannot delete the relations, Stix-Object or Stix-Relationship cannot be found.', { id: stixObjectOrRelationshipId });
+  }
+  if (!isStixRefRelationship(input.relationship_type)) {
+    throw FunctionalError(`Only ${ABSTRACT_STIX_REF_RELATIONSHIP} can be deleted through this method.`, { id: stixObjectOrRelationshipId });
+  }
+  return patchElementWithRefRelationships(context, user, stixObjectOrRelationshipId, type, input.relationship_type, input.toIds, UPDATE_OPERATION_REMOVE, opts);
 };

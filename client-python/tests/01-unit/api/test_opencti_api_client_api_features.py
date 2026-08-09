@@ -1,6 +1,7 @@
 import threading
 
 from pycti.api.opencti_api_client import (
+    API_FEATURE_BULK_REF_RELATION_DELETE,
     API_FEATURE_BULK_REF_RELATION_VALIDATION,
     OpenCTIApiClient,
 )
@@ -21,13 +22,19 @@ def test_supports_api_feature_caches_advertised_features():
         query_calls.append(True)
         return {
             "data": {
-                "about": {"api_features": [API_FEATURE_BULK_REF_RELATION_VALIDATION]}
+                "about": {
+                    "api_features": [
+                        API_FEATURE_BULK_REF_RELATION_VALIDATION,
+                        API_FEATURE_BULK_REF_RELATION_DELETE,
+                    ]
+                }
             }
         }
 
     client = _client_with_query(query)
 
     assert client.supports_api_feature(API_FEATURE_BULK_REF_RELATION_VALIDATION)
+    assert client.supports_api_feature(API_FEATURE_BULK_REF_RELATION_DELETE)
     assert not client.supports_api_feature("UNKNOWN_FEATURE")
     assert len(query_calls) == 1
 

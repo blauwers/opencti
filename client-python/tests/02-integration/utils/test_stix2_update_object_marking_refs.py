@@ -1,10 +1,14 @@
 import uuid
 
-from pycti.api.opencti_api_client import API_FEATURE_BULK_REF_RELATION_VALIDATION
+from pycti.api.opencti_api_client import (
+    API_FEATURE_BULK_REF_RELATION_DELETE,
+    API_FEATURE_BULK_REF_RELATION_VALIDATION,
+)
 
 
-def test_stix2_update_add_object_marking_refs_supports_bulk_relation_edits(api_client):
+def test_stix2_update_object_marking_refs_support_bulk_relation_edits(api_client):
     assert api_client.supports_api_feature(API_FEATURE_BULK_REF_RELATION_VALIDATION)
+    assert api_client.supports_api_feature(API_FEATURE_BULK_REF_RELATION_DELETE)
 
     suffix = uuid.uuid4().hex
     intrusion_set = api_client.intrusion_set.create(
@@ -44,6 +48,25 @@ def test_stix2_update_add_object_marking_refs_supports_bulk_relation_edits(api_c
 
         assert set(updated_intrusion_set["objectMarkingIds"]) == set(marking_ids)
         assert set(updated_relationship["objectMarkingIds"]) == set(marking_ids)
+
+        api_client.stix2.stix2_update.remove_object_marking_refs(
+            "intrusion-set",
+            intrusion_set["id"],
+            [{"value": marking_id} for marking_id in marking_ids],
+        )
+        api_client.stix2.stix2_update.remove_object_marking_refs(
+            "relationship",
+            relationship["id"],
+            [{"value": marking_id} for marking_id in marking_ids],
+        )
+
+        updated_intrusion_set = api_client.intrusion_set.read(id=intrusion_set["id"])
+        updated_relationship = api_client.stix_core_relationship.read(
+            id=relationship["id"]
+        )
+
+        assert updated_intrusion_set["objectMarkingIds"] == []
+        assert updated_relationship["objectMarkingIds"] == []
     finally:
         api_client.stix_core_relationship.delete(id=relationship["id"])
         api_client.stix_domain_object.delete(id=intrusion_set["id"])

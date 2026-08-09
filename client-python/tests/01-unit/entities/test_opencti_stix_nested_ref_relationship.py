@@ -15,11 +15,14 @@ class _NestedRefOpenCTI:
 
     def query(self, query, variables):
         self.query_calls.append((query, variables))
+        result_field = (
+            "relationsDelete" if "relationsDelete" in query else "relationsAdd"
+        )
         if "stixSightingRelationshipEdit(id: $id)" in query:
             return {
                 "data": {
                     "stixSightingRelationshipEdit": {
-                        "relationsAdd": {"id": "sighting--1"},
+                        result_field: {"id": "sighting--1"},
                     }
                 }
             }
@@ -27,14 +30,14 @@ class _NestedRefOpenCTI:
             return {
                 "data": {
                     "stixCoreRelationshipEdit": {
-                        "relationsAdd": {"id": "relationship--1"},
+                        result_field: {"id": "relationship--1"},
                     }
                 }
             }
         return {
             "data": {
                 "stixCoreObjectEdit": {
-                    "relationsAdd": {"id": "observable--1"},
+                    result_field: {"id": "observable--1"},
                 }
             }
         }
@@ -127,6 +130,73 @@ def test_add_many_to_stix_sighting_relationship_uses_sighting_edit_field():
 
     assert result == {"id": "sighting--1"}
     assert "stixSightingRelationshipEdit(id: $id)" in opencti.query_calls[0][0]
+    assert opencti.query_calls[0][1] == {
+        "id": "sighting--1",
+        "input": {
+            "toIds": ["marking-definition--1", "marking-definition--2"],
+            "relationship_type": "object-marking",
+        },
+    }
+
+
+def test_remove_many_to_stix_core_object_normalizes_relationship_type():
+    opencti = _NestedRefOpenCTI()
+    nested_ref_relationship = StixNestedRefRelationship(opencti)
+
+    result = nested_ref_relationship.remove_many_to_stix_core_object(
+        "observable--1",
+        ["ipv4-addr--1", "ipv4-addr--2"],
+        "resolves-to",
+    )
+
+    assert result == {"id": "observable--1"}
+    assert "StixRefRelationshipsDeleteInput!" in opencti.query_calls[0][0]
+    assert "stixCoreObjectEdit(id: $id)" in opencti.query_calls[0][0]
+    assert "relationsDelete(input: $input)" in opencti.query_calls[0][0]
+    assert opencti.query_calls[0][1] == {
+        "id": "observable--1",
+        "input": {
+            "toIds": ["ipv4-addr--1", "ipv4-addr--2"],
+            "relationship_type": "obs_resolves-to",
+        },
+    }
+
+
+def test_remove_many_to_stix_core_relationship_uses_relationship_edit_field():
+    opencti = _NestedRefOpenCTI()
+    nested_ref_relationship = StixNestedRefRelationship(opencti)
+
+    result = nested_ref_relationship.remove_many_to_stix_core_relationship(
+        "relationship--1",
+        ["external-reference--1", "external-reference--2"],
+        "external-reference",
+    )
+
+    assert result == {"id": "relationship--1"}
+    assert "stixCoreRelationshipEdit(id: $id)" in opencti.query_calls[0][0]
+    assert "relationsDelete(input: $input)" in opencti.query_calls[0][0]
+    assert opencti.query_calls[0][1] == {
+        "id": "relationship--1",
+        "input": {
+            "toIds": ["external-reference--1", "external-reference--2"],
+            "relationship_type": "external-reference",
+        },
+    }
+
+
+def test_remove_many_to_stix_sighting_relationship_uses_sighting_edit_field():
+    opencti = _NestedRefOpenCTI()
+    nested_ref_relationship = StixNestedRefRelationship(opencti)
+
+    result = nested_ref_relationship.remove_many_to_stix_sighting_relationship(
+        "sighting--1",
+        ["marking-definition--1", "marking-definition--2"],
+        "object-marking",
+    )
+
+    assert result == {"id": "sighting--1"}
+    assert "stixSightingRelationshipEdit(id: $id)" in opencti.query_calls[0][0]
+    assert "relationsDelete(input: $input)" in opencti.query_calls[0][0]
     assert opencti.query_calls[0][1] == {
         "id": "sighting--1",
         "input": {

@@ -60,6 +60,7 @@ describe('Settings resolver standard behavior', () => {
     const { about } = queryResult.data;
     expect(about).not.toBeNull();
     expect(about.api_features).toContain('BULK_REF_RELATION_VALIDATION');
+    expect(about.api_features).toContain('BULK_REF_RELATION_DELETE');
     expect(about.dependencies.length).toEqual(4);
   });
   it('should settings information', async () => {
