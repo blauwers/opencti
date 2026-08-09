@@ -12,7 +12,7 @@ from pycti.api.opencti_api_batch import (
     BatchMutationPlanTooLarge,
     build_batch_result_token,
 )
-from pycti.utils.opencti_stix2 import OpenCTIStix2
+from pycti.utils.opencti_stix2 import IMPORT_PREFETCH_BATCH_SIZE, OpenCTIStix2
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 
@@ -159,6 +159,7 @@ def _external_reference_opencti():
         get_draft_id=lambda: "",
         get_attribute_in_extension=lambda _attribute, _entity: None,
         query=lambda _query: {"data": {"vocabularyCategories": []}},
+        logger_class=lambda _name: SimpleNamespace(warning=lambda *args: None),
         file=lambda name, data, mime_type: SimpleNamespace(
             name=name, data=data, mime=mime_type
         ),
@@ -282,6 +283,233 @@ def test_get_external_reference_generated_id_does_not_cache_non_string_inputs():
 
     assert first == second
     assert opencti.external_reference.generate_id_calls == 2
+
+
+class _ExternalReferencePrefetchRecorder(_ExternalReferenceRecorder):
+    def __init__(self):
+        super().__init__()
+        self.list_filters = []
+        self.create_payloads = []
+
+    def list(self, **kwargs):
+        ids = kwargs["filters"]["filters"][0]["values"]
+        self.list_filters.append(ids)
+        return [
+            {
+                "id": f"internal--{standard_id}",
+                "standard_id": standard_id,
+                "source_name": "benchmark",
+                "url": standard_id.removeprefix("external-reference--"),
+                "external_id": None,
+                "description": None,
+            }
+            for standard_id in ids
+        ]
+
+    def create(self, **kwargs):
+        self.create_calls += 1
+        self.create_payloads.append(kwargs)
+        return {
+            "id": f"internal--{self._generated_id(kwargs['url'], kwargs['source_name'], kwargs['external_id'])}"
+        }
+
+
+def _external_reference_prefetch_opencti():
+    opencti = _external_reference_opencti()
+    opencti.external_reference = _ExternalReferencePrefetchRecorder()
+    return opencti
+
+
+def _import_bundle_extracting_relationships(opencti_stix2, objects):
+    def import_item_with_retries(item, *_args, **_kwargs):
+        opencti_stix2.extract_embedded_relationships(item)
+        return None
+
+    opencti_stix2.import_item_with_retries = import_item_with_retries
+    return opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--benchmark",
+            "objects": objects,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["external_references", "x_opencti_external_references"]
+)
+def test_import_bundle_prefetches_existing_external_references_before_item_import(
+    field_name,
+):
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            field_name: [
+                {
+                    "source_name": "benchmark",
+                    "url": f"https://example.test/reference/{index}",
+                }
+            ],
+        }
+        for index in range(3)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.list_filters == [
+        [
+            "external-reference--https://example.test/reference/0",
+            "external-reference--https://example.test/reference/1",
+            "external-reference--https://example.test/reference/2",
+        ]
+    ]
+    assert opencti.external_reference.create_calls == 0
+
+
+def test_import_bundle_keeps_single_external_reference_on_per_item_create():
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        [
+            {
+                "id": "malware--1",
+                "type": "malware",
+                "external_references": [
+                    {
+                        "source_name": "benchmark",
+                        "url": "https://example.test/reference/1",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert opencti.external_reference.list_filters == []
+    assert opencti.external_reference.create_calls == 1
+
+
+def test_import_bundle_prefetches_existing_external_references_in_bounded_chunks():
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": f"https://example.test/reference/{index}",
+                }
+            ],
+        }
+        for index in range(IMPORT_PREFETCH_BATCH_SIZE + 1)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.list_filters[0] == [
+        f"external-reference--https://example.test/reference/{index}"
+        for index in range(IMPORT_PREFETCH_BATCH_SIZE)
+    ]
+    assert opencti.external_reference.list_filters[1] == [
+        f"external-reference--https://example.test/reference/{IMPORT_PREFETCH_BATCH_SIZE}"
+    ]
+    assert opencti.external_reference.create_calls == 0
+
+
+def test_import_bundle_keeps_changed_external_reference_metadata_on_per_item_create():
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": f"https://example.test/reference/{index}",
+                    "description": "changed",
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.list_filters == [
+        [
+            "external-reference--https://example.test/reference/0",
+            "external-reference--https://example.test/reference/1",
+        ]
+    ]
+    assert [
+        payload["description"] for payload in opencti.external_reference.create_payloads
+    ] == ["changed", "changed"]
+
+
+def test_import_bundle_skips_file_external_references_during_prefetch():
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": f"https://example.test/reference/{index}",
+                    "x_opencti_files": [
+                        {
+                            "name": "payload.txt",
+                            "data": base64.b64encode(b"payload").decode("ascii"),
+                        }
+                    ],
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.list_filters == []
+    assert opencti.external_reference.create_calls == 2
+
+
+def test_import_bundle_falls_back_to_per_item_external_reference_create_when_prefetch_fails():
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    opencti.external_reference.list = lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("prefetch failed")
+    )
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": f"https://example.test/reference/{index}",
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert [
+        payload["url"] for payload in opencti.external_reference.create_payloads
+    ] == [
+        "https://example.test/reference/0",
+        "https://example.test/reference/1",
+    ]
 
 
 def test_pick_aliases(opencti_stix2: OpenCTIStix2) -> None:
