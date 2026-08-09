@@ -959,6 +959,68 @@ class OpenCTIStix2:
             self.set_in_cache(name, author)
             return author
 
+    def _get_import_label_values(self, stix_object: Dict) -> List[str]:
+        if "labels" in stix_object:
+            return stix_object["labels"] or []
+
+        extension_labels = self.opencti.get_attribute_in_extension(
+            "labels", stix_object
+        )
+        if extension_labels is not None:
+            return extension_labels
+
+        if "x_opencti_labels" in stix_object:
+            return stix_object["x_opencti_labels"] or []
+        if "x_opencti_tags" in stix_object:
+            return [tag["value"] for tag in stix_object["x_opencti_tags"]]
+        return []
+
+    def _prefetch_import_labels(self, stix_objects: Iterable[Dict]) -> None:
+        uncached_label_values = []
+        seen_label_values = set()
+        for stix_object in stix_objects:
+            for label_value in self._get_import_label_values(stix_object):
+                if (
+                    label_value in seen_label_values
+                    or self.get_in_cache("label_" + label_value) is not None
+                ):
+                    continue
+                seen_label_values.add(label_value)
+                uncached_label_values.append(label_value)
+
+        if len(uncached_label_values) <= 1:
+            return
+
+        try:
+            for start_index in range(
+                0, len(uncached_label_values), IMPORT_PREFETCH_BATCH_SIZE
+            ):
+                batch_label_values = uncached_label_values[
+                    start_index : start_index + IMPORT_PREFETCH_BATCH_SIZE
+                ]
+                label_data_list = (
+                    self.opencti.label.list(
+                        filters={
+                            "mode": "and",
+                            "filters": [
+                                {
+                                    "key": "value",
+                                    "values": batch_label_values,
+                                }
+                            ],
+                            "filterGroups": [],
+                        },
+                        getAll=True,
+                    )
+                    or []
+                )
+                for label_data in label_data_list:
+                    self.set_in_cache("label_" + label_data["value"], label_data)
+        except Exception:
+            self.opencti.app_logger.warning(
+                "Cannot prefetch labels during bundle import"
+            )
+
     def _get_import_external_references(self, stix_object: Dict) -> List[Dict]:
         if (
             "external_references" in stix_object
@@ -4391,6 +4453,7 @@ class OpenCTIStix2:
                 ordered_elements,
             ) = backend_preparation
         self._prefetch_import_external_references(ordered_elements)
+        self._prefetch_import_labels(ordered_elements)
         backend_execution_phases = self._build_backend_execution_phases(
             backend_batch_plan
         )
