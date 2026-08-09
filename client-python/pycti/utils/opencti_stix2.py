@@ -12,7 +12,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from functools import wraps
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Collection, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urljoin, urlparse
 
 import datefinder
@@ -541,11 +541,11 @@ class OpenCTIStix2:
 
         return date_value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-    def filter_objects(self, uuids: List, objects: List) -> List:
+    def filter_objects(self, uuids: Collection[str], objects: List) -> List:
         """Filter objects based on UUIDs.
 
-        :param uuids: List of UUIDs to filter by
-        :type uuids: list
+        :param uuids: Collection of UUIDs to filter by
+        :type uuids: Collection[str]
         :param objects: List of objects to filter
         :type objects: list
         :return: List of filtered objects not in the uuids list
@@ -3803,7 +3803,7 @@ class OpenCTIStix2:
             withFiles=(mode == "full"),
         )
         if entities_list is not None:
-            uuids = []
+            uuids = set()
             for entity in entities_list:
                 entity_bundle = self.prepare_export(
                     entity=self.generate_export(entity),
@@ -3812,9 +3812,8 @@ class OpenCTIStix2:
                 )
                 if entity_bundle is not None:
                     entity_bundle_filtered = self.filter_objects(uuids, entity_bundle)
-                    for x in entity_bundle_filtered:
-                        uuids.append(x["id"])
-                    bundle["objects"] = bundle["objects"] + entity_bundle_filtered
+                    uuids.update(x["id"] for x in entity_bundle_filtered)
+                    bundle["objects"].extend(entity_bundle_filtered)
         self._rewrite_embedded_image_uris_in_bundle_for_export(bundle)
         return bundle
 
@@ -3841,7 +3840,7 @@ class OpenCTIStix2:
             "objects": [],
         }
 
-        uuids = []
+        uuids = set()
         for entity in entities_list:
             entity_bundle = self.prepare_export(
                 entity=self.generate_export(entity),
@@ -3850,13 +3849,10 @@ class OpenCTIStix2:
             )
             if entity_bundle is not None:
                 entity_bundle_filtered = self.filter_objects(uuids, entity_bundle)
-                for x in entity_bundle_filtered:
-                    uuids.append(x["id"])
-                bundle["objects"] = (
-                    bundle["objects"] + entity_bundle_filtered
-                )  # unsupported operand type(s) for +: 'dict' and 'list'
+                uuids.update(x["id"] for x in entity_bundle_filtered)
+                bundle["objects"].extend(entity_bundle_filtered)
 
-            self._rewrite_embedded_image_uris_in_bundle_for_export(bundle)
+        self._rewrite_embedded_image_uris_in_bundle_for_export(bundle)
         return bundle
 
     def apply_patch_files(self, item):
