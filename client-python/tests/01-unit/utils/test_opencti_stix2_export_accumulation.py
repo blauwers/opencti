@@ -241,6 +241,17 @@ def _container_root(identifier):
     }
 
 
+def _nested_ref_targets_by_root(count):
+    return {
+        f"root-{index}": [
+            _nested_ref_relationship(
+                f"nested-ref--{index}", f"root-{index}", f"target-{index}"
+            )
+        ]
+        for index in range(1, count + 1)
+    }
+
+
 def _related_object_data(target_identifier):
     return {
         "id": f"target-{target_identifier}",
@@ -1397,6 +1408,219 @@ def test_prepare_export_full_does_not_reread_contained_objects_as_object_refs():
     assert read_calls == ["target-1"]
     assert [item["id"] for item in result] == [
         "report--root-1",
+        "malware--target-1",
+    ]
+
+
+def test_export_selected_prefetches_nested_ref_targets_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection(
+        _nested_ref_targets_by_root(3)
+    )
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable nested-ref targets should not use the reader")
+    )
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {
+                        "key": "fromId",
+                        "values": [
+                            "target-target-1",
+                            "target-target-2",
+                            "target-target-3",
+                        ],
+                    }
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        },
+    ]
+    assert lister.kwargs == [
+        {
+            "filters": ["target-target-1", "target-target-2", "target-target-3"],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [item["id"] for item in result["objects"]] == [
+        "indicator--root-1",
+        "malware--target-1",
+        "indicator--root-2",
+        "malware--target-2",
+        "indicator--root-3",
+        "malware--target-3",
+    ]
+
+
+def test_export_list_prefetches_nested_ref_targets_across_roots():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection(_nested_ref_targets_by_root(3))
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable nested-ref targets should not use the reader")
+    )
+    helper.export_entities_list = lambda **_kwargs: _root_entities(3)
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_list(entity_type="Indicator", mode="full")
+
+    assert lister.filters == [["target-target-1", "target-target-2", "target-target-3"]]
+    assert [item["id"] for item in result["objects"]] == [
+        "indicator--root-1",
+        "malware--target-1",
+        "indicator--root-2",
+        "malware--target-2",
+        "indicator--root-3",
+        "malware--target-3",
+    ]
+
+
+def test_export_selected_prefetches_nested_ref_targets_in_bounded_chunks():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection(
+            _nested_ref_targets_by_root(EXPORT_PREFETCH_BATCH_SIZE + 1)
+        )
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, EXPORT_PREFETCH_BATCH_SIZE + 2)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable nested-ref targets should not use the reader")
+    )
+    _configure_related_object_export_conversion(helper)
+
+    helper.export_selected(
+        entities_list=_root_entities(EXPORT_PREFETCH_BATCH_SIZE + 1), mode="full"
+    )
+
+    assert [len(kwargs["filters"]) for kwargs in lister.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        1,
+    ]
+    assert [kwargs["first"] for kwargs in lister.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+    assert all(kwargs["getAll"] is True for kwargs in lister.kwargs)
+
+
+def test_export_selected_skips_nested_ref_targets_without_standard_ids():
+    nested_ref_targets_by_root = _nested_ref_targets_by_root(3)
+    del nested_ref_targets_by_root["root-2"][0]["to"]["standard_id"]
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection(nested_ref_targets_by_root)
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in (1, 3)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("only standard-id nested-ref targets should be fetched")
+    )
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert lister.filters == [["target-target-1", "target-target-3"]]
+    assert [item["id"] for item in result["objects"]] == [
+        "indicator--root-1",
+        "malware--target-1",
+        "indicator--root-2",
+        "indicator--root-3",
+        "malware--target-3",
+    ]
+
+
+def test_prepare_export_full_queues_nested_ref_targets_before_generic_refs():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection(_nested_ref_targets_by_root(1))
+    )
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return {
+            "id": "target-target-1",
+            "standard_id": "malware--target-1",
+            "entity_type": "Malware",
+            "parent_types": ["Stix-Domain-Object"],
+        }
+
+    helper.get_lister = lambda resolve_type: None
+    helper.get_reader = lambda resolve_type: read
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.prepare_export(entity=_root_entities(1)[0], mode="full")
+
+    assert read_calls == ["target-target-1"]
+    assert [item["id"] for item in result] == [
+        "indicator--root-1",
         "malware--target-1",
     ]
 

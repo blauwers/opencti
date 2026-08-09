@@ -3267,6 +3267,14 @@ class OpenCTIStix2:
                 ):
                     add_uncached_entity_object(entity_object)
 
+        if stix_nested_ref_relationships_by_entity_id is not None:
+            nested_ref_groups = stix_nested_ref_relationships_by_entity_id.values()
+            for nested_ref_relationships in nested_ref_groups:
+                for stix_nested_ref_relationship in nested_ref_relationships:
+                    entity_object = stix_nested_ref_relationship["to"]
+                    if "standard_id" in entity_object:
+                        add_uncached_entity_object(entity_object)
+
         for relationships_by_entity_id in (
             stix_core_relationships_by_entity_id,
             stix_sighting_relationships_by_entity_id,
@@ -3883,6 +3891,7 @@ class OpenCTIStix2:
             )
         for stix_nested_ref_relationship in stix_nested_ref_relationships:
             if "standard_id" in stix_nested_ref_relationship["to"]:
+                queue_known_related_object(stix_nested_ref_relationship["to"])
                 # dirty fix because the sample and operating-system ref are not multiple for a Malware Analysis
                 # will be replaced by a proper toStix converter in the back
                 if not MultipleRefRelationship.has_value(
