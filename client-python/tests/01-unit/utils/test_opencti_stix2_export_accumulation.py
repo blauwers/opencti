@@ -54,6 +54,20 @@ class _CountingCoreRelationshipCollection(_RelationshipCollection):
         return super().list(**kwargs)
 
 
+class _CountingSightingRelationshipCollection(_RelationshipCollection):
+    def __init__(self, relationships_by_root=None):
+        super().__init__(relationships_by_root or {})
+        self.kwargs = []
+
+    def list(self, **kwargs):
+        self.kwargs.append(kwargs)
+        if "fromOrToId" in kwargs:
+            return super().list(**kwargs)
+
+        from_or_to_ids = kwargs["filters"]["filters"][0]["values"]
+        return super().list(fromOrToId=from_or_to_ids)
+
+
 class _CountingRelatedObjectLister:
     def __init__(self, targets_by_id):
         self.targets_by_id = targets_by_id
@@ -629,6 +643,116 @@ def test_export_selected_copies_shared_core_relationships_for_each_root():
     assert [item["id"] for item in result["objects"]] == [
         "indicator--root-1",
         "relationship--shared",
+        "indicator--root-2",
+    ]
+
+
+def test_export_selected_prefetches_sighting_relationships_across_roots():
+    helper = _full_helper([])
+    sighting_relationships = _CountingSightingRelationshipCollection()
+    helper.opencti.stix_sighting_relationship = sighting_relationships
+
+    helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert sighting_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromOrToId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+
+
+def test_export_list_prefetches_sighting_relationships_across_roots():
+    helper = _full_helper([])
+    sighting_relationships = _CountingSightingRelationshipCollection()
+    helper.opencti.stix_sighting_relationship = sighting_relationships
+    helper.export_entities_list = lambda **_kwargs: _root_entities(3)
+    access_filter = {
+        "mode": "or",
+        "filters": [{"key": "objectLabel", "values": ["label--1"]}],
+        "filterGroups": [],
+    }
+
+    helper.export_list(
+        entity_type="Indicator", mode="full", access_filter=access_filter
+    )
+
+    assert sighting_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromOrToId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [access_filter],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+
+
+def test_export_selected_keeps_single_root_sighting_relationship_fallback():
+    helper = _full_helper([])
+    sighting_relationships = _CountingSightingRelationshipCollection()
+    helper.opencti.stix_sighting_relationship = sighting_relationships
+
+    helper.export_selected(entities_list=_root_entities(1), mode="full")
+
+    assert sighting_relationships.kwargs == [
+        {
+            "fromOrToId": "root-1",
+            "getAll": True,
+            "filters": None,
+        }
+    ]
+
+
+def test_export_selected_chunks_sighting_relationship_prefetch():
+    helper = _full_helper([])
+    sighting_relationships = _CountingSightingRelationshipCollection()
+    helper.opencti.stix_sighting_relationship = sighting_relationships
+
+    helper.export_selected(
+        entities_list=_root_entities(EXPORT_PREFETCH_BATCH_SIZE + 1), mode="full"
+    )
+
+    assert [
+        len(kwargs["filters"]["filters"][0]["values"])
+        for kwargs in sighting_relationships.kwargs
+    ] == [EXPORT_PREFETCH_BATCH_SIZE, 1]
+    assert [kwargs["first"] for kwargs in sighting_relationships.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+
+
+def test_export_selected_copies_shared_sighting_relationships_for_each_root():
+    shared_relationship = _relationship("sighting--shared", "root-2")
+    shared_relationship["from"]["id"] = "root-1"
+    shared_relationship["from"]["standard_id"] = "indicator--root-1"
+    shared_relationship["to"]["id"] = "root-2"
+    shared_relationship["to"]["standard_id"] = "indicator--root-2"
+    helper = _full_helper([])
+    helper.opencti.stix_sighting_relationship = _CountingSightingRelationshipCollection(
+        {
+            "root-1": [shared_relationship],
+            "root-2": [shared_relationship],
+        }
+    )
+
+    result = helper.export_selected(entities_list=_root_entities(2), mode="full")
+
+    assert [item["id"] for item in result["objects"]] == [
+        "indicator--root-1",
+        "sighting--shared",
         "indicator--root-2",
     ]
 
