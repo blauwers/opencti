@@ -12,6 +12,7 @@ from pycti.api.opencti_api_batch import (
 )
 from pycti.utils.opencti_stix2 import OpenCTIStix2
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
+from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 
 
 @pytest.fixture
@@ -900,6 +901,67 @@ def test_import_bundle_batch_uses_backend_preparation_without_legacy_splitter(
         {"source_name": "feed", "external_id": "1"},
         {"url": "https://example.test/a"},
     ]
+
+
+def test_import_bundle_skips_ref_count_when_limit_is_disabled(monkeypatch):
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+    compute_calls = []
+
+    monkeypatch.setattr(
+        OpenCTIStix2Utils,
+        "compute_object_refs_number",
+        lambda item: compute_calls.append(item["id"]) or 0,
+    )
+    monkeypatch.setattr(
+        opencti_stix2,
+        "import_item_with_retries",
+        lambda *_args, **_kwargs: None,
+    )
+
+    opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--disabled-max-refs",
+            "objects": [{"id": "malware--disabled", "type": "malware"}],
+        },
+        objects_max_refs=0,
+    )
+
+    assert compute_calls == []
+
+
+def test_import_bundle_counts_refs_when_limit_is_enabled(monkeypatch):
+    opencti_stix2 = OpenCTIStix2(MagicMock())
+    compute_calls = []
+
+    monkeypatch.setattr(
+        OpenCTIStix2Utils,
+        "compute_object_refs_number",
+        lambda item: compute_calls.append(item["id"]) or 1,
+    )
+    monkeypatch.setattr(
+        opencti_stix2,
+        "import_item_with_retries",
+        lambda *_args, **_kwargs: None,
+    )
+
+    imported, rejected = opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--enabled-max-refs",
+            "objects": [{"id": "malware--enabled", "type": "malware"}],
+        },
+        objects_max_refs=1,
+    )
+
+    assert compute_calls == ["malware--enabled"]
+    assert imported == []
+    assert len(rejected) == 1
+    assert rejected[0]["id"] == "malware--enabled"
+    assert rejected[0]["rejection_info"] == {
+        "reject_reason": "ELEMENT_TOO_LARGE",
+        "objects_max_refs": 1,
+    }
 
 
 def test_extract_embedded_storage_path_ignores_query_string(
