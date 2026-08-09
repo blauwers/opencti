@@ -3058,6 +3058,8 @@ class OpenCTIStix2:
         """
         if related_object_access_cache is None:
             related_object_access_cache = {}
+        if mode == "full" and "x_opencti_id" in entity:
+            related_object_access_cache[entity["x_opencti_id"]] = True
         result = []
         objects_to_get = []
         self._rewrite_embedded_image_uris_for_export(entity)
@@ -3816,12 +3818,22 @@ class OpenCTIStix2:
         )
         if entities_list is not None:
             uuids = set()
+            related_object_access_cache = {} if mode == "full" else None
             for entity in entities_list:
-                entity_bundle = self.prepare_export(
-                    entity=self.generate_export(entity),
-                    mode=mode,
-                    access_filter=access_filter,
-                )
+                export_entity = self.generate_export(entity)
+                if related_object_access_cache is None:
+                    entity_bundle = self.prepare_export(
+                        entity=export_entity,
+                        mode=mode,
+                        access_filter=access_filter,
+                    )
+                else:
+                    entity_bundle = self.prepare_export(
+                        entity=export_entity,
+                        mode=mode,
+                        access_filter=access_filter,
+                        related_object_access_cache=related_object_access_cache,
+                    )
                 if entity_bundle is not None:
                     entity_bundle_filtered = self.filter_objects(uuids, entity_bundle)
                     uuids.update(x["id"] for x in entity_bundle_filtered)
@@ -3853,12 +3865,22 @@ class OpenCTIStix2:
         }
 
         uuids = set()
+        related_object_access_cache = {} if mode == "full" else None
         for entity in entities_list:
-            entity_bundle = self.prepare_export(
-                entity=self.generate_export(entity),
-                mode=mode,
-                access_filter=access_filter,
-            )
+            export_entity = self.generate_export(entity)
+            if related_object_access_cache is None:
+                entity_bundle = self.prepare_export(
+                    entity=export_entity,
+                    mode=mode,
+                    access_filter=access_filter,
+                )
+            else:
+                entity_bundle = self.prepare_export(
+                    entity=export_entity,
+                    mode=mode,
+                    access_filter=access_filter,
+                    related_object_access_cache=related_object_access_cache,
+                )
             if entity_bundle is not None:
                 entity_bundle_filtered = self.filter_objects(uuids, entity_bundle)
                 uuids.update(x["id"] for x in entity_bundle_filtered)

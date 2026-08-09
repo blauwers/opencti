@@ -21,6 +21,14 @@ class _CountingCollection(_StaticCollection):
         return super().list(**kwargs)
 
 
+class _RelationshipCollection:
+    def __init__(self, relationships_by_root):
+        self.relationships_by_root = relationships_by_root
+
+    def list(self, **kwargs):
+        return self.relationships_by_root.get(kwargs["fromOrToId"], [])
+
+
 def _helper(entities=None):
     helper = OpenCTIStix2.__new__(OpenCTIStix2)
     helper.generate_export = lambda entity: entity
@@ -64,6 +72,28 @@ def _full_helper(relationships, access_collection=None):
     helper.prepare_id_filters_export = lambda entity_id, access_filter: None
     helper.get_reader = lambda resolve_type: lambda filters: None
     return helper
+
+
+def _shared_root_relationships():
+    relationships_by_root = {
+        f"root-{index}": [_relationship(f"relationship--{index}", "shared")]
+        for index in range(1, 4)
+    }
+    for index, relationships in enumerate(relationships_by_root.values(), start=1):
+        relationships[0]["from"]["id"] = f"root-{index}"
+        relationships[0]["from"]["standard_id"] = f"indicator--root-{index}"
+    return relationships_by_root
+
+
+def _shared_root_entities():
+    return [
+        {
+            "id": f"indicator--root-{index}",
+            "type": "indicator",
+            "x_opencti_id": f"root-{index}",
+        }
+        for index in range(1, 4)
+    ]
 
 
 def test_export_selected_deduplicates_and_rewrites_bundle_once():
@@ -110,7 +140,7 @@ def test_prepare_export_full_deduplicates_relationship_bundles():
     ]
 
 
-def test_prepare_export_full_checks_repeated_relation_endpoints_once():
+def test_prepare_export_full_checks_only_unseen_relation_endpoints_once():
     access_collection = _CountingCollection([{}])
     helper = _full_helper(
         [
@@ -128,7 +158,7 @@ def test_prepare_export_full_checks_repeated_relation_endpoints_once():
 
     helper.prepare_export(entity=entity, mode="full")
 
-    assert access_collection.list_calls == 2
+    assert access_collection.list_calls == 1
 
 
 def test_prepare_export_full_reads_repeated_related_object_once():
@@ -167,6 +197,31 @@ def test_prepare_export_full_reads_repeated_related_object_once():
         "relationship--3",
         "malware--shared",
     ]
+
+
+def test_export_selected_reuses_related_endpoint_access_across_roots():
+    access_collection = _CountingCollection([{}])
+    helper = _full_helper([], access_collection=access_collection)
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        _shared_root_relationships()
+    )
+
+    helper.export_selected(entities_list=_shared_root_entities(), mode="full")
+
+    assert access_collection.list_calls == 1
+
+
+def test_export_list_reuses_related_endpoint_access_across_roots():
+    access_collection = _CountingCollection([{}])
+    helper = _full_helper([], access_collection=access_collection)
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        _shared_root_relationships()
+    )
+    helper.export_entities_list = lambda **_kwargs: _shared_root_entities()
+
+    helper.export_list(entity_type="Indicator", mode="full")
+
+    assert access_collection.list_calls == 1
 
 
 def test_export_list_deduplicates_objects_and_rewrites_bundle_once():
