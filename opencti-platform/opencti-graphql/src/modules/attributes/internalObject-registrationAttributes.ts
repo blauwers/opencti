@@ -39,7 +39,13 @@ import {
 } from '../../schema/internalObject';
 import { schemaAttributesDefinition } from '../../schema/schema-attributes';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../../schema/stixMetaObject';
-import { ENTITY_TYPE_BATCH_DELIVERY, ENTITY_TYPE_BATCH_EXECUTION_RECEIPT, ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION, ENTITY_TYPE_BATCH_SUBMISSION } from '../batch/batch-types';
+import {
+  ENTITY_TYPE_BATCH_DELIVERY,
+  ENTITY_TYPE_BATCH_EXECUTION_RECEIPT,
+  ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION,
+  ENTITY_TYPE_BATCH_STREAM_PUBLICATION_MANIFEST,
+  ENTITY_TYPE_BATCH_SUBMISSION,
+} from '../batch/batch-types';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
 import { ENTITY_TYPE_PIR } from '../pir/pir-types';
 
@@ -629,6 +635,21 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
     { ...createdAt, isFilterable: false },
     { ...updatedAt, isFilterable: false },
     { name: 'last_error', label: 'Last error', type: 'string', format: 'text', editDefault: false, mandatoryType: 'no', multiple: false, upsert: false, isFilterable: false },
+  ],
+  [ENTITY_TYPE_BATCH_STREAM_PUBLICATION_MANIFEST]: [
+    { name: 'manifest_id', label: 'Manifest ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'receipt_id', label: 'Receipt ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'delivery_id', label: 'Delivery ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'submission_id', label: 'Submission ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'request_fingerprint', label: 'Request fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'request_contract_version', label: 'Request contract version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'manifest_version', label: 'Manifest version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'manifest_fingerprint', label: 'Manifest fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'entry_count', label: 'Entry count', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'serialized_bytes', label: 'Serialized bytes', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'entries', label: 'Entries', type: 'object', format: 'flat', editDefault: false, mandatoryType: 'internal', multiple: true, upsert: false, isFilterable: false },
+    { ...createdAt, isFilterable: false },
+    { ...updatedAt, isFilterable: false },
   ],
   [ENTITY_TYPE_BACKGROUND_TASK]: [
     {

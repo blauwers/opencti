@@ -7,10 +7,9 @@ import {
   REDIS_STREAM_PUBLICATION_PROOF_MAX_SERIALIZED_BYTES,
   RedisStreamPublicationProofAppendResult,
 } from '../../database/redis-stream';
-import type { StreamDataEvent } from '../../types/event';
 import { now } from '../../utils/format';
 import { hashSHA256 } from '../../utils/hash';
-import { BatchAdmissionErrorCode, type BatchStreamPublicationProof } from './batch-types';
+import { BatchAdmissionErrorCode, type BatchStreamPublicationEventSnapshot, type BatchStreamPublicationProof } from './batch-types';
 
 const BATCH_STREAM_PUBLICATION_ID_SCOPE = 'batch-stream-publication:';
 const BATCH_STREAM_PUBLICATION_PROOF_VERSION = 1;
@@ -29,9 +28,7 @@ const BATCH_STREAM_PUBLICATION_PROOF_FIELDS = new Set([
 export const BATCH_STREAM_PUBLICATION_PROOF_MAX_ENTRIES = REDIS_STREAM_PUBLICATION_PROOF_MAX_ENTRIES;
 export const BATCH_STREAM_PUBLICATION_PROOF_MAX_SERIALIZED_BYTES = REDIS_STREAM_PUBLICATION_PROOF_MAX_SERIALIZED_BYTES;
 
-export type ProofableStreamDataEvent = StreamDataEvent & {
-  event_id?: string;
-};
+export type ProofableStreamDataEvent = BatchStreamPublicationEventSnapshot;
 
 export interface AppendOrReturnBatchStreamPublicationProofInput {
   deliveryId: string;

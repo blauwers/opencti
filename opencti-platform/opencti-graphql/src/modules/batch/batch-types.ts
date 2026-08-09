@@ -1,9 +1,11 @@
 import type { BatchBundlePlan } from './batch-bundle-planner';
+import type { StreamDataEvent } from '../../types/event';
 
 export const ENTITY_TYPE_BATCH_SUBMISSION = 'BatchSubmission';
 export const ENTITY_TYPE_BATCH_DELIVERY = 'BatchDelivery';
 export const ENTITY_TYPE_BATCH_EXECUTION_RECEIPT = 'BatchExecutionReceipt';
 export const ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION = 'BatchExecutionReconciliation';
+export const ENTITY_TYPE_BATCH_STREAM_PUBLICATION_MANIFEST = 'BatchStreamPublicationManifest';
 
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
@@ -138,6 +140,7 @@ export enum BatchAdmissionErrorCode {
   ExecutionRequiresReconciliation = 'EXECUTION_REQUIRES_RECONCILIATION',
   ExecutionFailedTerminal = 'EXECUTION_FAILED_TERMINAL',
   StreamPublicationProofConflict = 'STREAM_PUBLICATION_PROOF_CONFLICT',
+  StreamPublicationManifestConflict = 'STREAM_PUBLICATION_MANIFEST_CONFLICT',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
   UnsupportedExecutionPreference = 'UNSUPPORTED_EXECUTION_PREFERENCE',
   ExecutionPreferenceNotEligible = 'EXECUTION_PREFERENCE_NOT_ELIGIBLE',
@@ -412,6 +415,44 @@ export interface BatchStreamPublicationProof {
   stream_entry_id: string;
   published_at: string;
   proof_version: number;
+}
+
+export type BatchStreamPublicationEventSnapshot = StreamDataEvent & {
+  event_id?: string;
+};
+
+export interface BatchStreamPublicationManifestEntry {
+  publication_sequence: number;
+  publication_key: string;
+  publication_id: string;
+  event_fingerprint: string;
+  event_snapshot: BatchStreamPublicationEventSnapshot;
+  event_snapshot_bytes: number;
+}
+
+export interface BatchStreamPublicationManifest {
+  id: string;
+  internal_id: string;
+  _id?: string;
+  _index?: string;
+  sort?: unknown;
+  standard_id: string;
+  entity_type: typeof ENTITY_TYPE_BATCH_STREAM_PUBLICATION_MANIFEST;
+  base_type: 'ENTITY';
+  parent_types: string[];
+  manifest_id: string;
+  receipt_id: string;
+  delivery_id: string;
+  submission_id: string;
+  request_fingerprint: string;
+  request_contract_version: number;
+  manifest_version: number;
+  manifest_fingerprint: string;
+  entry_count: number;
+  serialized_bytes: number;
+  entries: BatchStreamPublicationManifestEntry[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface BatchDeliveryChildReservationInput {
