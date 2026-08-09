@@ -549,7 +549,12 @@ class OpenCTIStix2:
             if embedded_storage_path is None:
                 return full_match
 
-            guessed_mime_type = mimetypes.guess_type(embedded_storage_path)[0]
+            mime_type = (
+                mimetypes.guess_type(embedded_storage_path)[0]
+                or "application/octet-stream"
+            )
+            if not mime_type.startswith("image/"):
+                return full_match
 
             if embedded_storage_path not in embedded_data_uri_by_path:
                 storage_url = urljoin(
@@ -575,13 +580,6 @@ class OpenCTIStix2:
                             serialize=True,
                         )
                 if not encoded_data:
-                    return full_match
-                mime_type = (
-                    guessed_mime_type
-                    or mimetypes.guess_type(embedded_storage_path)[0]
-                    or "application/octet-stream"
-                )
-                if not mime_type.startswith("image/"):
                     return full_match
                 embedded_data_uri_by_path[embedded_storage_path] = (
                     f"data:{mime_type};base64,{encoded_data}"

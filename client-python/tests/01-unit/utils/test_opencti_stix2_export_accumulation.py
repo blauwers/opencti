@@ -318,6 +318,16 @@ def _root_with_shared_file_marking(identifier):
     }
 
 
+def _root_with_embedded_markdown(identifier, suffix):
+    return {
+        "id": f"report--root-{identifier}",
+        "type": "report",
+        "entity_type": "Report",
+        "x_opencti_id": f"root-{identifier}",
+        "description": f"![asset](embedded/Report/root-{identifier}/payload.{suffix})",
+    }
+
+
 def _container_root(identifier):
     return {
         "id": f"report--root-{identifier}",
@@ -717,6 +727,56 @@ def test_export_selected_reuses_shared_file_marking_definition_conversion():
         "object_marking_refs"
     ] == ["marking-definition--shared"]
     assert build_calls == ["marking-definition--shared"]
+
+
+def test_export_selected_skips_non_image_embedded_markdown_fetches():
+    helper = _full_helper([])
+    helper.generate_export = lambda entity: entity.copy()
+    helper.opencti.api_url = "http://benchmark.invalid/graphql"
+    fetch_calls = []
+
+    def fake_fetch(url, binary=False, serialize=False):
+        fetch_calls.append((url, binary, serialize))
+        return "Zm9v"
+
+    helper.opencti.fetch_opencti_file = fake_fetch
+
+    result = helper.export_selected(
+        entities_list=[_root_with_embedded_markdown(1, "pdf")],
+        mode="simple",
+    )
+
+    assert result["objects"][0]["description"] == (
+        "![asset](embedded/Report/root-1/payload.pdf)"
+    )
+    assert fetch_calls == []
+
+
+def test_export_selected_still_rewrites_embedded_markdown_images():
+    helper = _full_helper([])
+    helper.generate_export = lambda entity: entity.copy()
+    helper.opencti.api_url = "http://benchmark.invalid/graphql"
+    fetch_calls = []
+
+    def fake_fetch(url, binary=False, serialize=False):
+        fetch_calls.append((url, binary, serialize))
+        return "Zm9v"
+
+    helper.opencti.fetch_opencti_file = fake_fetch
+
+    result = helper.export_selected(
+        entities_list=[_root_with_embedded_markdown(1, "png")],
+        mode="simple",
+    )
+
+    assert result["objects"][0]["description"] == "![asset](data:image/png;base64,Zm9v)"
+    assert fetch_calls == [
+        (
+            "http://benchmark.invalid/storage/get/embedded/Report/root-1/payload.png",
+            True,
+            True,
+        )
+    ]
 
 
 def test_prepare_export_full_deduplicates_relationship_bundles():
