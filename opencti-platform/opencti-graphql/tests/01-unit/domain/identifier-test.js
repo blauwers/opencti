@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { generateAliasesId, generateStandardId, normalizeName } from '../../../src/schema/identifier';
+import { describe, expect, it, vi } from 'vitest';
+import { generateAliasesId, generateStandardId, generateWorkId, normalizeName } from '../../../src/schema/identifier';
 import { cleanStixIds } from '../../../src/database/stix';
 import { generateInternalType } from '../../../src/schema/schemaUtils';
 import { schemaRelationsRefDefinition } from '../../../src/schema/schema-relationsRef';
@@ -56,6 +56,18 @@ describe('identifier', () => {
     expect(normalize).toEqual('my ♫̟  data  test');
     normalize = normalizeName('SnowFlake');
     expect(normalize).toEqual('snowflake');
+  });
+
+  it('should generate unique work ids within the same burst', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-23T00:00:00.000Z'));
+    try {
+      const workIds = Array.from({ length: 100 }, () => generateWorkId('connector--test').id);
+      expect(new Set(workIds).size).toEqual(workIds.length);
+      expect(workIds.every((workId) => workId.startsWith('work_connector--test_2026-07-23T00:00:00.000Z_'))).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // !! WARNING !!, this need to be changed along with tests/01-unit/stix/test_bundle_ids_rewrite.py

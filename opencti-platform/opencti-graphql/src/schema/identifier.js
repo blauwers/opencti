@@ -499,7 +499,7 @@ const generateStixId = (type, data) => {
 export const generateInternalId = () => uuidv4();
 export const generateWorkId = (connectorId) => {
   const timestamp = now();
-  return { id: `work_${connectorId}_${timestamp}`, timestamp };
+  return { id: `work_${connectorId}_${timestamp}_${uuidv4()}`, timestamp };
 };
 export const generateFileIndexId = (fileId) => {
   return uuidv5(fileId, OPENCTI_NAMESPACE);
