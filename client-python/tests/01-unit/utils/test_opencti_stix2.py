@@ -2094,6 +2094,110 @@ def test_import_observable_passes_embedded_flags_to_create(
     assert captured_kwargs.get("embedded") == [True]
 
 
+@pytest.mark.parametrize(
+    ("stix_type", "file_overrides", "update", "expected_payload_bin"),
+    [
+        pytest.param("artifact", {}, False, False, id="exact-duplicate"),
+        pytest.param("artifact", {}, True, False, id="exact-duplicate-update"),
+        pytest.param(
+            "artifact",
+            {"name": "attachment.bin"},
+            False,
+            True,
+            id="different-name",
+        ),
+        pytest.param(
+            "artifact",
+            {"mime_type": "text/plain"},
+            False,
+            True,
+            id="different-mime-type",
+        ),
+        pytest.param(
+            "artifact",
+            {"data": "YmFy"},
+            False,
+            True,
+            id="different-payload",
+        ),
+        pytest.param(
+            "artifact",
+            {"embedded": True},
+            False,
+            True,
+            id="embedded-file",
+        ),
+        pytest.param(
+            "artifact",
+            {"no_trigger_import": True},
+            False,
+            True,
+            id="no-trigger-import-file",
+        ),
+        pytest.param("file", {}, False, True, id="non-artifact"),
+    ],
+)
+def test_import_observable_skips_only_redundant_artifact_payload_upload(
+    monkeypatch, stix_type, file_overrides, update, expected_payload_bin
+):
+    captured_kwargs = {}
+
+    def fake_create(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"id": "artifact--1", "entity_type": "Artifact"}
+
+    fake_opencti = SimpleNamespace(
+        file=lambda name, data, mime_type: {
+            "name": name,
+            "data": data,
+            "mime_type": mime_type,
+        },
+        get_attribute_in_extension=lambda attribute, entity: None,
+        get_draft_id=lambda: "",
+        stix_cyber_observable=SimpleNamespace(create=fake_create),
+        stix_nested_ref_relationship=SimpleNamespace(create=lambda **kwargs: None),
+    )
+    opencti_stix2 = OpenCTIStix2(fake_opencti)
+    monkeypatch.setattr(
+        opencti_stix2,
+        "extract_embedded_relationships",
+        lambda stix_object, types=None: {
+            "created_by": None,
+            "object_marking": None,
+            "object_label": None,
+            "open_vocabs": {},
+            "granted_refs": [],
+            "kill_chain_phases": [],
+            "object_refs": [],
+            "external_references": [],
+            "reports": {},
+            "sample_refs": [],
+        },
+    )
+
+    x_opencti_file = {
+        "name": "payload.bin",
+        "data": "Zm9v",
+        "mime_type": "application/octet-stream",
+    }
+    x_opencti_file.update(file_overrides)
+    stix_object = {
+        "id": "artifact--11111111-1111-4111-8111-111111111111",
+        "type": stix_type,
+        "mime_type": "application/octet-stream",
+        "x_opencti_additional_names": ["nested/payload.bin"],
+        "payload_bin": "Zm9v",
+        "x_opencti_files": [x_opencti_file],
+    }
+
+    opencti_stix2.import_observable(stix_object, update=update)
+
+    assert ("payload_bin" in captured_kwargs["observableData"]) is expected_payload_bin
+    assert captured_kwargs["update"] is update
+    assert stix_object["payload_bin"] == "Zm9v"
+    assert len(captured_kwargs["files"]) == 1
+
+
 def test_import_observable_batches_nested_ref_relationship_creates(monkeypatch):
     class _NestedRefCollection:
         def __init__(self):
