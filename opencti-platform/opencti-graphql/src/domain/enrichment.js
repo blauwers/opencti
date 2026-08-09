@@ -17,6 +17,16 @@ const publishEventToConnectors = async (context, user, element, targetConnectors
   const draftContext = getDraftContext(context, user);
   const contextOutOfDraft = { ...context, draft_context: '' };
   const elementStandardId = element.standard_id;
+  let stixEntityPromise;
+  let stixObjectsPromise;
+  const loadStixEntity = () => {
+    stixEntityPromise ??= stixLoaders.loadById();
+    return stixEntityPromise;
+  };
+  const loadStixObjects = () => {
+    stixObjectsPromise ??= stixLoaders.bundleById();
+    return stixObjectsPromise;
+  };
   // Create a work for each connector
   const workMessage = draftContext ? `Enrichment (${elementStandardId}) in draft ${draftContext}` : `Enrichment (${elementStandardId})`;
   const workList = await Promise.all(
@@ -32,9 +42,9 @@ const publishEventToConnectors = async (context, user, element, targetConnectors
     const { connector, work } = workListElement;
     let stix_objects = null;
     const stixResolutionMode = connector.enrichment_resolution ?? 'stix_bundle';
-    const stix_entity = await stixLoaders.loadById();
+    const stix_entity = await loadStixEntity();
     if (stixResolutionMode === 'stix_bundle') {
-      stix_objects = await stixLoaders.bundleById();
+      stix_objects = await loadStixObjects();
     }
     const message = {
       internal: {
