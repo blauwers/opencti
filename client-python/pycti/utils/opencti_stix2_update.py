@@ -2,6 +2,7 @@ from pycti.utils.constants import StixCyberObservableTypes
 
 OBJECT_REF_CREATE_BATCH_SIZE = 100
 EXTERNAL_REFERENCE_RELATION_CREATE_BATCH_SIZE = 100
+KILL_CHAIN_PHASE_RELATION_CREATE_BATCH_SIZE = 100
 _OBJECT_REF_ENTITY_ATTRIBUTES = {
     "report": "report",
     "note": "note",
@@ -246,6 +247,9 @@ class OpenCTIStix2Update:
         :param version: Version of the patch format (default: 2)
         :type version: int
         """
+        add_kill_chain_phase = None
+        add_many = None
+        pending_kill_chain_phase_ids = []
         for kill_chain_phase in kill_chain_phases:
             if version == 2:
                 kill_chain_phase = kill_chain_phase["value"]
@@ -259,18 +263,71 @@ class OpenCTIStix2Update:
                 ),
                 stix_id=kill_chain_phase["id"] if "id" in kill_chain_phase else None,
             )["id"]
-            if entity_type == "relationship":
-                self.opencti.stix_core_relationship.add_kill_chain_phase(
+            if add_kill_chain_phase is None:
+                add_kill_chain_phase, add_many = (
+                    self._get_kill_chain_phase_relation_adders(entity_type)
+                )
+            if add_many is None:
+                add_kill_chain_phase(
                     id=entity_id, kill_chain_phase_id=kill_chain_phase_id
                 )
-            elif StixCyberObservableTypes.has_value(entity_type):
-                self.opencti.stix_cyber_observable.add_kill_chain_phase(
+                continue
+            pending_kill_chain_phase_ids.append(kill_chain_phase_id)
+            if (
+                len(pending_kill_chain_phase_ids)
+                >= KILL_CHAIN_PHASE_RELATION_CREATE_BATCH_SIZE
+            ):
+                self._flush_kill_chain_phase_relation_batch(
+                    entity_id,
+                    pending_kill_chain_phase_ids,
+                    add_kill_chain_phase,
+                    add_many,
+                )
+                pending_kill_chain_phase_ids = []
+
+        if add_kill_chain_phase is None:
+            return
+        self._flush_kill_chain_phase_relation_batch(
+            entity_id,
+            pending_kill_chain_phase_ids,
+            add_kill_chain_phase,
+            add_many,
+        )
+
+    def _get_kill_chain_phase_relation_adders(self, entity_type):
+        nested_ref_relationship = getattr(
+            self.opencti, "stix_nested_ref_relationship", None
+        )
+        if entity_type == "relationship":
+            return (
+                self.opencti.stix_core_relationship.add_kill_chain_phase,
+                getattr(
+                    nested_ref_relationship, "add_many_to_stix_core_relationship", None
+                ),
+            )
+        if StixCyberObservableTypes.has_value(entity_type):
+            return (
+                self.opencti.stix_cyber_observable.add_kill_chain_phase,
+                getattr(nested_ref_relationship, "add_many_to_stix_core_object", None),
+            )
+        return (
+            self.opencti.stix_domain_object.add_kill_chain_phase,
+            getattr(nested_ref_relationship, "add_many_to_stix_core_object", None),
+        )
+
+    @staticmethod
+    def _flush_kill_chain_phase_relation_batch(
+        entity_id, kill_chain_phase_ids, add_kill_chain_phase, add_many
+    ):
+        if len(kill_chain_phase_ids) == 0:
+            return
+        if add_many is None or len(kill_chain_phase_ids) == 1:
+            for kill_chain_phase_id in kill_chain_phase_ids:
+                add_kill_chain_phase(
                     id=entity_id, kill_chain_phase_id=kill_chain_phase_id
                 )
-            else:
-                self.opencti.stix_domain_object.add_kill_chain_phase(
-                    id=entity_id, kill_chain_phase_id=kill_chain_phase_id
-                )
+            return
+        add_many(entity_id, kill_chain_phase_ids, "kill-chain-phase")
 
     def remove_kill_chain_phases(self, entity_type, entity_id, kill_chain_phases):
         """Remove kill chain phases from an entity.
