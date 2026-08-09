@@ -758,6 +758,7 @@ class _VocabularyPrefetchRecorder:
         self.list_filters = []
         self.list_kwargs = []
         self.read_or_create_calls = []
+        self.create_calls = []
         self.existing_values = None
         self.list_results = None
 
@@ -790,6 +791,16 @@ class _VocabularyPrefetchRecorder:
                 "category": {"key": category},
             }
         return cache[vocab_key]
+
+    def create(self, **kwargs):
+        self.create_calls.append(
+            (kwargs["name"], kwargs["required"], kwargs["category"])
+        )
+        return {
+            "id": f"vocabulary--{kwargs['name']}",
+            "name": kwargs["name"],
+            "category": {"key": kwargs["category"]},
+        }
 
 
 def _vocabulary_prefetch_opencti(vocabulary_categories=None):
@@ -909,6 +920,7 @@ def test_import_bundle_reuses_normalized_vocabulary_prefetch_matches():
         opencti_stix2.mapping_cache_permanent["vocab_malware_type_ov_ malware "]["id"]
         == "vocabulary--malware"
     )
+    assert opencti.vocabulary.create_calls == []
 
 
 def test_import_bundle_does_not_seed_ambiguous_vocabulary_aliases_without_category():
@@ -955,6 +967,7 @@ def test_import_bundle_does_not_seed_ambiguous_vocabulary_aliases_without_catego
         ("agent", False, "threat_actor_individual_role_ov"),
         ("independent", False, "threat_actor_individual_role_ov"),
     ]
+    assert opencti.vocabulary.create_calls == []
 
 
 def test_prefetch_import_vocabularies_keeps_batch_cache_entries_scoped():
@@ -995,6 +1008,56 @@ def test_import_bundle_falls_back_to_per_item_vocabulary_resolution_when_prefetc
         ("vocab-0", False, "malware_type_ov"),
         ("vocab-1", False, "malware_type_ov"),
     ]
+    assert opencti.vocabulary.create_calls == []
+
+
+def test_import_bundle_skips_redundant_reads_for_vocabularies_prefetched_as_missing():
+    opencti = _vocabulary_prefetch_opencti()
+    opencti.vocabulary.existing_values = set()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "malware_types": [f"vocab-{index}"],
+        }
+        for index in range(3)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.vocabulary.list_filters == [["vocab-0", "vocab-1", "vocab-2"]]
+    assert opencti.vocabulary.read_or_create_calls == []
+    assert opencti.vocabulary.create_calls == [
+        ("vocab-0", False, "malware_type_ov"),
+        ("vocab-1", False, "malware_type_ov"),
+        ("vocab-2", False, "malware_type_ov"),
+    ]
+
+
+def test_import_bundle_does_not_reuse_missing_vocabulary_proof_between_imports():
+    opencti = _vocabulary_prefetch_opencti()
+    opencti.vocabulary.existing_values = set()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {"id": "malware--0", "type": "malware", "malware_types": ["vocab-0"]},
+        {"id": "malware--1", "type": "malware", "malware_types": ["vocab-1"]},
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    opencti_stix2.mapping_cache_permanent.pop("vocab_malware_type_ov_vocab-0")
+    opencti.vocabulary.read_or_create_calls.clear()
+    opencti.vocabulary.create_calls.clear()
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        [{"id": "malware--2", "type": "malware", "malware_types": ["vocab-0"]}],
+    )
+
+    assert opencti.vocabulary.read_or_create_calls == [
+        ("vocab-0", False, "malware_type_ov")
+    ]
+    assert opencti.vocabulary.create_calls == []
 
 
 def test_pick_aliases(opencti_stix2: OpenCTIStix2) -> None:

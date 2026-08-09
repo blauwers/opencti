@@ -128,6 +128,18 @@ def _scope_missing_import_label_values(method):
     return wrapped
 
 
+def _scope_missing_import_vocabulary_values(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        token = self._missing_import_vocabulary_values.set(set())
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._missing_import_vocabulary_values.reset(token)
+
+    return wrapped
+
+
 class OpenCTIStix2:
     """Python API for Stix2 in OpenCTI.
 
@@ -158,6 +170,10 @@ class OpenCTIStix2:
         )
         self._missing_import_label_values = ContextVar(
             f"opencti_stix2_missing_import_label_values_{id(self)}",
+            default=None,
+        )
+        self._missing_import_vocabulary_values = ContextVar(
+            f"opencti_stix2_missing_import_vocabulary_values_{id(self)}",
             default=None,
         )
 
@@ -1076,12 +1092,22 @@ class OpenCTIStix2:
             else "vocab_" + vocabulary_value
         )
 
+    def _get_import_vocabulary_category(
+        self, field: Dict, mapping_cache_permanent: Optional[Dict] = None
+    ) -> Optional[str]:
+        if mapping_cache_permanent is None:
+            mapping_cache_permanent = self._get_mapping_cache_permanent()
+        return field.get(
+            "category", mapping_cache_permanent.get("category_" + field["key"])
+        )
+
     def _prefetch_import_vocabularies(self, stix_objects: Iterable[Dict]) -> None:
         mapping_cache_permanent = self._get_mapping_cache_permanent()
         vocabulary_definition_fields = None
         uncached_vocabulary_values = []
         seen_vocabulary_values = set()
         requested_categories_by_value = {}
+        missing_vocabulary_values = self._missing_import_vocabulary_values.get()
         try:
             for stix_object in stix_objects:
                 if vocabulary_definition_fields is None:
@@ -1104,7 +1130,9 @@ class OpenCTIStix2:
                         if isinstance(vocabulary_value, list)
                         else [vocabulary_value]
                     )
-                    vocabulary_category = field.get("category")
+                    vocabulary_category = self._get_import_vocabulary_category(
+                        field, mapping_cache_permanent
+                    )
                     for value in values:
                         cache_key = self._get_import_vocabulary_cache_key(
                             value, vocabulary_category
@@ -1157,6 +1185,8 @@ class OpenCTIStix2:
                             vocabulary_value, {None}
                         )
                     )
+                existing_vocabulary_values = set()
+                unknown_vocabulary_values = set()
                 for vocabulary_data in vocabulary_data_list:
                     vocabulary_name = vocabulary_data["name"]
                     matching_candidates = batch_candidates_by_normalized_value.get(
@@ -1173,6 +1203,10 @@ class OpenCTIStix2:
                             category for _, category in matching_candidates
                         }
                         if len(requested_categories) != 1:
+                            unknown_vocabulary_values.update(
+                                (category, value)
+                                for value, category in matching_candidates
+                            )
                             continue
                         vocabulary_category = next(iter(requested_categories))
                     mapping_cache_permanent[
@@ -1194,6 +1228,9 @@ class OpenCTIStix2:
                             and matching_vocabulary_category != vocabulary_category
                         ):
                             continue
+                        existing_vocabulary_values.add(
+                            (matching_vocabulary_category, matching_vocabulary_value)
+                        )
                         mapping_cache_permanent[
                             self._get_import_vocabulary_cache_key(
                                 matching_vocabulary_value,
@@ -1204,7 +1241,24 @@ class OpenCTIStix2:
                             mapping_cache_permanent[
                                 "vocab_" + matching_vocabulary_value
                             ] = vocabulary_data
+                if missing_vocabulary_values is not None:
+                    missing_vocabulary_values.update(
+                        (vocabulary_category, vocabulary_value)
+                        for vocabulary_value in batch_vocabulary_values
+                        for vocabulary_category in requested_categories_by_value.get(
+                            vocabulary_value, {None}
+                        )
+                        if (
+                            vocabulary_category,
+                            vocabulary_value,
+                        )
+                        not in existing_vocabulary_values
+                        and (vocabulary_category, vocabulary_value)
+                        not in unknown_vocabulary_values
+                    )
         except Exception:
+            if missing_vocabulary_values is not None:
+                missing_vocabulary_values.clear()
             self.opencti.app_logger.warning(
                 "Cannot prefetch vocabularies during bundle import"
             )
@@ -1425,6 +1479,35 @@ class OpenCTIStix2:
             self.set_in_cache(label_key, label_data)
         return label_data
 
+    def _resolve_import_vocabulary(self, vocab: str, field: Dict) -> Optional[Dict]:
+        mapping_cache_permanent = self._get_mapping_cache_permanent()
+        category = self._get_import_vocabulary_category(field, mapping_cache_permanent)
+        vocab_key = self._get_import_vocabulary_cache_key(vocab, category)
+        vocab_data = mapping_cache_permanent.get(vocab_key)
+        if vocab_data is None:
+            missing_vocabulary_values = self._missing_import_vocabulary_values.get()
+            if (
+                missing_vocabulary_values is not None
+                and (category, vocab) in missing_vocabulary_values
+            ):
+                try:
+                    vocab_data = self.opencti.vocabulary.create(
+                        name=vocab,
+                        required=field["required"],
+                        category=category,
+                    )
+                except ValueError:
+                    vocab_data = None
+            else:
+                vocab_data = (
+                    self.opencti.vocabulary.read_or_create_unchecked_with_cache(
+                        vocab, mapping_cache_permanent, field=field
+                    )
+                )
+        if vocab_data is not None:
+            mapping_cache_permanent[vocab_key] = vocab_data
+        return vocab_data
+
     def extract_embedded_relationships(
         self, stix_object: Dict, types: List = None
     ) -> Dict:
@@ -1460,7 +1543,6 @@ class OpenCTIStix2:
 
         # Open vocabularies
         object_open_vocabularies = {}
-        mapping_cache_permanent = self._get_mapping_cache_permanent()
         vocabulary_fields = self._get_import_vocabulary_fields(stix_object)
 
         if vocabulary_fields:
@@ -1473,20 +1555,14 @@ class OpenCTIStix2:
                 if isinstance(stix_object.get(f["key"]), list):
                     object_open_vocabularies[f["key"]] = []
                     for vocab in stix_object[f["key"]]:
-                        resolved_vocab = (
-                            self.opencti.vocabulary.read_or_create_unchecked_with_cache(
-                                vocab, mapping_cache_permanent, field=f
-                            )
-                        )
+                        resolved_vocab = self._resolve_import_vocabulary(vocab, f)
                         if resolved_vocab is not None:
                             object_open_vocabularies[f["key"]].append(
                                 resolved_vocab["name"]
                             )
                 else:
-                    resolved_vocab = (
-                        self.opencti.vocabulary.read_or_create_unchecked_with_cache(
-                            stix_object[f["key"]], mapping_cache_permanent, field=f
-                        )
+                    resolved_vocab = self._resolve_import_vocabulary(
+                        stix_object[f["key"]], f
                     )
                     if resolved_vocab is not None:
                         object_open_vocabularies[f["key"]] = resolved_vocab["name"]
@@ -4585,6 +4661,7 @@ class OpenCTIStix2:
         return ignored_object_count, incompatible_elements, ordered_elements
 
     @_scope_missing_import_label_values
+    @_scope_missing_import_vocabulary_values
     def import_bundle(
         self,
         stix_bundle: Dict,
