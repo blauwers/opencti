@@ -224,6 +224,53 @@ def test_export_list_reuses_related_endpoint_access_across_roots():
     assert access_collection.list_calls == 1
 
 
+def test_export_selected_reuses_related_object_reads_across_roots():
+    helper = _full_helper([])
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        _shared_root_relationships()
+    )
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return {
+            "id": "malware--shared",
+            "type": "malware",
+            "x_opencti_id": "target-shared",
+        }
+
+    helper.get_reader = lambda resolve_type: read
+    helper.generate_export = lambda entity: entity.copy()
+
+    helper.export_selected(entities_list=_shared_root_entities(), mode="full")
+
+    assert len(read_calls) == 1
+
+
+def test_export_list_reuses_related_object_reads_across_roots():
+    helper = _full_helper([])
+    helper.opencti.stix_core_relationship = _RelationshipCollection(
+        _shared_root_relationships()
+    )
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return {
+            "id": "malware--shared",
+            "type": "malware",
+            "x_opencti_id": "target-shared",
+        }
+
+    helper.get_reader = lambda resolve_type: read
+    helper.generate_export = lambda entity: entity.copy()
+    helper.export_entities_list = lambda **_kwargs: _shared_root_entities()
+
+    helper.export_list(entity_type="Indicator", mode="full")
+
+    assert len(read_calls) == 1
+
+
 def test_export_list_deduplicates_objects_and_rewrites_bundle_once():
     entities = [
         {"id": "indicator--1", "type": "indicator"},
