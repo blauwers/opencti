@@ -856,7 +856,7 @@ def test_export_selected_keeps_single_root_nested_ref_relationship_fallback():
     ]
 
 
-def test_prepare_export_simple_keeps_nested_ref_relationship_one_page_call_shape():
+def test_prepare_export_simple_paginates_nested_ref_relationships():
     helper = _full_helper([])
     nested_ref_relationships = _CountingNestedRefRelationshipCollection()
     helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
@@ -867,6 +867,90 @@ def test_prepare_export_simple_keeps_nested_ref_relationship_one_page_call_shape
         {
             "fromId": "root-1",
             "filters": None,
+            "getAll": True,
+        }
+    ]
+
+
+def test_export_selected_simple_prefetches_nested_ref_relationships_across_roots():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection(
+        {
+            "root-1": [_nested_ref_relationship("nested-ref--1", "root-1", "target-1")],
+            "root-2": [_nested_ref_relationship("nested-ref--2", "root-2", "target-2")],
+            "root-3": [_nested_ref_relationship("nested-ref--3", "root-3", "target-3")],
+        }
+    )
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    result = helper.export_selected(entities_list=_root_entities(3), mode="simple")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [item["sample_refs"] for item in result["objects"]] == [
+        ["malware--target-1"],
+        ["malware--target-2"],
+        ["malware--target-3"],
+    ]
+
+
+def test_export_list_simple_prefetches_nested_ref_relationships_across_roots():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection(
+        {
+            "root-1": [_nested_ref_relationship("nested-ref--1", "root-1", "target-1")],
+            "root-2": [_nested_ref_relationship("nested-ref--2", "root-2", "target-2")],
+            "root-3": [_nested_ref_relationship("nested-ref--3", "root-3", "target-3")],
+        }
+    )
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    helper.export_entities_list = lambda **_kwargs: _root_entities(3)
+
+    result = helper.export_list(entity_type="Indicator", mode="simple")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [item["sample_refs"] for item in result["objects"]] == [
+        ["malware--target-1"],
+        ["malware--target-2"],
+        ["malware--target-3"],
+    ]
+
+
+def test_export_selected_simple_keeps_single_root_nested_ref_relationship_fallback():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    helper.export_selected(entities_list=_root_entities(1), mode="simple")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "fromId": "root-1",
+            "filters": None,
+            "getAll": True,
         }
     ]
 
@@ -1050,6 +1134,7 @@ def test_recursive_nested_ref_prefetch_keeps_singleton_fallback():
         {
             "fromId": "new-1",
             "filters": None,
+            "getAll": True,
         }
     ]
 

@@ -3682,9 +3682,8 @@ class OpenCTIStix2:
             nested_ref_list_kwargs = {
                 "fromId": entity["x_opencti_id"],
                 "filters": access_filter,
+                "getAll": True,
             }
-            if mode == "full":
-                nested_ref_list_kwargs["getAll"] = True
             stix_nested_ref_relationships = (
                 self.opencti.stix_nested_ref_relationship.list(**nested_ref_list_kwargs)
             )
@@ -4253,8 +4252,20 @@ class OpenCTIStix2:
                 self._prefetch_export_nested_ref_relationships(
                     entities_list, access_filter
                 )
-                if mode == "full"
+                if getattr(
+                    getattr(self, "opencti", None),
+                    "stix_nested_ref_relationship",
+                    None,
+                )
+                is not None
                 else None
+            )
+            nested_ref_prefetch_kwargs = (
+                {
+                    "stix_nested_ref_relationships_by_entity_id": stix_nested_ref_relationships_by_entity_id
+                }
+                if stix_nested_ref_relationships_by_entity_id is not None
+                else {}
             )
             for entity in entities_list:
                 export_entity = self.generate_export(entity)
@@ -4263,6 +4274,7 @@ class OpenCTIStix2:
                         entity=export_entity,
                         mode=mode,
                         access_filter=access_filter,
+                        **nested_ref_prefetch_kwargs,
                     )
                 else:
                     entity_bundle = self.prepare_export(
@@ -4320,8 +4332,20 @@ class OpenCTIStix2:
         )
         stix_nested_ref_relationships_by_entity_id = (
             self._prefetch_export_nested_ref_relationships(entities_list, access_filter)
-            if mode == "full"
+            if getattr(
+                getattr(self, "opencti", None),
+                "stix_nested_ref_relationship",
+                None,
+            )
+            is not None
             else None
+        )
+        nested_ref_prefetch_kwargs = (
+            {
+                "stix_nested_ref_relationships_by_entity_id": stix_nested_ref_relationships_by_entity_id
+            }
+            if stix_nested_ref_relationships_by_entity_id is not None
+            else {}
         )
         for entity in entities_list:
             export_entity = self.generate_export(entity)
@@ -4330,6 +4354,7 @@ class OpenCTIStix2:
                     entity=export_entity,
                     mode=mode,
                     access_filter=access_filter,
+                    **nested_ref_prefetch_kwargs,
                 )
             else:
                 entity_bundle = self.prepare_export(
