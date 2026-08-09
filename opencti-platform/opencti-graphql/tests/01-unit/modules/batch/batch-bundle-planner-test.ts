@@ -212,6 +212,48 @@ describe('batch bundle planner', () => {
     expect(plan.executionPhases).toEqual([{ phase: 0, objectIds: [identityId] }]);
   });
 
+  it('deduplicates repeated local refs while preserving first-seen dependency order', () => {
+    const firstIndicatorId = 'indicator--11111111-1111-4111-8111-111111111111';
+    const secondIndicatorId = 'indicator--22222222-2222-4222-8222-222222222222';
+    const reportId = 'report--33333333-3333-4333-8333-333333333333';
+    const plan = planStixBundleObjects([
+      {
+        type: 'report',
+        id: reportId,
+        object_refs: [secondIndicatorId, firstIndicatorId, secondIndicatorId],
+      },
+      { type: 'indicator', id: firstIndicatorId },
+      { type: 'indicator', id: secondIndicatorId },
+    ]);
+
+    expect(plan.objects.find((object) => object.id === reportId)).toMatchObject({
+      dependencyIds: [secondIndicatorId, firstIndicatorId],
+      normalization: {
+        referenceValues: {
+          object_refs: [secondIndicatorId, firstIndicatorId],
+        },
+      },
+    });
+  });
+
+  it('releases ancestry membership between sibling reference walks', () => {
+    const rootId = 'report--11111111-1111-4111-8111-111111111111';
+    const firstChildId = 'report--22222222-2222-4222-8222-222222222222';
+    const secondChildId = 'report--33333333-3333-4333-8333-333333333333';
+    const plan = planStixBundleObjects([
+      { type: 'report', id: rootId, object_refs: [firstChildId, secondChildId] },
+      { type: 'report', id: firstChildId, object_refs: [secondChildId] },
+      { type: 'report', id: secondChildId },
+    ]);
+
+    expect(plan.objects.find((object) => object.id === rootId)).toMatchObject({
+      dependencyIds: [firstChildId, secondChildId],
+    });
+    expect(plan.objects.find((object) => object.id === firstChildId)).toMatchObject({
+      dependencyIds: [secondChildId],
+    });
+  });
+
   it('breaks cyclic bundle-local references without producing an unbounded phase walk', () => {
     const firstId = 'report--11111111-1111-4111-8111-111111111111';
     const secondId = 'report--22222222-2222-4222-8222-222222222222';

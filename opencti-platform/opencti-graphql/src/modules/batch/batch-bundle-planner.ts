@@ -189,9 +189,9 @@ const normalizeBundleObjects = (
 ): Set<string> => {
   const enlistedObjectIds = new Set<string>();
   const incompatibleObjectIds = new Set<string>();
-  const referenceGraph = new Map<string, string[]>();
+  const referenceGraph = new Map<string, Set<string>>();
 
-  const enlistObject = (lookupId: string, parentIds: string[]): number => {
+  const enlistObject = (lookupId: string, parentIds: Set<string>): number => {
     const canonicalId = aliases.get(lookupId);
     if (!canonicalId) {
       return 0;
@@ -204,33 +204,37 @@ const normalizeBundleObjects = (
       return 1;
     }
 
-    const objectRefs = referenceGraph.get(canonicalId) ?? [];
+    const objectRefs = referenceGraph.get(canonicalId) ?? new Set<string>();
     referenceGraph.set(canonicalId, objectRefs);
     let dependencyCount = 1;
 
     Object.entries(object.object).forEach(([key, value]) => {
       if (key.endsWith('_refs') && value !== null && value !== undefined) {
         const retainedRefs: string[] = [];
+        const retainedRefIds = new Set<string>();
         const refs = Array.isArray(value) ? value : [];
         refs.filter(isReferenceValue).forEach((referenceId) => {
           const referenceCanonicalId = aliases.get(referenceId);
           const isMissingReference = referenceCanonicalId === undefined;
           const isUnsupportedReference = !isSupportedStixId(referenceId);
           const referencedObjectRefs = referenceCanonicalId ? referenceGraph.get(referenceCanonicalId) : undefined;
-          const isDependencyBackEdge = referencedObjectRefs?.includes(canonicalId) === true;
+          const isDependencyBackEdge = referencedObjectRefs?.has(canonicalId) === true;
           const shouldRetain = !isUnsupportedReference
             && !(cleanupInconsistentBundle && isMissingReference)
             && referenceCanonicalId !== canonicalId
-            && !parentIds.includes(referenceCanonicalId ?? referenceId)
+            && !parentIds.has(referenceCanonicalId ?? referenceId)
             && !isDependencyBackEdge;
           if (!shouldRetain) {
             return;
           }
           if (referenceCanonicalId) {
-            objectRefs.push(referenceCanonicalId);
-            dependencyCount += enlistObject(referenceCanonicalId, [...parentIds, referenceCanonicalId]);
+            objectRefs.add(referenceCanonicalId);
+            parentIds.add(referenceCanonicalId);
+            dependencyCount += enlistObject(referenceCanonicalId, parentIds);
+            parentIds.delete(referenceCanonicalId);
           }
-          if (!retainedRefs.includes(referenceId)) {
+          if (!retainedRefIds.has(referenceId)) {
+            retainedRefIds.add(referenceId);
             retainedRefs.push(referenceId);
           }
         });
@@ -241,17 +245,19 @@ const normalizeBundleObjects = (
         const isMissingReference = referenceId !== undefined && referenceCanonicalId === undefined;
         const isUnsupportedReference = referenceId !== undefined && !isSupportedStixId(referenceId);
         const referencedObjectRefs = referenceCanonicalId ? referenceGraph.get(referenceCanonicalId) : undefined;
-        const isDependencyBackEdge = referencedObjectRefs?.includes(canonicalId) === true;
+        const isDependencyBackEdge = referencedObjectRefs?.has(canonicalId) === true;
         const shouldRetain = referenceId !== undefined
           && !isUnsupportedReference
           && !(cleanupInconsistentBundle && isMissingReference)
           && referenceCanonicalId !== canonicalId
-          && !parentIds.includes(referenceCanonicalId ?? referenceId)
+          && !parentIds.has(referenceCanonicalId ?? referenceId)
           && !isDependencyBackEdge;
         if (shouldRetain && referenceId) {
           if (referenceCanonicalId) {
-            objectRefs.push(referenceCanonicalId);
-            dependencyCount += enlistObject(referenceCanonicalId, [...parentIds, referenceCanonicalId]);
+            objectRefs.add(referenceCanonicalId);
+            parentIds.add(referenceCanonicalId);
+            dependencyCount += enlistObject(referenceCanonicalId, parentIds);
+            parentIds.delete(referenceCanonicalId);
           }
         } else {
           object.object[key] = null;
@@ -276,7 +282,7 @@ const normalizeBundleObjects = (
     return dependencyCount;
   };
 
-  indexedObjects.forEach((object) => enlistObject(object.id, []));
+  indexedObjects.forEach((object) => enlistObject(object.id, new Set<string>()));
   return incompatibleObjectIds;
 };
 
@@ -286,13 +292,15 @@ const collectDependencyIds = (
   compatibleObjectIds: Set<string>,
 ): string[] => {
   const dependencyIds: string[] = [];
+  const dependencyIdSet = new Set<string>();
   Object.entries(object.object).forEach(([key, value]) => {
     toReferenceIds(key, value).forEach((referenceId) => {
       const canonicalId = aliases.get(referenceId);
       if (!canonicalId || canonicalId === object.id || !compatibleObjectIds.has(canonicalId)) {
         return;
       }
-      if (!dependencyIds.includes(canonicalId)) {
+      if (!dependencyIdSet.has(canonicalId)) {
+        dependencyIdSet.add(canonicalId);
         dependencyIds.push(canonicalId);
       }
     });
