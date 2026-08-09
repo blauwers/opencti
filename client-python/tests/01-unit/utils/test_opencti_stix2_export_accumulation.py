@@ -263,6 +263,22 @@ def _root_with_shared_marking(identifier, definition="TLP:AMBER"):
     }
 
 
+def _root_with_shared_creator(identifier, observable=False):
+    entity_type = "file" if observable else "indicator"
+    return {
+        "id": f"{entity_type}--root-{identifier}",
+        "type": entity_type,
+        "x_opencti_id": f"root-{identifier}",
+        "createdBy": {
+            "id": "creator-shared",
+            "standard_id": "identity--shared",
+            "entity_type": "Identity",
+            "parent_types": ["Stix-Domain-Object"],
+        },
+        "createdById": "creator-shared",
+    }
+
+
 def _container_root(identifier):
     return {
         "id": f"report--root-{identifier}",
@@ -473,6 +489,83 @@ def test_export_list_reuses_shared_marking_definition_conversion():
         "indicator--root-2",
     ]
     assert build_calls == ["marking-definition--shared"]
+
+
+def test_export_selected_reuses_shared_creator_conversion_per_scope():
+    helper = _full_helper([])
+    _configure_related_object_export_conversion(helper)
+    build_calls = []
+    original_build = helper._build_export_created_by
+
+    def counting_build(entity_created_by):
+        build_calls.append(entity_created_by["standard_id"])
+        return original_build(entity_created_by)
+
+    helper._build_export_created_by = counting_build
+
+    first_result = helper.export_selected(
+        entities_list=[_root_with_shared_creator(1), _root_with_shared_creator(2)],
+        mode="simple",
+    )
+    second_result = helper.export_selected(
+        entities_list=[_root_with_shared_creator(3), _root_with_shared_creator(4)],
+        mode="simple",
+    )
+
+    assert [item["id"] for item in first_result["objects"]] == [
+        "identity--shared",
+        "indicator--root-1",
+        "indicator--root-2",
+    ]
+    assert [item["id"] for item in second_result["objects"]] == [
+        "identity--shared",
+        "indicator--root-3",
+        "indicator--root-4",
+    ]
+    assert first_result["objects"][1]["created_by_ref"] == "identity--shared"
+    assert first_result["objects"][2]["created_by_ref"] == "identity--shared"
+    assert build_calls == ["identity--shared", "identity--shared"]
+
+
+def test_export_list_reuses_shared_creator_conversion():
+    helper = _full_helper([])
+    _configure_related_object_export_conversion(helper)
+    helper.export_entities_list = lambda **_kwargs: [
+        _root_with_shared_creator(1),
+        _root_with_shared_creator(2),
+    ]
+    build_calls = []
+    original_build = helper._build_export_created_by
+
+    def counting_build(entity_created_by):
+        build_calls.append(entity_created_by["standard_id"])
+        return original_build(entity_created_by)
+
+    helper._build_export_created_by = counting_build
+
+    result = helper.export_list(entity_type="Indicator", mode="simple")
+
+    assert [item["id"] for item in result["objects"]] == [
+        "identity--shared",
+        "indicator--root-1",
+        "indicator--root-2",
+    ]
+    assert build_calls == ["identity--shared"]
+
+
+def test_export_selected_keeps_observable_created_by_ref_name_with_creator_cache():
+    helper = _full_helper([])
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.export_selected(
+        entities_list=[_root_with_shared_creator(1, observable=True)],
+        mode="simple",
+    )
+    observable = result["objects"][1]
+
+    assert observable["id"] == "file--root-1"
+    assert observable["x_opencti_created_by_ref"] == "identity--shared"
+    assert "created_by_ref" not in observable
 
 
 def test_prepare_export_full_deduplicates_relationship_bundles():
