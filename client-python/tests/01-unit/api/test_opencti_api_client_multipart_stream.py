@@ -2,7 +2,7 @@ import io
 
 import pytest
 
-from pycti.api.opencti_api_client import File, OpenCTIApiClient
+from pycti.api.opencti_api_client import File, OpenCTIApiClient, _MultipartStream
 
 
 def _client(session):
@@ -35,10 +35,21 @@ class _TrackingFile(io.BytesIO):
     def __init__(self, payload):
         super().__init__(payload)
         self.read_calls = 0
+        self.read_sizes = []
 
     def read(self, *args, **kwargs):
         self.read_calls += 1
+        self.read_sizes.append(args[0] if args else kwargs.get("size", -1))
         return super().read(*args, **kwargs)
+
+
+class _NonSeekableTrackingFile(_TrackingFile):
+    def tell(self):
+        raise io.UnsupportedOperation("stream is not seekable")
+
+    def seek(self, *args, **kwargs):
+        del args, kwargs
+        raise io.UnsupportedOperation("stream is not seekable")
 
 
 class _UploadSession:
@@ -48,6 +59,8 @@ class _UploadSession:
         self.content_type = None
         self.content_length = None
         self.read_calls_before_post = None
+        self.multipart_stream = None
+        self.owned_data = []
 
     def post(self, *args, **kwargs):
         del args
@@ -55,10 +68,21 @@ class _UploadSession:
             self.read_calls_before_post = self.upload.read_calls
         assert "files" not in kwargs
         multipart_stream = kwargs["data"]
+        self.multipart_stream = multipart_stream
+        self.owned_data = list(multipart_stream._owned_data)
         self.content_type = kwargs["headers"]["Content-Type"]
         self.content_length = len(multipart_stream)
         self.body = b"".join(multipart_stream)
         return _UploadResponse()
+
+
+class _FailingUploadSession(_UploadSession):
+    def post(self, *args, **kwargs):
+        del args
+        multipart_stream = kwargs["data"]
+        self.multipart_stream = multipart_stream
+        self.owned_data = list(multipart_stream._owned_data)
+        raise RuntimeError("upload failed")
 
 
 def test_query_streams_seekable_multipart_file_body_without_prereading():
@@ -79,6 +103,46 @@ def test_query_streams_seekable_multipart_file_body_without_prereading():
     assert b'{"0": ["variables.file"]}' in session.body
     assert b'filename="artifact.txt"' in session.body
     assert b"payload" in session.body
+
+
+def test_query_spools_non_seekable_multipart_file_body_and_closes_spool():
+    upload = _NonSeekableTrackingFile(b"payload")
+    session = _UploadSession(upload)
+
+    result = _client(session).query(
+        "mutation Upload($file: Upload!) { uploadImport(file: $file) { id } }",
+        {"file": File("artifact.txt", upload, "text/plain")},
+    )
+
+    assert result == {"data": {"ok": True}}
+    assert session.read_calls_before_post > 0
+    assert all(
+        0 <= read_size <= _MultipartStream._CHUNK_SIZE
+        for read_size in upload.read_sizes
+    )
+    assert len(session.owned_data) == 1
+    assert session.owned_data[0].closed
+    assert session.multipart_stream._owned_data == []
+    assert not upload.closed
+    assert session.content_length == len(session.body)
+    assert b'filename="artifact.txt"' in session.body
+    assert b"payload" in session.body
+
+
+def test_query_closes_non_seekable_spool_when_post_fails():
+    upload = _NonSeekableTrackingFile(b"payload")
+    session = _FailingUploadSession(upload)
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        _client(session).query(
+            "mutation Upload($file: Upload!) { uploadImport(file: $file) { id } }",
+            {"file": File("artifact.txt", upload, "text/plain")},
+        )
+
+    assert len(session.owned_data) == 1
+    assert session.owned_data[0].closed
+    assert session.multipart_stream._owned_data == []
+    assert not upload.closed
 
 
 @pytest.mark.parametrize(
