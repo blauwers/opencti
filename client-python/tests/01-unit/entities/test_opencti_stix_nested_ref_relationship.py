@@ -15,6 +15,14 @@ class _NestedRefOpenCTI:
 
     def query(self, query, variables):
         self.query_calls.append((query, variables))
+        if "stixCoreRelationshipEdit(id: $id)" in query:
+            return {
+                "data": {
+                    "stixCoreRelationshipEdit": {
+                        "relationsAdd": {"id": "relationship--1"},
+                    }
+                }
+            }
         return {
             "data": {
                 "stixCoreObjectEdit": {
@@ -68,11 +76,33 @@ def test_add_many_to_stix_core_object_normalizes_relationship_type():
     )
 
     assert result == {"id": "observable--1"}
+    assert "stixCoreObjectEdit(id: $id)" in opencti.query_calls[0][0]
     assert opencti.query_calls[0][1] == {
         "id": "observable--1",
         "input": {
             "toIds": ["ipv4-addr--1", "ipv4-addr--2"],
             "relationship_type": "obs_resolves-to",
+        },
+    }
+
+
+def test_add_many_to_stix_core_relationship_uses_relationship_edit_field():
+    opencti = _NestedRefOpenCTI()
+    nested_ref_relationship = StixNestedRefRelationship(opencti)
+
+    result = nested_ref_relationship.add_many_to_stix_core_relationship(
+        "relationship--1",
+        ["external-reference--1", "external-reference--2"],
+        "external-reference",
+    )
+
+    assert result == {"id": "relationship--1"}
+    assert "stixCoreRelationshipEdit(id: $id)" in opencti.query_calls[0][0]
+    assert opencti.query_calls[0][1] == {
+        "id": "relationship--1",
+        "input": {
+            "toIds": ["external-reference--1", "external-reference--2"],
+            "relationship_type": "external-reference",
         },
     }
 
