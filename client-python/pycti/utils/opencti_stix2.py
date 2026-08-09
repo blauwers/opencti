@@ -223,6 +223,24 @@ def _scope_external_reference_report_cache(method):
     return wrapped
 
 
+def _scope_report_object_ref_dedupe_cache(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        types = kwargs.get("types")
+        if types is None and len(args) >= 3:
+            types = args[2]
+        if types is None or "external-reference-as-report" not in types:
+            return method(self, *args, **kwargs)
+
+        token = self._report_object_ref_dedupe_cache.set(LRUCache(maxsize=50000))
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._report_object_ref_dedupe_cache.reset(token)
+
+    return wrapped
+
+
 def _reuse_external_reference_file_reuse_cache(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
@@ -317,6 +335,10 @@ class OpenCTIStix2:
         )
         self._external_reference_report_cache = ContextVar(
             f"opencti_stix2_external_reference_report_cache_{id(self)}",
+            default=None,
+        )
+        self._report_object_ref_dedupe_cache = ContextVar(
+            f"opencti_stix2_report_object_ref_dedupe_cache_{id(self)}",
             default=None,
         )
 
@@ -492,6 +514,47 @@ class OpenCTIStix2:
         ):
             report_cache[report_cache_key] = report
         return report
+
+    @staticmethod
+    def _report_object_ref_cache_key(
+        draft_id, report_id, stix_object_or_relationship_id
+    ):
+        return (
+            "report_object_ref",
+            draft_id,
+            report_id,
+            stix_object_or_relationship_id,
+        )
+
+    def _add_report_object_ref_once(
+        self, report_id, stix_object_or_relationship_id
+    ) -> bool:
+        report_object_ref_cache = self._report_object_ref_dedupe_cache.get()
+        if report_object_ref_cache is None:
+            return self.opencti.report.add_stix_object_or_stix_relationship(
+                id=report_id,
+                stixObjectOrStixRelationshipId=stix_object_or_relationship_id,
+            )
+
+        cache_key = self._report_object_ref_cache_key(
+            self.opencti.get_draft_id(),
+            report_id,
+            stix_object_or_relationship_id,
+        )
+        try:
+            hash(cache_key)
+        except TypeError:
+            cache_key = None
+        if cache_key is not None and report_object_ref_cache.get(cache_key) is not None:
+            return False
+
+        added = self.opencti.report.add_stix_object_or_stix_relationship(
+            id=report_id,
+            stixObjectOrStixRelationshipId=stix_object_or_relationship_id,
+        )
+        if added and cache_key is not None:
+            report_object_ref_cache[cache_key] = True
+        return added
 
     @staticmethod
     def _external_reference_file_cache_key(
@@ -2657,9 +2720,9 @@ class OpenCTIStix2:
             # Add reports from external references
             for external_reference_id in external_references_ids:
                 if external_reference_id in reports:
-                    self.opencti.report.add_stix_object_or_stix_relationship(
-                        id=reports[external_reference_id]["id"],
-                        stixObjectOrStixRelationshipId=stix_object_result["id"],
+                    self._add_report_object_ref_once(
+                        reports[external_reference_id]["id"],
+                        stix_object_result["id"],
                     )
         return stix_object_results
 
@@ -3048,17 +3111,18 @@ class OpenCTIStix2:
         # Add external references
         for external_reference_id in external_references_ids:
             if external_reference_id in reports:
-                self.opencti.report.add_stix_object_or_stix_relationship(
-                    id=reports[external_reference_id]["id"],
-                    stixObjectOrStixRelationshipId=stix_relation_result["id"],
+                report_id = reports[external_reference_id]["id"]
+                self._add_report_object_ref_once(
+                    report_id,
+                    stix_relation_result["id"],
                 )
-                self.opencti.report.add_stix_object_or_stix_relationship(
-                    id=reports[external_reference_id]["id"],
-                    stixObjectOrStixRelationshipId=stix_relation["source_ref"],
+                self._add_report_object_ref_once(
+                    report_id,
+                    stix_relation["source_ref"],
                 )
-                self.opencti.report.add_stix_object_or_stix_relationship(
-                    id=reports[external_reference_id]["id"],
-                    stixObjectOrStixRelationshipId=stix_relation["target_ref"],
+                self._add_report_object_ref_once(
+                    report_id,
+                    stix_relation["target_ref"],
                 )
 
     def import_sighting(
@@ -5893,6 +5957,7 @@ class OpenCTIStix2:
     @_scope_missing_import_label_values
     @_scope_missing_import_vocabulary_values
     @_scope_external_reference_report_cache
+    @_scope_report_object_ref_dedupe_cache
     @_reuse_external_reference_file_reuse_cache
     def import_bundle(
         self,

@@ -662,6 +662,189 @@ def test_import_bundle_keeps_none_external_reference_report_results_uncached():
     assert len(opencti.report.create_calls) == 2
 
 
+class _ReportRelationRecorder:
+    def __init__(self, add_result=True):
+        self.add_calls = []
+        self.add_result = add_result
+
+    def add_stix_object_or_stix_relationship(self, **kwargs):
+        self.add_calls.append((kwargs["id"], kwargs["stixObjectOrStixRelationshipId"]))
+        return self.add_result
+
+
+class _StixCoreRelationshipImportRecorder:
+    @staticmethod
+    def import_from_stix2(**kwargs):
+        stix_relation = kwargs["stixRelation"]
+        return {
+            "id": stix_relation["id"],
+            "entity_type": "stix-core-relationship",
+        }
+
+
+def _build_report_relation_importer(add_result=True, report_id="report--shared"):
+    opencti = SimpleNamespace(
+        report=_ReportRelationRecorder(add_result=add_result),
+        stix_core_relationship=_StixCoreRelationshipImportRecorder(),
+        app_logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        get_draft_id=lambda: "",
+        get_attribute_in_extension=lambda _attribute, _entity: None,
+        query=lambda _query: {"data": {"vocabularyCategories": []}},
+        logger_class=lambda _name: SimpleNamespace(warning=lambda *args: None),
+    )
+    opencti_stix2 = OpenCTIStix2(opencti)
+    opencti_stix2.extract_embedded_relationships = lambda *_args, **_kwargs: {
+        "created_by": None,
+        "object_marking": None,
+        "object_label": [],
+        "open_vocabs": {},
+        "granted_refs": [],
+        "kill_chain_phases": [],
+        "object_refs": [],
+        "external_references": ["external-reference--shared"],
+        "reports": {"external-reference--shared": {"id": report_id}},
+        "sample_refs": [],
+    }
+    opencti_stix2._prepare_bundle_from_backend_plan = lambda bundle, _plan: (
+        0,
+        [],
+        bundle["objects"],
+    )
+    return opencti, opencti_stix2
+
+
+def _shared_report_relationships(count):
+    return [
+        {
+            "id": f"relationship--{index}",
+            "type": "relationship",
+            "source_ref": "malware--shared-source",
+            "target_ref": "indicator--shared-target",
+        }
+        for index in range(count)
+    ]
+
+
+def _import_bundle_relationships(opencti_stix2, relationships, types=None):
+    def import_item_with_retries(item, *_args, **_kwargs):
+        opencti_stix2.import_relationship(item, types=types)
+        return None
+
+    opencti_stix2.import_item_with_retries = import_item_with_retries
+    return opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--benchmark",
+            "objects": relationships,
+        },
+        types=types,
+    )
+
+
+def test_import_bundle_reuses_report_relation_adds_for_shared_endpoints():
+    opencti, opencti_stix2 = _build_report_relation_importer()
+
+    _import_bundle_relationships(
+        opencti_stix2,
+        _shared_report_relationships(2),
+        ["external-reference-as-report"],
+    )
+
+    assert opencti.report.add_calls == [
+        ("report--shared", "relationship--0"),
+        ("report--shared", "malware--shared-source"),
+        ("report--shared", "indicator--shared-target"),
+        ("report--shared", "relationship--1"),
+    ]
+
+
+def test_import_bundle_does_not_reuse_report_relation_adds_across_bundles():
+    opencti, opencti_stix2 = _build_report_relation_importer()
+    relationships = _shared_report_relationships(1)
+
+    _import_bundle_relationships(
+        opencti_stix2, relationships, ["external-reference-as-report"]
+    )
+    _import_bundle_relationships(
+        opencti_stix2, relationships, ["external-reference-as-report"]
+    )
+
+    assert len(opencti.report.add_calls) == 6
+
+
+def test_import_relationship_keeps_report_relation_adds_uncached_without_bundle_scope():
+    opencti, opencti_stix2 = _build_report_relation_importer()
+    relationship = _shared_report_relationships(1)[0]
+
+    opencti_stix2.import_relationship(
+        relationship, types=["external-reference-as-report"]
+    )
+    opencti_stix2.import_relationship(
+        relationship, types=["external-reference-as-report"]
+    )
+
+    assert len(opencti.report.add_calls) == 6
+
+
+def test_import_bundle_keeps_false_report_relation_adds_uncached():
+    opencti, opencti_stix2 = _build_report_relation_importer(add_result=False)
+
+    _import_bundle_relationships(
+        opencti_stix2,
+        _shared_report_relationships(2),
+        ["external-reference-as-report"],
+    )
+
+    assert len(opencti.report.add_calls) == 6
+
+
+def test_import_bundle_keeps_report_relation_adds_distinct_across_drafts():
+    opencti, opencti_stix2 = _build_report_relation_importer()
+    draft_id = {"value": "draft--one"}
+    opencti.get_draft_id = lambda: draft_id["value"]
+    relationships = [_shared_report_relationships(1)[0]] * 2
+    draft_ids = iter(["draft--one", "draft--two"])
+
+    def import_item_with_retries(item, *_args, **_kwargs):
+        draft_id["value"] = next(draft_ids)
+        opencti_stix2.import_relationship(item, types=["external-reference-as-report"])
+        return None
+
+    opencti_stix2.import_item_with_retries = import_item_with_retries
+    opencti_stix2.import_bundle(
+        {
+            "type": "bundle",
+            "id": "bundle--benchmark",
+            "objects": relationships,
+        },
+        types=["external-reference-as-report"],
+    )
+
+    assert len(opencti.report.add_calls) == 6
+
+
+def test_import_bundle_keeps_unhashable_report_relation_adds_uncached():
+    opencti, opencti_stix2 = _build_report_relation_importer(
+        report_id=["report--shared"]
+    )
+
+    _import_bundle_relationships(
+        opencti_stix2,
+        _shared_report_relationships(2),
+        ["external-reference-as-report"],
+    )
+
+    assert len(opencti.report.add_calls) == 6
+
+
+def test_import_bundle_keeps_report_relation_adds_uncached_without_report_mode():
+    opencti, opencti_stix2 = _build_report_relation_importer()
+
+    _import_bundle_relationships(opencti_stix2, _shared_report_relationships(2))
+
+    assert len(opencti.report.add_calls) == 6
+
+
 @pytest.mark.parametrize(
     "field_name", ["external_references", "x_opencti_external_references"]
 )
