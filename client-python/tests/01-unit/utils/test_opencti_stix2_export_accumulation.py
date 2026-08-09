@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from pycti.utils.opencti_stix2 import OpenCTIStix2
+from pycti.utils.opencti_stix2 import EXPORT_PREFETCH_BATCH_SIZE, OpenCTIStix2
 
 
 class _StaticCollection:
@@ -27,6 +27,20 @@ class _RelationshipCollection:
 
     def list(self, **kwargs):
         return self.relationships_by_root.get(kwargs["fromOrToId"], [])
+
+
+class _CountingRelatedObjectLister:
+    def __init__(self, targets_by_id):
+        self.targets_by_id = targets_by_id
+        self.list_calls = 0
+        self.filters = []
+        self.firsts = []
+
+    def list(self, **kwargs):
+        self.list_calls += 1
+        self.filters.append(kwargs["filters"])
+        self.firsts.append(kwargs["first"])
+        return [self.targets_by_id[target_id] for target_id in kwargs["filters"]]
 
 
 def _helper(entities=None):
@@ -71,7 +85,40 @@ def _full_helper(relationships, access_collection=None):
     helper.generate_export = lambda entity: entity
     helper.prepare_id_filters_export = lambda entity_id, access_filter: None
     helper.get_reader = lambda resolve_type: lambda filters: None
+    helper.get_lister = lambda resolve_type: None
     return helper
+
+
+def test_export_entities_list_uses_normalized_lister_lookup():
+    calls = []
+
+    def list_entities(**kwargs):
+        calls.append(kwargs)
+        return [{"id": "container--1"}]
+
+    helper = OpenCTIStix2.__new__(OpenCTIStix2)
+    helper.opencti = SimpleNamespace(
+        stix_domain_object=SimpleNamespace(list=list_entities),
+    )
+
+    result = helper.export_entities_list(
+        entity_type="Container",
+        filters={"mode": "and"},
+        getAll=False,
+        withFiles=True,
+    )
+
+    assert result == [{"id": "container--1"}]
+    assert calls == [
+        {
+            "search": None,
+            "filters": {"mode": "and"},
+            "orderBy": None,
+            "orderMode": None,
+            "getAll": False,
+            "withFiles": True,
+        }
+    ]
 
 
 def _shared_root_relationships():
@@ -197,6 +244,106 @@ def test_prepare_export_full_reads_repeated_related_object_once():
         "relationship--3",
         "malware--shared",
     ]
+
+
+def test_prepare_export_full_batches_unique_related_object_reads_by_type():
+    helper = _full_helper(
+        [
+            _relationship("relationship--1", "target-1"),
+            _relationship("relationship--2", "target-2"),
+            _relationship("relationship--3", "target-3"),
+        ]
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    helper.generate_export = lambda entity: (
+        {
+            "id": entity["standard_id"],
+            "type": entity["entity_type"].lower(),
+            "x_opencti_id": entity["id"],
+        }
+        if "standard_id" in entity
+        else entity.copy()
+    )
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("batchable related objects should not use the reader")
+    )
+    entity = {
+        "id": "indicator--root",
+        "type": "indicator",
+        "x_opencti_id": "root",
+    }
+
+    result = helper.prepare_export(entity=entity, mode="full")
+
+    assert lister.list_calls == 1
+    assert lister.filters == [["target-target-1", "target-target-2", "target-target-3"]]
+    assert lister.firsts == [EXPORT_PREFETCH_BATCH_SIZE]
+    assert [item["id"] for item in result] == [
+        "indicator--root",
+        "relationship--1",
+        "relationship--2",
+        "relationship--3",
+        "malware--target-1",
+        "malware--target-2",
+        "malware--target-3",
+    ]
+
+
+def test_prepare_export_full_chunks_unique_related_object_reads():
+    relationships = [
+        _relationship(f"relationship--{index}", f"target-{index}")
+        for index in range(EXPORT_PREFETCH_BATCH_SIZE + 1)
+    ]
+    helper = _full_helper(relationships)
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"malware--target-{index}",
+                "entity_type": "Malware",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(EXPORT_PREFETCH_BATCH_SIZE + 1)
+        }
+    )
+    helper.get_lister = lambda resolve_type: lister.list
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    helper.generate_export = lambda entity: (
+        {
+            "id": entity["standard_id"],
+            "type": entity["entity_type"].lower(),
+            "x_opencti_id": entity["id"],
+        }
+        if "standard_id" in entity
+        else entity.copy()
+    )
+    entity = {
+        "id": "indicator--root",
+        "type": "indicator",
+        "x_opencti_id": "root",
+    }
+
+    result = helper.prepare_export(entity=entity, mode="full")
+
+    assert lister.list_calls == 2
+    assert [len(filters) for filters in lister.filters] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        1,
+    ]
+    assert lister.firsts == [EXPORT_PREFETCH_BATCH_SIZE, EXPORT_PREFETCH_BATCH_SIZE]
+    assert len(result) == (EXPORT_PREFETCH_BATCH_SIZE + 1) * 2 + 1
 
 
 def test_export_selected_reuses_related_endpoint_access_across_roots():
