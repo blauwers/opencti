@@ -92,6 +92,9 @@ _EXPORT_MARKING_DEFINITION_CACHE: ContextVar[Optional[Dict[str, Dict]]] = Contex
 _EXPORT_CREATED_BY_CACHE: ContextVar[Optional[Dict[str, Dict]]] = ContextVar(
     "_export_created_by_cache", default=None
 )
+_EXPORT_DATA_SOURCE_CACHE: ContextVar[Optional[Dict[str, Dict]]] = ContextVar(
+    "_export_data_source_cache", default=None
+)
 EXPORT_ENTITY_LISTER_ATTRIBUTES: Dict[str, str] = {
     "Stix-Core-Object": "stix_core_object",
     "Stix-Domain-Object": "stix_domain_object",
@@ -223,6 +226,20 @@ def _reuse_export_created_by_cache(method):
             return method(self, *args, **kwargs)
         finally:
             _EXPORT_CREATED_BY_CACHE.reset(token)
+
+    return wrapped
+
+
+def _reuse_export_data_source_cache(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        if _EXPORT_DATA_SOURCE_CACHE.get() is not None:
+            return method(self, *args, **kwargs)
+        token = _EXPORT_DATA_SOURCE_CACHE.set({})
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _EXPORT_DATA_SOURCE_CACHE.reset(token)
 
     return wrapped
 
@@ -3628,6 +3645,20 @@ class OpenCTIStix2:
             created_by_cache[created_by_id] = created_by
         return created_by
 
+    def _build_export_data_source(self, entity_data_source: Dict) -> Dict:
+        return self.generate_export(entity=entity_data_source)
+
+    def _get_export_data_source(self, entity_data_source: Dict) -> Dict:
+        data_source_cache = _EXPORT_DATA_SOURCE_CACHE.get()
+        data_source_id = entity_data_source["standard_id"]
+        if data_source_cache is not None and data_source_id in data_source_cache:
+            return data_source_cache[data_source_id]
+
+        data_source = self._build_export_data_source(entity_data_source)
+        if data_source_cache is not None:
+            data_source_cache[data_source_id] = data_source
+        return data_source
+
     def prepare_export(
         self,
         entity: Dict,
@@ -3718,7 +3749,7 @@ class OpenCTIStix2:
             and "dataSource" in entity
             and entity["dataSource"] is not None
         ):
-            data_source = self.generate_export(entity["dataSource"])
+            data_source = self._get_export_data_source(entity["dataSource"])
             entity["x_mitre_data_source_ref"] = data_source["id"]
             result.append(data_source)
         if "dataSource" in entity:
@@ -4327,6 +4358,7 @@ class OpenCTIStix2:
 
     @_reuse_export_marking_definition_cache
     @_reuse_export_created_by_cache
+    @_reuse_export_data_source_cache
     def get_stix_bundle_or_object_from_entity_id(
         self,
         entity_type: str,
@@ -4473,6 +4505,7 @@ class OpenCTIStix2:
 
     @_reuse_export_marking_definition_cache
     @_reuse_export_created_by_cache
+    @_reuse_export_data_source_cache
     def export_list(
         self,
         entity_type: str,
@@ -4609,6 +4642,7 @@ class OpenCTIStix2:
 
     @_reuse_export_marking_definition_cache
     @_reuse_export_created_by_cache
+    @_reuse_export_data_source_cache
     def export_selected(
         self,
         entities_list: List[dict],

@@ -279,6 +279,21 @@ def _root_with_shared_creator(identifier, observable=False):
     }
 
 
+def _root_with_shared_data_source(identifier):
+    return {
+        "id": f"data-component--root-{identifier}",
+        "type": "data-component",
+        "x_opencti_id": f"root-{identifier}",
+        "dataSource": {
+            "id": "data-source-shared",
+            "standard_id": "data-source--shared",
+            "entity_type": "Data-Source",
+            "parent_types": ["Stix-Domain-Object"],
+        },
+        "dataSourceId": "data-source-shared",
+    }
+
+
 def _container_root(identifier):
     return {
         "id": f"report--root-{identifier}",
@@ -566,6 +581,78 @@ def test_export_selected_keeps_observable_created_by_ref_name_with_creator_cache
     assert observable["id"] == "file--root-1"
     assert observable["x_opencti_created_by_ref"] == "identity--shared"
     assert "created_by_ref" not in observable
+
+
+def test_export_selected_reuses_shared_data_source_conversion_per_scope():
+    helper = _full_helper([])
+    _configure_related_object_export_conversion(helper)
+    build_calls = []
+    original_build = helper._build_export_data_source
+
+    def counting_build(entity_data_source):
+        build_calls.append(entity_data_source["standard_id"])
+        return original_build(entity_data_source)
+
+    helper._build_export_data_source = counting_build
+
+    first_result = helper.export_selected(
+        entities_list=[
+            _root_with_shared_data_source(1),
+            _root_with_shared_data_source(2),
+        ],
+        mode="simple",
+    )
+    second_result = helper.export_selected(
+        entities_list=[
+            _root_with_shared_data_source(3),
+            _root_with_shared_data_source(4),
+        ],
+        mode="simple",
+    )
+
+    assert [item["id"] for item in first_result["objects"]] == [
+        "data-source--shared",
+        "data-component--root-1",
+        "data-component--root-2",
+    ]
+    assert [item["id"] for item in second_result["objects"]] == [
+        "data-source--shared",
+        "data-component--root-3",
+        "data-component--root-4",
+    ]
+    assert first_result["objects"][1]["x_mitre_data_source_ref"] == (
+        "data-source--shared"
+    )
+    assert first_result["objects"][2]["x_mitre_data_source_ref"] == (
+        "data-source--shared"
+    )
+    assert build_calls == ["data-source--shared", "data-source--shared"]
+
+
+def test_export_list_reuses_shared_data_source_conversion():
+    helper = _full_helper([])
+    _configure_related_object_export_conversion(helper)
+    helper.export_entities_list = lambda **_kwargs: [
+        _root_with_shared_data_source(1),
+        _root_with_shared_data_source(2),
+    ]
+    build_calls = []
+    original_build = helper._build_export_data_source
+
+    def counting_build(entity_data_source):
+        build_calls.append(entity_data_source["standard_id"])
+        return original_build(entity_data_source)
+
+    helper._build_export_data_source = counting_build
+
+    result = helper.export_list(entity_type="Data-Component", mode="simple")
+
+    assert [item["id"] for item in result["objects"]] == [
+        "data-source--shared",
+        "data-component--root-1",
+        "data-component--root-2",
+    ]
+    assert build_calls == ["data-source--shared"]
 
 
 def test_prepare_export_full_deduplicates_relationship_bundles():
