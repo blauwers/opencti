@@ -15,6 +15,14 @@ class _NestedRefOpenCTI:
 
     def query(self, query, variables):
         self.query_calls.append((query, variables))
+        if "stixSightingRelationshipEdit(id: $id)" in query:
+            return {
+                "data": {
+                    "stixSightingRelationshipEdit": {
+                        "relationsAdd": {"id": "sighting--1"},
+                    }
+                }
+            }
         if "stixCoreRelationshipEdit(id: $id)" in query:
             return {
                 "data": {
@@ -103,6 +111,27 @@ def test_add_many_to_stix_core_relationship_uses_relationship_edit_field():
         "input": {
             "toIds": ["external-reference--1", "external-reference--2"],
             "relationship_type": "external-reference",
+        },
+    }
+
+
+def test_add_many_to_stix_sighting_relationship_uses_sighting_edit_field():
+    opencti = _NestedRefOpenCTI()
+    nested_ref_relationship = StixNestedRefRelationship(opencti)
+
+    result = nested_ref_relationship.add_many_to_stix_sighting_relationship(
+        "sighting--1",
+        ["marking-definition--1", "marking-definition--2"],
+        "object-marking",
+    )
+
+    assert result == {"id": "sighting--1"}
+    assert "stixSightingRelationshipEdit(id: $id)" in opencti.query_calls[0][0]
+    assert opencti.query_calls[0][1] == {
+        "id": "sighting--1",
+        "input": {
+            "toIds": ["marking-definition--1", "marking-definition--2"],
+            "relationship_type": "object-marking",
         },
     }
 

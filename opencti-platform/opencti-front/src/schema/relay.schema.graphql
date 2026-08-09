@@ -289,6 +289,9 @@ type AppInfo {
   """The OpenCTI application version"""
   version: String!
 
+  """API behavior flags available to compatible clients"""
+  api_features: [String!]!
+
   """The OpenCTI api current memory usage"""
   memory: AppMemory
 
