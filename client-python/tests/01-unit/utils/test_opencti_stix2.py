@@ -575,9 +575,19 @@ def _external_reference_report_objects(descriptions):
     ]
 
 
-def test_import_bundle_reuses_exact_external_reference_report_mutation():
+def test_import_bundle_reuses_exact_external_reference_report_mutation(monkeypatch):
     opencti = _external_reference_report_opencti()
     opencti_stix2 = OpenCTIStix2(opencti)
+    find_dates_calls = []
+
+    def find_dates(*args, **kwargs):
+        find_dates_calls.append((args, kwargs))
+        return iter(())
+
+    monkeypatch.setattr(
+        "pycti.utils.opencti_stix2.datefinder.find_dates",
+        find_dates,
+    )
 
     _import_bundle_extracting_relationships(
         opencti_stix2,
@@ -587,6 +597,7 @@ def test_import_bundle_reuses_exact_external_reference_report_mutation():
 
     assert len(opencti.report.create_calls) == 1
     assert opencti.marking_definition.read_calls == 1
+    assert len(find_dates_calls) == 1
 
 
 def test_import_bundle_keeps_changed_external_reference_report_mutations():
@@ -660,6 +671,61 @@ def test_import_bundle_keeps_none_external_reference_report_results_uncached():
     )
 
     assert len(opencti.report.create_calls) == 2
+
+
+def test_find_external_reference_dates_keeps_changed_values_uncached(monkeypatch):
+    opencti_stix2 = OpenCTIStix2(_external_reference_opencti())
+    find_dates_calls = []
+
+    def find_dates(value, **_kwargs):
+        find_dates_calls.append(value)
+        return iter(())
+
+    monkeypatch.setattr(
+        "pycti.utils.opencti_stix2.datefinder.find_dates",
+        find_dates,
+    )
+
+    assert opencti_stix2._find_external_reference_dates("first") == ()
+    assert opencti_stix2._find_external_reference_dates("second") == ()
+    assert find_dates_calls == ["first", "second"]
+
+
+def test_find_external_reference_dates_keeps_unhashable_values_uncached(monkeypatch):
+    opencti_stix2 = OpenCTIStix2(_external_reference_opencti())
+    find_dates_calls = []
+    value = ["benchmark"]
+
+    def find_dates(candidate, **_kwargs):
+        find_dates_calls.append(candidate)
+        return iter(())
+
+    monkeypatch.setattr(
+        "pycti.utils.opencti_stix2.datefinder.find_dates",
+        find_dates,
+    )
+
+    assert opencti_stix2._find_external_reference_dates(value) == ()
+    assert opencti_stix2._find_external_reference_dates(value) == ()
+    assert find_dates_calls == [value, value]
+
+
+def test_find_external_reference_dates_keeps_parser_failures_uncached(monkeypatch):
+    opencti_stix2 = OpenCTIStix2(_external_reference_opencti())
+    find_dates_calls = []
+
+    def find_dates(value, **_kwargs):
+        find_dates_calls.append(value)
+        raise TypeError("malformed date input")
+
+    monkeypatch.setattr(
+        "pycti.utils.opencti_stix2.datefinder.find_dates",
+        find_dates,
+    )
+
+    assert opencti_stix2._find_external_reference_dates("benchmark") is None
+    assert opencti_stix2._find_external_reference_dates("benchmark") is None
+    assert find_dates_calls == ["benchmark", "benchmark"]
 
 
 class _ReportRelationRecorder:
@@ -784,6 +850,57 @@ def test_import_relationship_keeps_report_relation_adds_uncached_without_bundle_
     )
 
     assert len(opencti.report.add_calls) == 6
+
+
+def test_import_relationship_reuses_external_reference_date_parses(monkeypatch):
+    opencti, opencti_stix2 = _build_report_relation_importer()
+    default_dates = []
+
+    class _RelationshipRecorder:
+        @staticmethod
+        def import_from_stix2(**kwargs):
+            default_dates.append(kwargs["defaultDate"])
+            return {
+                "id": kwargs["stixRelation"]["id"],
+                "entity_type": "stix-core-relationship",
+            }
+
+    find_dates_calls = []
+
+    def find_dates(value, **_kwargs):
+        find_dates_calls.append(value)
+        return iter([datetime.datetime(2020, 1, 1)])
+
+    monkeypatch.setattr(
+        "pycti.utils.opencti_stix2.datefinder.find_dates",
+        find_dates,
+    )
+    opencti.stix_core_relationship = _RelationshipRecorder()
+    opencti_stix2.extract_embedded_relationships = lambda *_args, **_kwargs: {
+        "created_by": None,
+        "object_marking": None,
+        "object_label": [],
+        "open_vocabs": {},
+        "granted_refs": [],
+        "kill_chain_phases": [],
+        "object_refs": [],
+        "external_references": [],
+        "reports": {},
+        "sample_refs": [],
+    }
+    relationship = {
+        "id": "relationship--shared",
+        "type": "relationship",
+        "source_ref": "malware--shared-source",
+        "target_ref": "indicator--shared-target",
+        "external_references": [{"source_name": "benchmark 2020-01-01"}],
+    }
+
+    opencti_stix2.import_relationship(relationship)
+    opencti_stix2.import_relationship(relationship)
+
+    assert find_dates_calls == ["benchmark 2020-01-01"]
+    assert default_dates == ["2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z"]
 
 
 def test_import_bundle_keeps_false_report_relation_adds_uncached():

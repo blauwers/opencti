@@ -515,6 +515,30 @@ class OpenCTIStix2:
             report_cache[report_cache_key] = report
         return report
 
+    def _find_external_reference_dates(self, value):
+        cache_key = ("external_reference_dates", value)
+        try:
+            cached_matches = self.get_in_cache(cache_key)
+        except TypeError:
+            cache_key = None
+            cached_matches = None
+        if cached_matches is not None:
+            return cached_matches
+
+        try:
+            matches = tuple(
+                datefinder.find_dates(
+                    value,
+                    base_date=datetime.datetime.fromtimestamp(0),
+                )
+            )
+        except (TypeError, OverflowError):
+            return None
+
+        if cache_key is not None:
+            self.set_in_cache(cache_key, matches)
+        return matches
+
     @staticmethod
     def _report_object_ref_cache_key(
         draft_id, report_id, stix_object_or_relationship_id
@@ -2220,19 +2244,11 @@ class OpenCTIStix2:
                     ):
                         # Add a corresponding report
                         # Extract date
-                        try:
-                            if "description" in external_reference:
-                                matches = datefinder.find_dates(
-                                    external_reference["description"],
-                                    base_date=datetime.datetime.fromtimestamp(0),
-                                )
-                            else:
-                                matches = datefinder.find_dates(
-                                    source_name,
-                                    base_date=datetime.datetime.fromtimestamp(0),
-                                )
-                        except (TypeError, OverflowError):
-                            matches = None
+                        matches = self._find_external_reference_dates(
+                            external_reference["description"]
+                            if "description" in external_reference
+                            else source_name
+                        )
                         published = None
                         yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
                         default_date = datetime.datetime.fromtimestamp(1)
@@ -3067,19 +3083,11 @@ class OpenCTIStix2:
         date = None
         if "external_references" in stix_relation:
             for external_reference in stix_relation["external_references"]:
-                try:
-                    if "description" in external_reference:
-                        matches = datefinder.find_dates(
-                            external_reference["description"],
-                            base_date=datetime.datetime.fromtimestamp(0),
-                        )
-                    else:
-                        matches = datefinder.find_dates(
-                            external_reference["source_name"],
-                            base_date=datetime.datetime.fromtimestamp(0),
-                        )
-                except (TypeError, OverflowError):
-                    matches = None
+                matches = self._find_external_reference_dates(
+                    external_reference["description"]
+                    if "description" in external_reference
+                    else external_reference["source_name"]
+                )
                 date = None
                 yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
                 if matches is not None:
