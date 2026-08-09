@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from pycti.utils.opencti_stix2 import EXPORT_PREFETCH_BATCH_SIZE, OpenCTIStix2
+from pycti.utils.opencti_stix2 import (
+    EXPORT_ACCESS_LISTER_ATTRIBUTES,
+    EXPORT_PREFETCH_BATCH_SIZE,
+    OpenCTIStix2,
+)
 
 
 class _StaticCollection:
@@ -41,6 +45,20 @@ class _CountingRelatedObjectLister:
         self.filters.append(kwargs["filters"])
         self.firsts.append(kwargs["first"])
         return [self.targets_by_id[target_id] for target_id in kwargs["filters"]]
+
+
+class _CountingAccessCollection:
+    def __init__(self):
+        self.list_calls = 0
+        self.kwargs = []
+
+    def list(self, **kwargs):
+        self.list_calls += 1
+        self.kwargs.append(kwargs)
+        entity_ids = kwargs["filters"]
+        if isinstance(entity_ids, str):
+            entity_ids = [entity_ids]
+        return [{"id": entity_id} for entity_id in entity_ids]
 
 
 def _helper(entities=None):
@@ -188,7 +206,7 @@ def test_prepare_export_full_deduplicates_relationship_bundles():
 
 
 def test_prepare_export_full_checks_only_unseen_relation_endpoints_once():
-    access_collection = _CountingCollection([{}])
+    access_collection = _CountingAccessCollection()
     helper = _full_helper(
         [
             _relationship("relationship--1", "shared"),
@@ -197,6 +215,7 @@ def test_prepare_export_full_checks_only_unseen_relation_endpoints_once():
         ],
         access_collection=access_collection,
     )
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
     entity = {
         "id": "indicator--root",
         "type": "indicator",
@@ -206,6 +225,77 @@ def test_prepare_export_full_checks_only_unseen_relation_endpoints_once():
     helper.prepare_export(entity=entity, mode="full")
 
     assert access_collection.list_calls == 1
+    assert access_collection.kwargs == [
+        {
+            "filters": "target-shared",
+            "first": 1,
+            "customAttributes": EXPORT_ACCESS_LISTER_ATTRIBUTES,
+        }
+    ]
+
+
+def test_prepare_export_full_batches_unique_relation_endpoint_access_checks():
+    access_collection = _CountingAccessCollection()
+    helper = _full_helper(
+        [
+            _relationship("relationship--1", "target-1"),
+            _relationship("relationship--2", "target-2"),
+            _relationship("relationship--3", "target-3"),
+        ],
+        access_collection=access_collection,
+    )
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    entity = {
+        "id": "indicator--root",
+        "type": "indicator",
+        "x_opencti_id": "root",
+    }
+
+    helper.prepare_export(entity=entity, mode="full")
+
+    assert access_collection.list_calls == 1
+    assert access_collection.kwargs == [
+        {
+            "filters": ["target-target-1", "target-target-2", "target-target-3"],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+            "customAttributes": EXPORT_ACCESS_LISTER_ATTRIBUTES,
+        }
+    ]
+
+
+def test_prepare_export_full_chunks_unique_relation_endpoint_access_checks():
+    access_collection = _CountingAccessCollection()
+    helper = _full_helper(
+        [
+            _relationship(f"relationship--{index}", f"target-{index}")
+            for index in range(EXPORT_PREFETCH_BATCH_SIZE + 1)
+        ],
+        access_collection=access_collection,
+    )
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    entity = {
+        "id": "indicator--root",
+        "type": "indicator",
+        "x_opencti_id": "root",
+    }
+
+    helper.prepare_export(entity=entity, mode="full")
+
+    assert access_collection.list_calls == 2
+    assert [len(kwargs["filters"]) for kwargs in access_collection.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        1,
+    ]
+    assert [kwargs["first"] for kwargs in access_collection.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+    assert all(kwargs["getAll"] is True for kwargs in access_collection.kwargs)
+    assert all(
+        kwargs["customAttributes"] == EXPORT_ACCESS_LISTER_ATTRIBUTES
+        for kwargs in access_collection.kwargs
+    )
 
 
 def test_prepare_export_full_reads_repeated_related_object_once():
