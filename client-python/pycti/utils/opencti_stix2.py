@@ -205,6 +205,24 @@ def _scope_missing_import_vocabulary_values(method):
     return wrapped
 
 
+def _scope_external_reference_report_cache(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        types = kwargs.get("types")
+        if types is None and len(args) >= 3:
+            types = args[2]
+        if types is None or "external-reference-as-report" not in types:
+            return method(self, *args, **kwargs)
+
+        token = self._external_reference_report_cache.set(LRUCache(maxsize=50000))
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._external_reference_report_cache.reset(token)
+
+    return wrapped
+
+
 def _reuse_external_reference_file_reuse_cache(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
@@ -295,6 +313,10 @@ class OpenCTIStix2:
         )
         self._missing_import_vocabulary_values = ContextVar(
             f"opencti_stix2_missing_import_vocabulary_values_{id(self)}",
+            default=None,
+        )
+        self._external_reference_report_cache = ContextVar(
+            f"opencti_stix2_external_reference_report_cache_{id(self)}",
             default=None,
         )
 
@@ -399,6 +421,77 @@ class OpenCTIStix2:
             external_id,
             description,
         )
+
+    @staticmethod
+    def _external_reference_report_cache_key(
+        report_id,
+        title,
+        published,
+        author_id,
+        object_marking_id,
+        external_reference_id,
+        description,
+    ):
+        return (
+            "external_reference_report",
+            report_id,
+            title,
+            published,
+            author_id,
+            object_marking_id,
+            external_reference_id,
+            description,
+        )
+
+    def _create_or_get_external_reference_report(
+        self,
+        report_id,
+        title,
+        published,
+        author_id,
+        object_marking_id,
+        external_reference_id,
+        description,
+    ):
+        report_cache = self._external_reference_report_cache.get()
+        report_cache_key = None
+        if report_cache is not None:
+            report_cache_key = self._external_reference_report_cache_key(
+                report_id,
+                title,
+                published,
+                author_id,
+                object_marking_id,
+                external_reference_id,
+                description,
+            )
+            try:
+                hash(report_cache_key)
+            except TypeError:
+                report_cache_key = None
+            if report_cache_key is not None:
+                cached_report = report_cache.get(report_cache_key)
+                if cached_report is not None:
+                    return cached_report
+
+        report = self.opencti.report.create(
+            id=report_id,
+            name=title,
+            createdBy=author_id,
+            objectMarking=[object_marking_id],
+            externalReferences=[external_reference_id],
+            description=description,
+            report_types="threat-report",
+            published=published,
+            update=True,
+        )
+        if (
+            report_cache is not None
+            and report_cache_key is not None
+            and report is not None
+        ):
+            report_cache[report_cache_key] = report
+        return report
 
     @staticmethod
     def _external_reference_file_cache_key(
@@ -2140,22 +2233,20 @@ class OpenCTIStix2:
                             )
 
                         author = self.resolve_author(title)
-                        report = self.opencti.report.create(
-                            id=self.opencti.report.generate_fixed_fake_id(
+                        report = self._create_or_get_external_reference_report(
+                            self.opencti.report.generate_fixed_fake_id(
                                 title, published
                             ),
-                            name=title,
-                            createdBy=author["id"] if author is not None else None,
-                            objectMarking=[object_marking_ref_result["id"]],
-                            externalReferences=[external_reference_id],
-                            description=(
+                            title,
+                            published,
+                            author["id"] if author is not None else None,
+                            object_marking_ref_result["id"],
+                            external_reference_id,
+                            (
                                 external_reference["description"]
                                 if "description" in external_reference
                                 else ""
                             ),
-                            report_types="threat-report",
-                            published=published,
-                            update=True,
                         )
                         reports[external_reference_id] = report
                 except Exception:
@@ -5801,6 +5892,7 @@ class OpenCTIStix2:
 
     @_scope_missing_import_label_values
     @_scope_missing_import_vocabulary_values
+    @_scope_external_reference_report_cache
     @_reuse_external_reference_file_reuse_cache
     def import_bundle(
         self,

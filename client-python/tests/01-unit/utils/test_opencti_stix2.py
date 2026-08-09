@@ -399,9 +399,9 @@ def _external_reference_prefetch_opencti():
     return opencti
 
 
-def _import_bundle_extracting_relationships(opencti_stix2, objects):
+def _import_bundle_extracting_relationships(opencti_stix2, objects, types=None):
     def import_item_with_retries(item, *_args, **_kwargs):
-        opencti_stix2.extract_embedded_relationships(item)
+        opencti_stix2.extract_embedded_relationships(item, types)
         return None
 
     opencti_stix2.import_item_with_retries = import_item_with_retries
@@ -410,7 +410,8 @@ def _import_bundle_extracting_relationships(opencti_stix2, objects):
             "type": "bundle",
             "id": "bundle--benchmark",
             "objects": objects,
-        }
+        },
+        types=types,
     )
 
 
@@ -523,6 +524,142 @@ def test_import_bundle_does_not_reuse_file_upload_external_reference_across_bund
     _import_bundle_extracting_relationships(opencti_stix2, objects)
 
     assert opencti.external_reference.create_calls == 2
+
+
+class _ExternalReferenceReportRecorder:
+    def __init__(self, return_value=True):
+        self.create_calls = []
+        self.return_value = return_value
+
+    @staticmethod
+    def generate_fixed_fake_id(name, published=None):
+        return f"report--{name}|{published}"
+
+    def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        if self.return_value is None:
+            return None
+        return {"id": kwargs["id"]}
+
+
+class _MarkingDefinitionRecorder:
+    def __init__(self):
+        self.read_calls = 0
+
+    def read(self, **_kwargs):
+        self.read_calls += 1
+        return {"id": "marking-definition--tlp-clear"}
+
+
+def _external_reference_report_opencti(return_value=True):
+    opencti = _external_reference_opencti()
+    opencti.report = _ExternalReferenceReportRecorder(return_value=return_value)
+    opencti.marking_definition = _MarkingDefinitionRecorder()
+    return opencti
+
+
+def _external_reference_report_objects(descriptions):
+    return [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": "https://example.test/reference",
+                    **({"description": description} if description is not None else {}),
+                }
+            ],
+        }
+        for index, description in enumerate(descriptions)
+    ]
+
+
+def test_import_bundle_reuses_exact_external_reference_report_mutation():
+    opencti = _external_reference_report_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        _external_reference_report_objects([None, None]),
+        ["external-reference-as-report"],
+    )
+
+    assert len(opencti.report.create_calls) == 1
+    assert opencti.marking_definition.read_calls == 1
+
+
+def test_import_bundle_keeps_changed_external_reference_report_mutations():
+    opencti = _external_reference_report_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        _external_reference_report_objects(["first", "second"]),
+        ["external-reference-as-report"],
+    )
+
+    assert [call["description"] for call in opencti.report.create_calls] == [
+        "first",
+        "second",
+    ]
+
+
+def test_import_bundle_does_not_reuse_external_reference_report_across_bundles():
+    opencti = _external_reference_report_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = _external_reference_report_objects([None])
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2, objects, ["external-reference-as-report"]
+    )
+    _import_bundle_extracting_relationships(
+        opencti_stix2, objects, ["external-reference-as-report"]
+    )
+
+    assert len(opencti.report.create_calls) == 2
+
+
+def test_extract_embedded_relationships_keeps_external_reference_report_uncached():
+    opencti = _external_reference_report_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    stix_object = _external_reference_report_objects([None])[0]
+
+    opencti_stix2.extract_embedded_relationships(
+        dict(stix_object), ["external-reference-as-report"]
+    )
+    opencti_stix2.extract_embedded_relationships(
+        dict(stix_object), ["external-reference-as-report"]
+    )
+
+    assert len(opencti.report.create_calls) == 2
+
+
+def test_import_bundle_keeps_unhashable_external_reference_report_inputs_uncached():
+    opencti = _external_reference_report_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    opencti_stix2.resolve_author = lambda _title: {"id": ["identity--1"]}
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        _external_reference_report_objects([None, None]),
+        ["external-reference-as-report"],
+    )
+
+    assert len(opencti.report.create_calls) == 2
+
+
+def test_import_bundle_keeps_none_external_reference_report_results_uncached():
+    opencti = _external_reference_report_opencti(return_value=None)
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        _external_reference_report_objects([None, None]),
+        ["external-reference-as-report"],
+    )
+
+    assert len(opencti.report.create_calls) == 2
 
 
 @pytest.mark.parametrize(
