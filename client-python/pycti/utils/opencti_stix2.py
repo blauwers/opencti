@@ -86,6 +86,9 @@ MARKDOWN_EXPORT_FIELDS: Tuple[str, ...] = (
     "x_opencti_description",
     "content",
 )
+_EXPORT_MARKING_DEFINITION_CACHE: ContextVar[Optional[Dict[str, Dict]]] = ContextVar(
+    "_export_marking_definition_cache", default=None
+)
 EXPORT_ENTITY_LISTER_ATTRIBUTES: Dict[str, str] = {
     "Stix-Core-Object": "stix_core_object",
     "Stix-Domain-Object": "stix_domain_object",
@@ -189,6 +192,20 @@ def _scope_missing_import_vocabulary_values(method):
             return method(self, *args, **kwargs)
         finally:
             self._missing_import_vocabulary_values.reset(token)
+
+    return wrapped
+
+
+def _reuse_export_marking_definition_cache(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        if _EXPORT_MARKING_DEFINITION_CACHE.get() is not None:
+            return method(self, *args, **kwargs)
+        token = _EXPORT_MARKING_DEFINITION_CACHE.set({})
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _EXPORT_MARKING_DEFINITION_CACHE.reset(token)
 
     return wrapped
 
@@ -3543,6 +3560,43 @@ class OpenCTIStix2:
             )
         return relationships_by_entity_id
 
+    @staticmethod
+    def _build_export_marking_definition(entity_marking_definition: Dict) -> Dict:
+        if entity_marking_definition["definition_type"] == "TLP":
+            created = "2017-01-20T00:00:00.000Z"
+        else:
+            created = entity_marking_definition["created"]
+        return {
+            "type": "marking-definition",
+            "spec_version": SPEC_VERSION,
+            "id": entity_marking_definition["standard_id"],
+            "created": created,
+            "definition_type": entity_marking_definition["definition_type"].lower(),
+            "name": entity_marking_definition["definition"],
+            "definition": {
+                entity_marking_definition["definition_type"]
+                .lower(): entity_marking_definition["definition"]
+                .lower()
+                .replace("tlp:", "")
+            },
+        }
+
+    def _get_export_marking_definition(self, entity_marking_definition: Dict) -> Dict:
+        marking_definition_cache = _EXPORT_MARKING_DEFINITION_CACHE.get()
+        marking_definition_id = entity_marking_definition["standard_id"]
+        if (
+            marking_definition_cache is not None
+            and marking_definition_id in marking_definition_cache
+        ):
+            return marking_definition_cache[marking_definition_id]
+
+        marking_definition = self._build_export_marking_definition(
+            entity_marking_definition
+        )
+        if marking_definition_cache is not None:
+            marking_definition_cache[marking_definition_id] = marking_definition
+        return marking_definition
+
     def prepare_export(
         self,
         entity: Dict,
@@ -3680,26 +3734,9 @@ class OpenCTIStix2:
         ):
             entity["object_marking_refs"] = []
             for entity_marking_definition in entity["objectMarking"]:
-                if entity_marking_definition["definition_type"] == "TLP":
-                    created = "2017-01-20T00:00:00.000Z"
-                else:
-                    created = entity_marking_definition["created"]
-                marking_definition = {
-                    "type": "marking-definition",
-                    "spec_version": SPEC_VERSION,
-                    "id": entity_marking_definition["standard_id"],
-                    "created": created,
-                    "definition_type": entity_marking_definition[
-                        "definition_type"
-                    ].lower(),
-                    "name": entity_marking_definition["definition"],
-                    "definition": {
-                        entity_marking_definition["definition_type"]
-                        .lower(): entity_marking_definition["definition"]
-                        .lower()
-                        .replace("tlp:", "")
-                    },
-                }
+                marking_definition = self._get_export_marking_definition(
+                    entity_marking_definition
+                )
                 result.append(marking_definition)
                 entity["object_marking_refs"].append(marking_definition["id"])
         if "objectMarking" in entity:
@@ -4257,6 +4294,7 @@ class OpenCTIStix2:
         else:
             return []
 
+    @_reuse_export_marking_definition_cache
     def get_stix_bundle_or_object_from_entity_id(
         self,
         entity_type: str,
@@ -4401,6 +4439,7 @@ class OpenCTIStix2:
             withFiles=withFiles,
         )
 
+    @_reuse_export_marking_definition_cache
     def export_list(
         self,
         entity_type: str,
@@ -4535,6 +4574,7 @@ class OpenCTIStix2:
         self._rewrite_embedded_image_uris_in_bundle_for_export(bundle)
         return bundle
 
+    @_reuse_export_marking_definition_cache
     def export_selected(
         self,
         entities_list: List[dict],

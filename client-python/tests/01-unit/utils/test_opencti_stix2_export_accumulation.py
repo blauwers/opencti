@@ -246,6 +246,23 @@ def _root_with_already_emitted_refs(identifier):
     }
 
 
+def _root_with_shared_marking(identifier, definition="TLP:AMBER"):
+    return {
+        "id": f"indicator--root-{identifier}",
+        "type": "indicator",
+        "x_opencti_id": f"root-{identifier}",
+        "objectMarking": [
+            {
+                "standard_id": "marking-definition--shared",
+                "definition_type": "TLP",
+                "definition": definition,
+                "created": "2026-01-01T00:00:00.000Z",
+            }
+        ],
+        "objectMarkingIds": ["marking-definition--shared"],
+    }
+
+
 def _container_root(identifier):
     return {
         "id": f"report--root-{identifier}",
@@ -396,6 +413,66 @@ def test_export_selected_deduplicates_and_rewrites_bundle_once():
         "indicator--2",
     ]
     assert rewrite_sizes == [2]
+
+
+def test_export_selected_reuses_shared_marking_definition_conversion_per_scope():
+    helper = _full_helper([])
+    helper.generate_export = lambda entity: entity.copy()
+    build_calls = []
+    original_build = helper._build_export_marking_definition
+
+    def counting_build(entity_marking_definition):
+        build_calls.append(entity_marking_definition["standard_id"])
+        return original_build(entity_marking_definition)
+
+    helper._build_export_marking_definition = counting_build
+
+    first_result = helper.export_selected(
+        entities_list=[_root_with_shared_marking(1), _root_with_shared_marking(2)],
+        mode="simple",
+    )
+    second_result = helper.export_selected(
+        entities_list=[_root_with_shared_marking(3), _root_with_shared_marking(4)],
+        mode="simple",
+    )
+
+    assert [item["id"] for item in first_result["objects"]] == [
+        "marking-definition--shared",
+        "indicator--root-1",
+        "indicator--root-2",
+    ]
+    assert [item["id"] for item in second_result["objects"]] == [
+        "marking-definition--shared",
+        "indicator--root-3",
+        "indicator--root-4",
+    ]
+    assert build_calls == ["marking-definition--shared", "marking-definition--shared"]
+
+
+def test_export_list_reuses_shared_marking_definition_conversion():
+    helper = _full_helper([])
+    helper.generate_export = lambda entity: entity.copy()
+    helper.export_entities_list = lambda **_kwargs: [
+        _root_with_shared_marking(1),
+        _root_with_shared_marking(2),
+    ]
+    build_calls = []
+    original_build = helper._build_export_marking_definition
+
+    def counting_build(entity_marking_definition):
+        build_calls.append(entity_marking_definition["standard_id"])
+        return original_build(entity_marking_definition)
+
+    helper._build_export_marking_definition = counting_build
+
+    result = helper.export_list(entity_type="Indicator", mode="simple")
+
+    assert [item["id"] for item in result["objects"]] == [
+        "marking-definition--shared",
+        "indicator--root-1",
+        "indicator--root-2",
+    ]
+    assert build_calls == ["marking-definition--shared"]
 
 
 def test_prepare_export_full_deduplicates_relationship_bundles():
