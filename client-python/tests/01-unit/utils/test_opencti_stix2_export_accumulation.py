@@ -68,6 +68,29 @@ class _CountingSightingRelationshipCollection(_RelationshipCollection):
         return super().list(fromOrToId=from_or_to_ids)
 
 
+class _CountingNestedRefRelationshipCollection:
+    def __init__(self, relationships_by_source=None):
+        self.relationships_by_source = relationships_by_source or {}
+        self.kwargs = []
+
+    def list(self, **kwargs):
+        self.kwargs.append(kwargs)
+        source_ids = kwargs.get("fromId")
+        if source_ids is None:
+            source_ids = kwargs["filters"]["filters"][0]["values"]
+        if not isinstance(source_ids, list):
+            source_ids = [source_ids]
+
+        relationships = []
+        seen_relationship_ids = set()
+        for source_id in source_ids:
+            for relationship in self.relationships_by_source.get(source_id, []):
+                if relationship["id"] not in seen_relationship_ids:
+                    seen_relationship_ids.add(relationship["id"])
+                    relationships.append(relationship)
+        return relationships
+
+
 class _CountingRelatedObjectLister:
     def __init__(self, targets_by_id):
         self.targets_by_id = targets_by_id
@@ -124,6 +147,14 @@ def _relationship(identifier, target_identifier=None):
             "parent_types": ["Stix-Domain-Object"],
         },
     }
+
+
+def _nested_ref_relationship(identifier, from_identifier, target_identifier):
+    relationship = _relationship(identifier, target_identifier)
+    relationship["relationship_type"] = "sample"
+    relationship["from"]["id"] = from_identifier
+    relationship["from"]["standard_id"] = f"indicator--{from_identifier}"
+    return relationship
 
 
 def _full_helper(relationships, access_collection=None):
@@ -755,6 +786,129 @@ def test_export_selected_copies_shared_sighting_relationships_for_each_root():
         "sighting--shared",
         "indicator--root-2",
     ]
+
+
+def test_export_selected_prefetches_nested_ref_relationships_across_roots():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    helper.export_selected(entities_list=_root_entities(3), mode="full")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+
+
+def test_export_list_prefetches_nested_ref_relationships_across_roots():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+    helper.export_entities_list = lambda **_kwargs: _root_entities(3)
+    access_filter = {
+        "mode": "or",
+        "filters": [{"key": "objectLabel", "values": ["label--1"]}],
+        "filterGroups": [],
+    }
+
+    helper.export_list(
+        entity_type="Indicator", mode="full", access_filter=access_filter
+    )
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [
+                    {"key": "fromId", "values": ["root-1", "root-2", "root-3"]}
+                ],
+                "filterGroups": [access_filter],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+
+
+def test_export_selected_keeps_single_root_nested_ref_relationship_fallback():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    helper.export_selected(entities_list=_root_entities(1), mode="full")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "fromId": "root-1",
+            "filters": None,
+            "getAll": True,
+        }
+    ]
+
+
+def test_prepare_export_simple_keeps_nested_ref_relationship_one_page_call_shape():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    helper.prepare_export(entity=_root_entities(1)[0], mode="simple")
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "fromId": "root-1",
+            "filters": None,
+        }
+    ]
+
+
+def test_export_selected_chunks_nested_ref_relationship_prefetch():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection()
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    helper.export_selected(
+        entities_list=_root_entities(EXPORT_PREFETCH_BATCH_SIZE + 1), mode="full"
+    )
+
+    assert [
+        len(kwargs["filters"]["filters"][0]["values"])
+        for kwargs in nested_ref_relationships.kwargs
+    ] == [EXPORT_PREFETCH_BATCH_SIZE, 1]
+    assert [kwargs["first"] for kwargs in nested_ref_relationships.kwargs] == [
+        EXPORT_PREFETCH_BATCH_SIZE,
+        EXPORT_PREFETCH_BATCH_SIZE,
+    ]
+
+
+def test_export_selected_applies_nested_ref_relationships_only_to_source_roots():
+    relationship = _nested_ref_relationship("nested-ref--1", "root-1", "root-2")
+    relationship["to"]["id"] = "root-2"
+    relationship["to"]["standard_id"] = "indicator--root-2"
+    relationship["to"]["entity_type"] = "Indicator"
+    helper = _full_helper([])
+    helper.opencti.stix_nested_ref_relationship = (
+        _CountingNestedRefRelationshipCollection({"root-1": [relationship]})
+    )
+
+    result = helper.export_selected(entities_list=_root_entities(2), mode="full")
+    root_objects = {
+        item["id"]: item
+        for item in result["objects"]
+        if item["id"].startswith("indicator--root-")
+    }
+
+    assert root_objects["indicator--root-1"]["sample_refs"] == ["indicator--root-2"]
+    assert "sample_refs" not in root_objects["indicator--root-2"]
 
 
 def test_export_list_deduplicates_objects_and_rewrites_bundle_once():
