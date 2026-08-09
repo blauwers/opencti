@@ -294,6 +294,30 @@ def _root_with_shared_data_source(identifier):
     }
 
 
+def _root_with_shared_file_marking(identifier):
+    return {
+        "id": f"indicator--root-{identifier}",
+        "type": "indicator",
+        "x_opencti_id": f"root-{identifier}",
+        "importFiles": [
+            {
+                "id": "file--shared",
+                "name": "shared.bin",
+                "metaData": {"mimetype": "application/octet-stream"},
+                "objectMarking": [
+                    {
+                        "standard_id": "marking-definition--shared",
+                        "definition_type": "TLP",
+                        "definition": "TLP:AMBER",
+                        "created": "2026-01-01T00:00:00.000Z",
+                    }
+                ],
+            }
+        ],
+        "importFilesIds": ["file--shared"],
+    }
+
+
 def _container_root(identifier):
     return {
         "id": f"report--root-{identifier}",
@@ -653,6 +677,46 @@ def test_export_list_reuses_shared_data_source_conversion():
         "data-component--root-2",
     ]
     assert build_calls == ["data-source--shared"]
+
+
+def test_export_selected_reuses_shared_file_marking_definition_conversion():
+    helper = _full_helper([])
+    helper.generate_export = lambda entity: entity.copy()
+    helper.opencti.fetch_opencti_file_by_id = (
+        lambda _file_id, binary, serialize: "ZGF0YQ=="
+    )
+    build_calls = []
+    original_build = helper._build_export_marking_definition
+
+    def counting_build(entity_marking_definition):
+        build_calls.append(entity_marking_definition["standard_id"])
+        return original_build(entity_marking_definition)
+
+    helper._build_export_marking_definition = counting_build
+
+    result = helper.export_selected(
+        entities_list=[
+            _root_with_shared_file_marking(1),
+            _root_with_shared_file_marking(2),
+        ],
+        mode="simple",
+    )
+    roots_by_id = {
+        item["id"]: item for item in result["objects"] if item["type"] == "indicator"
+    }
+
+    assert [item["id"] for item in result["objects"]] == [
+        "marking-definition--shared",
+        "indicator--root-1",
+        "indicator--root-2",
+    ]
+    assert roots_by_id["indicator--root-1"]["x_opencti_files"][0][
+        "object_marking_refs"
+    ] == ["marking-definition--shared"]
+    assert roots_by_id["indicator--root-2"]["x_opencti_files"][0][
+        "object_marking_refs"
+    ] == ["marking-definition--shared"]
+    assert build_calls == ["marking-definition--shared"]
 
 
 def test_prepare_export_full_deduplicates_relationship_bundles():
