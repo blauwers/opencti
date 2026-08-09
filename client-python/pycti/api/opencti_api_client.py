@@ -96,6 +96,7 @@ from pycti.utils.opencti_stix2_utils import OpenCTIStix2Utils
 # allow a complete admitted batch work item to survive the queue plus execution.
 DEFAULT_BATCH_REQUESTS_TIMEOUT = 3600
 DEFAULT_BATCH_REQUESTS_MAX_PAYLOAD_SIZE = 48 * 1024 * 1024
+DEFAULT_BUNDLE_SUBMISSION_MAX_PAYLOAD_SIZE = 48 * 1024 * 1024
 BATCH_MUTATION_EXECUTE_QUERY = """
             mutation BatchMutationsExecute($operations: [BatchGraphqlOperationInput!]!, $options: BatchExecuteOptionsInput) {
                 batchMutationsExecute(operations: $operations, options: $options) {
@@ -381,6 +382,8 @@ class OpenCTIApiClient:
     :type provider: string, optional
     :param batch_requests_max_payload_size: maximum serialized backend batch mutation request size in bytes
     :type batch_requests_max_payload_size: int, optional
+    :param bundle_submission_max_payload_size: maximum serialized JSON bundle submission request size in bytes
+    :type bundle_submission_max_payload_size: int, optional
     """
 
     def __init__(
@@ -399,6 +402,7 @@ class OpenCTIApiClient:
         batch_requests_timeout: Optional[int] = None,
         provider: Optional[str] = None,
         batch_requests_max_payload_size: Optional[int] = None,
+        bundle_submission_max_payload_size: Optional[int] = None,
     ):
         """Initialize the OpenCTIApiClient instance.
 
@@ -430,6 +434,8 @@ class OpenCTIApiClient:
         :type provider: str or None
         :param batch_requests_max_payload_size: maximum serialized backend batch mutation request size in bytes (default: 48 MiB)
         :type batch_requests_max_payload_size: int or None
+        :param bundle_submission_max_payload_size: maximum serialized JSON bundle submission request size in bytes before multipart admission is used (default: 48 MiB)
+        :type bundle_submission_max_payload_size: int or None
 
         :raises ValueError: If URL or token is missing or invalid
         """
@@ -479,6 +485,11 @@ class OpenCTIApiClient:
             batch_requests_max_payload_size
             if batch_requests_max_payload_size is not None
             else DEFAULT_BATCH_REQUESTS_MAX_PAYLOAD_SIZE
+        )
+        self.session_bundle_submission_max_payload_size = (
+            bundle_submission_max_payload_size
+            if bundle_submission_max_payload_size is not None
+            else DEFAULT_BUNDLE_SUBMISSION_MAX_PAYLOAD_SIZE
         )
         self._batch_mutation_plan = None
         # Define the dependencies
@@ -1668,6 +1679,65 @@ class OpenCTIApiClient:
             self.app_logger.error("[upload] Missing parameter: file_name")
             return None
 
+    @staticmethod
+    def _build_bundle_push_request(
+        connector_id: str,
+        bundle: Union[str, File],
+        work_id: Optional[str],
+        split_bundles: bool,
+        cleanup_inconsistent_bundle: bool,
+        wait_until: Optional[str],
+        *,
+        multipart: bool = False,
+    ) -> Tuple[str, Dict[str, Any]]:
+        bundle_type = "Upload!" if multipart else "String!"
+        mutation_name = "StixBundlePushUpload" if multipart else "StixBundlePush"
+        field_name = "stixBundlePushUpload" if multipart else "stixBundlePush"
+        if wait_until is None:
+            mutation = f"""
+                    mutation {mutation_name}($connectorId: String!, $bundle: {bundle_type}, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean) {{
+                        {field_name}(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle)
+                    }}
+                 """
+        else:
+            mutation = f"""
+                    mutation {mutation_name}($connectorId: String!, $bundle: {bundle_type}, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean, $wait_until: BatchWaitUntil) {{
+                        {field_name}(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle, wait_until: $wait_until)
+                    }}
+                 """
+        variables = {
+            "connectorId": connector_id,
+            "bundle": bundle,
+            "work_id": work_id,
+            "split_bundles": split_bundles,
+            "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
+        }
+        if wait_until is not None:
+            variables["wait_until"] = wait_until
+        return mutation, variables
+
+    @classmethod
+    def _bundle_push_json_request_payload_size(
+        cls,
+        connector_id: str,
+        bundle: str,
+        work_id: Optional[str],
+        split_bundles: bool,
+        cleanup_inconsistent_bundle: bool,
+        wait_until: Optional[str],
+    ) -> int:
+        mutation, variables = cls._build_bundle_push_request(
+            connector_id,
+            bundle,
+            work_id,
+            split_bundles,
+            cleanup_inconsistent_bundle,
+            wait_until,
+        )
+        return len(
+            json.dumps({"query": mutation, "variables": variables}).encode("utf-8")
+        )
+
     def send_bundle_to_api(self, **kwargs):
         """Push a bundle to a queue through OpenCTI API.
 
@@ -1699,30 +1769,53 @@ class OpenCTIApiClient:
             raise ValueError("wait_until must be MATERIALIZED or COMMITTED")
 
         if connector_id is not None and bundle is not None:
-            self.app_logger.info(
-                "Pushing a bundle to queue through API", {connector_id}
+            request_payload_size = self._bundle_push_json_request_payload_size(
+                connector_id,
+                bundle,
+                work_id,
+                split_bundles,
+                cleanup_inconsistent_bundle,
+                wait_until,
             )
-            if wait_until is None:
-                mutation = """
-                        mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean) {
-                            stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle)
-                        }
-                     """
+            use_multipart = (
+                isinstance(self.session_bundle_submission_max_payload_size, int)
+                and not isinstance(
+                    self.session_bundle_submission_max_payload_size, bool
+                )
+                and self.session_bundle_submission_max_payload_size > 0
+                and request_payload_size
+                > self.session_bundle_submission_max_payload_size
+            )
+            if use_multipart:
+                self.app_logger.info(
+                    "Pushing an oversized bundle to queue through multipart API",
+                    {
+                        "connector_id": connector_id,
+                        "request_payload_size": request_payload_size,
+                        "max_json_payload_size": self.session_bundle_submission_max_payload_size,
+                    },
+                )
+                mutation, variables = self._build_bundle_push_request(
+                    connector_id,
+                    File("bundle.json", bundle, "application/json"),
+                    work_id,
+                    split_bundles,
+                    cleanup_inconsistent_bundle,
+                    wait_until,
+                    multipart=True,
+                )
             else:
-                mutation = """
-                        mutation StixBundlePush($connectorId: String!, $bundle: String!, $work_id: String, $split_bundles: Boolean, $cleanup_inconsistent_bundle: Boolean, $wait_until: BatchWaitUntil) {
-                            stixBundlePush(connectorId: $connectorId, bundle: $bundle, work_id: $work_id, split_bundles: $split_bundles, cleanup_inconsistent_bundle: $cleanup_inconsistent_bundle, wait_until: $wait_until)
-                        }
-                     """
-            variables = {
-                "connectorId": connector_id,
-                "bundle": bundle,
-                "work_id": work_id,
-                "split_bundles": split_bundles,
-                "cleanup_inconsistent_bundle": cleanup_inconsistent_bundle,
-            }
-            if wait_until is not None:
-                variables["wait_until"] = wait_until
+                self.app_logger.info(
+                    "Pushing a bundle to queue through API", {connector_id}
+                )
+                mutation, variables = self._build_bundle_push_request(
+                    connector_id,
+                    bundle,
+                    work_id,
+                    split_bundles,
+                    cleanup_inconsistent_bundle,
+                    wait_until,
+                )
             return self.query(mutation, variables)
         else:
             self.app_logger.error(

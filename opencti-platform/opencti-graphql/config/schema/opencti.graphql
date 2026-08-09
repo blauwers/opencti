@@ -16565,6 +16565,7 @@ type Mutation {
 
   ######## STIX DOMAIN OBJECT ENTITIES
   stixBundlePush(connectorId: String!, bundle: String!, work_id: String, split_bundles: Boolean, cleanup_inconsistent_bundle: Boolean, wait_until: BatchWaitUntil): Boolean @auth(for: [CONNECTORAPI])
+  stixBundlePushUpload(connectorId: String!, bundle: Upload!, work_id: String, split_bundles: Boolean, cleanup_inconsistent_bundle: Boolean, wait_until: BatchWaitUntil): Boolean @auth(for: [CONNECTORAPI])
   stixDomainObjectAdd(input: StixDomainObjectAddInput!): StixDomainObject @auth(for: [KNOWLEDGE_KNUPDATE])
   stixDomainObjectEdit(id: ID!): StixDomainObjectEditMutations @auth
   stixDomainObjectsExportAsk(

@@ -18,7 +18,7 @@ import { BUS_TOPICS } from '../config/conf';
 import { internalFindByIds, internalLoadById, storeLoadById } from '../database/middleware-loader';
 import { completeContextDataForEntity, publishUserAction } from '../listener/UserActionListener';
 import { checkAndConvertFilters } from '../utils/filtering/filtering-utils';
-import { specialTypesExtensions } from '../database/file-storage';
+import { specialTypesExtensions, streamConverter } from '../database/file-storage';
 import { getExportFilter } from '../utils/getExportFilter';
 import { getEntitiesListFromCache } from '../database/cache';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../schema/stixMetaObject';
@@ -318,6 +318,30 @@ export const sendStixBundle = async (
 ) => {
   try {
     await submitStixBundle(context, user, connectorId, bundle, work_id, {
+      splitBundles: split_bundles,
+      cleanupInconsistentBundle: cleanup_inconsistent_bundle,
+      waitUntil: wait_until,
+    });
+    return true;
+  } catch (err) {
+    throw UnsupportedError('Invalid bundle', { cause: err });
+  }
+};
+
+export const sendStixBundleUpload = async (
+  context,
+  user,
+  connectorId,
+  bundle,
+  work_id,
+  split_bundles = false,
+  cleanup_inconsistent_bundle = false,
+  wait_until = /** @type {string | null | undefined} */ (undefined),
+) => {
+  try {
+    const { createReadStream } = await bundle;
+    const uploadedBundle = await streamConverter(createReadStream());
+    await submitStixBundle(context, user, connectorId, uploadedBundle, work_id, {
       splitBundles: split_bundles,
       cleanupInconsistentBundle: cleanup_inconsistent_bundle,
       waitUntil: wait_until,

@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BatchAdmissionErrorCode,
@@ -30,7 +31,7 @@ import {
   reserveBatchSubmission,
 } from '../../../src/modules/batch/batch-submission-domain';
 import { resolveRequiredBatchDeliveryProtocol } from '../../../src/modules/batch/batch-worker-runtime-domain';
-import { sendStixBundle, submitStixBundle } from '../../../src/domain/stix';
+import { sendStixBundle, sendStixBundleUpload, submitStixBundle } from '../../../src/domain/stix';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import { pushToWorkerForConnector } from '../../../src/database/rabbitmq';
 import { createWork, loadWorkById, updateBatchSubmissionExpectation, updateExpectationsNumber } from '../../../src/domain/work';
@@ -702,5 +703,44 @@ describe('submitStixBundle', () => {
         batch_wait_until: BatchWaitUntil.Committed,
       }),
     );
+  });
+
+  it('admits uploaded compatibility bundles through the same batch path', async () => {
+    const unicodeBundle = JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--33333333-3333-4333-8333-333333333333',
+      objects: [
+        { type: 'identity', id: 'identity--33333333-3333-4333-8333-333333333333', name: 'café' },
+      ],
+    });
+    const unicodeBundleBytes = Buffer.from(unicodeBundle, 'utf8');
+    const splitIndex = unicodeBundleBytes.indexOf(Buffer.from('é', 'utf8')[0]) + 1;
+
+    await expect(sendStixBundleUpload(
+      testContext,
+      ADMIN_USER,
+      'connector-1',
+      Promise.resolve({
+        createReadStream: () => Readable.from([
+          unicodeBundleBytes.subarray(0, splitIndex),
+          unicodeBundleBytes.subarray(splitIndex),
+        ]),
+        filename: 'bundle.json',
+        mimetype: 'application/json',
+      }),
+      'work-1',
+      false,
+      false,
+      BatchWaitUntil.Committed,
+    )).resolves.toBe(true);
+
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.objectContaining({
+        batch_wait_until: BatchWaitUntil.Committed,
+      }),
+    );
+    const queueMessage = vi.mocked(pushToWorkerForConnector).mock.calls[0][1];
+    expect(Buffer.from(queueMessage.content, 'base64').toString('utf8')).toContain('"name":"café"');
   });
 });

@@ -1,5 +1,6 @@
 import path, { join } from 'node:path';
 import crypto from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import mime from 'mime-types';
 import nconf from 'nconf';
 import type { _Object } from '@aws-sdk/client-s3';
@@ -714,12 +715,14 @@ export const upload = async (
  * @returns {Promise<string>} Promise resolving to the complete stream content as a string
  */
 export const streamConverter = (stream: Readable): Promise<string> => {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const decoder = new StringDecoder('utf8');
     let data = '';
     stream.on('data', (chunk: Buffer | string) => {
-      data += chunk.toString();
+      data += typeof chunk === 'string' ? chunk : decoder.write(chunk);
     });
-    stream.on('end', () => resolve(data));
+    stream.on('end', () => resolve(data + decoder.end()));
+    stream.on('error', reject);
   });
 };
 export interface FileUploadOpts {

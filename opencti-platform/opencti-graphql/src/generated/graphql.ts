@@ -17736,6 +17736,7 @@ export type Mutation = {
   statusTemplateDelete: Scalars['ID']['output'];
   statusTemplateFieldPatch: StatusTemplate;
   stixBundlePush?: Maybe<Scalars['Boolean']['output']>;
+  stixBundlePushUpload?: Maybe<Scalars['Boolean']['output']>;
   stixBundleSubmit: BatchAdmission;
   stixCoreObjectEdit?: Maybe<StixCoreObjectEditMutations>;
   stixCoreObjectsExportAsk?: Maybe<Array<File>>;
@@ -19913,6 +19914,16 @@ export type MutationStatusTemplateFieldPatchArgs = {
 
 export type MutationStixBundlePushArgs = {
   bundle: Scalars['String']['input'];
+  cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
+  connectorId: Scalars['String']['input'];
+  split_bundles?: InputMaybe<Scalars['Boolean']['input']>;
+  wait_until?: InputMaybe<BatchWaitUntil>;
+  work_id?: InputMaybe<Scalars['String']['input']>;
+};
+
+
+export type MutationStixBundlePushUploadArgs = {
+  bundle: Scalars['Upload']['input'];
   cleanup_inconsistent_bundle?: InputMaybe<Scalars['Boolean']['input']>;
   connectorId: Scalars['String']['input'];
   split_bundles?: InputMaybe<Scalars['Boolean']['input']>;
@@ -48501,6 +48512,7 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   statusTemplateDelete?: Resolver<ResolversTypes['ID'], ParentType, ContextType, RequireFields<MutationStatusTemplateDeleteArgs, 'id'>>;
   statusTemplateFieldPatch?: Resolver<ResolversTypes['StatusTemplate'], ParentType, ContextType, RequireFields<MutationStatusTemplateFieldPatchArgs, 'id' | 'input'>>;
   stixBundlePush?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType, RequireFields<MutationStixBundlePushArgs, 'bundle' | 'connectorId'>>;
+  stixBundlePushUpload?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType, RequireFields<MutationStixBundlePushUploadArgs, 'bundle' | 'connectorId'>>;
   stixBundleSubmit?: Resolver<ResolversTypes['BatchAdmission'], ParentType, ContextType, RequireFields<MutationStixBundleSubmitArgs, 'bundle' | 'connectorId'>>;
   stixCoreObjectEdit?: Resolver<Maybe<ResolversTypes['StixCoreObjectEditMutations']>, ParentType, ContextType, RequireFields<MutationStixCoreObjectEditArgs, 'id'>>;
   stixCoreObjectsExportAsk?: Resolver<Maybe<Array<ResolversTypes['File']>>, ParentType, ContextType, RequireFields<MutationStixCoreObjectsExportAskArgs, 'input'>>;

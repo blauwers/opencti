@@ -1,5 +1,5 @@
 import * as R from 'ramda';
-import { sendStixBundle, stixDelete, stixObjectMerge } from '../domain/stix';
+import { sendStixBundle, sendStixBundleUpload, stixDelete, stixObjectMerge } from '../domain/stix';
 import { stixLoadByIdStringify } from '../database/middleware';
 import { connectorsForEnrichment } from '../database/repository';
 import { schemaRelationsRefDefinition } from '../schema/schema-relationsRef';
@@ -69,6 +69,16 @@ const stixResolvers = {
       merge: ({ stixObjectsIds }) => stixObjectMerge(context, context.user, id, stixObjectsIds),
     }),
     stixBundlePush: (_, { connectorId, bundle, work_id, split_bundles, cleanup_inconsistent_bundle, wait_until }, context) => sendStixBundle(
+      context,
+      context.user,
+      connectorId,
+      bundle,
+      work_id,
+      split_bundles,
+      cleanup_inconsistent_bundle,
+      wait_until,
+    ),
+    stixBundlePushUpload: (_, { connectorId, bundle, work_id, split_bundles, cleanup_inconsistent_bundle, wait_until }, context) => sendStixBundleUpload(
       context,
       context.user,
       connectorId,

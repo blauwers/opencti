@@ -341,6 +341,67 @@ def test_batch_mutation_plan_reserves_request_envelope_before_capture():
             plan.capture(query, variables, [])
 
 
+def test_send_bundle_to_api_uses_json_admission_below_payload_threshold():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        bundle_submission_max_payload_size=10_000,
+    )
+    client.query = MagicMock(return_value={"data": {"stixBundlePush": True}})
+
+    client.send_bundle_to_api(
+        connector_id="connector-1",
+        bundle='{"type":"bundle","objects":[]}',
+        work_id="work-1",
+        wait_until="COMMITTED",
+    )
+
+    mutation, variables = client.query.call_args.args[:2]
+    assert "stixBundlePush(" in mutation
+    assert "stixBundlePushUpload(" not in mutation
+    assert variables == {
+        "connectorId": "connector-1",
+        "bundle": '{"type":"bundle","objects":[]}',
+        "work_id": "work-1",
+        "split_bundles": False,
+        "cleanup_inconsistent_bundle": False,
+        "wait_until": "COMMITTED",
+    }
+
+
+def test_send_bundle_to_api_uses_multipart_admission_above_payload_threshold():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        bundle_submission_max_payload_size=1,
+    )
+    client.query = MagicMock(return_value={"data": {"stixBundlePushUpload": True}})
+
+    client.send_bundle_to_api(
+        connector_id="connector-1",
+        bundle='{"type":"bundle","objects":[]}',
+        work_id="work-1",
+        split_bundles=True,
+        cleanup_inconsistent_bundle=True,
+        wait_until="MATERIALIZED",
+    )
+
+    mutation, variables = client.query.call_args.args[:2]
+    assert "stixBundlePushUpload(" in mutation
+    assert "stixBundlePush(" not in mutation
+    assert variables["connectorId"] == "connector-1"
+    assert variables["work_id"] == "work-1"
+    assert variables["split_bundles"] is True
+    assert variables["cleanup_inconsistent_bundle"] is True
+    assert variables["wait_until"] == "MATERIALIZED"
+    assert isinstance(variables["bundle"], File)
+    assert variables["bundle"].name == "bundle.json"
+    assert variables["bundle"].data == '{"type":"bundle","objects":[]}'
+    assert variables["bundle"].mime == "application/json"
+
+
 def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
     client = OpenCTIApiClient(
         url="http://localhost:4000",
