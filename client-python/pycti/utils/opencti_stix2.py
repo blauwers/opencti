@@ -134,6 +134,7 @@ class OpenCTIStix2:
         self.stix2_update = OpenCTIStix2Update(opencti)
         self.mapping_cache = LRUCache(maxsize=50000)
         self.mapping_cache_permanent = {}
+        self._external_reference_ids = LRUCache(maxsize=50000)
         self._batch_mapping_cache = ContextVar(
             f"opencti_stix2_batch_mapping_cache_{id(self)}", default=None
         )
@@ -243,6 +244,25 @@ class OpenCTIStix2:
             external_id,
             description,
         )
+
+    def _get_external_reference_generated_id(self, url, source_name, external_id):
+        if not all(
+            value is None or isinstance(value, str)
+            for value in (url, source_name, external_id)
+        ):
+            return self.opencti.external_reference.generate_id(
+                url, source_name, external_id
+            )
+
+        cache_key = (url, source_name, external_id)
+        try:
+            return self._external_reference_ids[cache_key]
+        except KeyError:
+            generated_ref_id = self.opencti.external_reference.generate_id(
+                url, source_name, external_id
+            )
+            self._external_reference_ids[cache_key] = generated_ref_id
+            return generated_ref_id
 
     def _create_or_get_external_reference(
         self, generated_ref_id, source_name, url, external_id, description, file_objs
@@ -1246,7 +1266,7 @@ class OpenCTIStix2:
                         else None
                     )
                     description = external_reference.get("description")
-                    generated_ref_id = self.opencti.external_reference.generate_id(
+                    generated_ref_id = self._get_external_reference_generated_id(
                         url, source_name, external_id
                     )
                     if generated_ref_id is None:
@@ -1405,7 +1425,7 @@ class OpenCTIStix2:
                     else None
                 )
                 description = external_reference.get("description")
-                generated_ref_id = self.opencti.external_reference.generate_id(
+                generated_ref_id = self._get_external_reference_generated_id(
                     url, source_name, external_id
                 )
                 if generated_ref_id is None:

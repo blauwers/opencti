@@ -131,17 +131,22 @@ def test_filter_objects(opencti_stix2: OpenCTIStix2):
 class _ExternalReferenceRecorder:
     def __init__(self):
         self.create_calls = 0
+        self.generate_id_calls = 0
 
     @staticmethod
-    def generate_id(url, source_name, external_id):
+    def _generated_id(url, source_name, external_id):
         if url is not None:
             return f"external-reference--{url}"
         return f"external-reference--{source_name}|{external_id}"
 
+    def generate_id(self, url, source_name, external_id):
+        self.generate_id_calls += 1
+        return self._generated_id(url, source_name, external_id)
+
     def create(self, **kwargs):
         self.create_calls += 1
         return {
-            "id": self.generate_id(
+            "id": self._generated_id(
                 kwargs["url"], kwargs["source_name"], kwargs["external_id"]
             )
         }
@@ -183,6 +188,7 @@ def test_extract_embedded_relationships_reuses_external_reference_without_files(
     second = opencti_stix2.extract_embedded_relationships(dict(stix_object))
 
     assert first["external_references"] == second["external_references"]
+    assert opencti.external_reference.generate_id_calls == 1
     assert opencti.external_reference.create_calls == 1
 
 
@@ -242,6 +248,40 @@ def test_extract_embedded_relationships_keeps_changed_external_reference_uncache
     opencti_stix2.extract_embedded_relationships(second)
 
     assert opencti.external_reference.create_calls == 2
+
+
+def test_extract_embedded_relationships_reuses_external_reference_generated_ids():
+    opencti = _external_reference_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    stix_object = {
+        "type": "malware",
+        "external_references": [
+            {
+                "source_name": "benchmark",
+                "url": "https://example.test/reference",
+                "external_id": "REF-1",
+            }
+        ],
+    }
+
+    opencti_stix2.extract_embedded_relationships(dict(stix_object))
+    opencti_stix2.extract_embedded_relationships(dict(stix_object))
+
+    assert opencti.external_reference.generate_id_calls == 1
+    assert opencti.external_reference.create_calls == 1
+
+
+def test_get_external_reference_generated_id_does_not_cache_non_string_inputs():
+    opencti = _external_reference_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    first = opencti_stix2._get_external_reference_generated_id(42, "benchmark", "REF-1")
+    second = opencti_stix2._get_external_reference_generated_id(
+        42, "benchmark", "REF-1"
+    )
+
+    assert first == second
+    assert opencti.external_reference.generate_id_calls == 2
 
 
 def test_pick_aliases(opencti_stix2: OpenCTIStix2) -> None:
