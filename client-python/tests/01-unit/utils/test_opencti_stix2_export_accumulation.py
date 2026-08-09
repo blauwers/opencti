@@ -131,6 +131,44 @@ def test_prepare_export_full_checks_repeated_relation_endpoints_once():
     assert access_collection.list_calls == 2
 
 
+def test_prepare_export_full_reads_repeated_related_object_once():
+    helper = _full_helper(
+        [
+            _relationship("relationship--1", "shared"),
+            _relationship("relationship--2", "shared"),
+            _relationship("relationship--3", "shared"),
+        ]
+    )
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return {
+            "id": "malware--shared",
+            "type": "malware",
+            "x_opencti_id": "target-shared",
+        }
+
+    helper.get_reader = lambda resolve_type: read
+    helper.generate_export = lambda entity: entity.copy()
+    entity = {
+        "id": "indicator--root",
+        "type": "indicator",
+        "x_opencti_id": "root",
+    }
+
+    result = helper.prepare_export(entity=entity, mode="full")
+
+    assert len(read_calls) == 1
+    assert [item["id"] for item in result] == [
+        "indicator--root",
+        "relationship--1",
+        "relationship--2",
+        "relationship--3",
+        "malware--shared",
+    ]
+
+
 def test_export_list_deduplicates_objects_and_rewrites_bundle_once():
     entities = [
         {"id": "indicator--1", "type": "indicator"},
