@@ -191,6 +191,39 @@ def _relationship_root(identifier):
     }
 
 
+def _root_with_already_emitted_refs(identifier):
+    return {
+        "id": f"indicator--root-{identifier}",
+        "type": "indicator",
+        "x_opencti_id": f"root-{identifier}",
+        "createdBy": {
+            "id": f"creator-{identifier}",
+            "standard_id": f"identity--creator-{identifier}",
+            "entity_type": "Identity",
+            "parent_types": ["Stix-Domain-Object"],
+        },
+        "createdById": f"creator-{identifier}",
+        "dataSource": {
+            "id": f"data-source-{identifier}",
+            "standard_id": f"data-source--{identifier}",
+            "entity_type": "Data-Source",
+            "parent_types": ["Stix-Domain-Object"],
+        },
+        "dataSourceId": f"data-source-{identifier}",
+        "objectMarking": [
+            {
+                "id": f"marking-{identifier}",
+                "standard_id": f"marking-definition--{identifier}",
+                "definition_type": "TLP",
+                "definition": "TLP:CLEAR",
+                "created": "2017-01-20T00:00:00.000Z",
+            }
+        ],
+        "objectMarkingIds": [f"marking-{identifier}"],
+        "related_ref": f"malware--unseen-{identifier}",
+    }
+
+
 def _related_object_data(target_identifier):
     return {
         "id": f"target-{target_identifier}",
@@ -1141,6 +1174,37 @@ def test_prepare_export_full_does_not_reread_relationship_root_endpoints_as_refs
         "relationship--root-1",
         "malware--source-1",
         "malware--target-1",
+    ]
+
+
+def test_prepare_export_full_does_not_reread_refs_already_emitted_in_result():
+    helper = _full_helper([], access_collection=_CountingAccessCollection())
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return {
+            "id": "unseen-1",
+            "standard_id": "malware--unseen-1",
+            "entity_type": "Malware",
+            "parent_types": ["Stix-Domain-Object"],
+        }
+
+    helper.get_lister = lambda resolve_type: None
+    helper.get_reader = lambda resolve_type: read
+    _configure_related_object_export_conversion(helper)
+
+    result = helper.prepare_export(
+        entity=_root_with_already_emitted_refs(1), mode="full"
+    )
+
+    assert read_calls == ["malware--unseen-1"]
+    assert [item["id"] for item in result] == [
+        "identity--creator-1",
+        "data-source--1",
+        "marking-definition--1",
+        "indicator--root-1",
+        "malware--unseen-1",
     ]
 
 
