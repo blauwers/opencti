@@ -15,7 +15,7 @@ import {
 import { createRedisClient, getClientBase, getClientXRANGE } from './redis';
 import { isEmptyField, wait, waitInSec } from './utils';
 import { utcDate } from '../utils/format';
-import { UnsupportedError } from '../config/errors';
+import { DatabaseError, UnsupportedError } from '../config/errors';
 import { asyncMap } from '../utils/data-processing';
 import { roundRate } from '../utils/consumer-metrics';
 
@@ -24,6 +24,166 @@ const REDIS_LIVE_STREAM_NAME = `${REDIS_PREFIX}${LIVE_STREAM_NAME}`;
 const REDIS_NOTIFICATION_STREAM_NAME = `${REDIS_PREFIX}${NOTIFICATION_STREAM_NAME}`;
 const REDIS_ACTIVITY_STREAM_NAME = `${REDIS_PREFIX}${ACTIVITY_STREAM_NAME}`;
 const streamTrimming = conf.get('redis:trimming') || 0;
+const MAX_REDIS_STREAM_ENTRY_ID_BYTES = 41;
+export const REDIS_STREAM_PUBLICATION_PROOF_MAX_ENTRIES = 1024;
+export const REDIS_STREAM_PUBLICATION_PROOF_MAX_SERIALIZED_BYTES = 512 * 1024;
+
+export enum RedisStreamPublicationProofAppendResult {
+  Malformed = -1,
+  Conflict = 0,
+  Appended = 1,
+  Existing = 2,
+  EntryLimitExceeded = 3,
+  SerializedByteLimitExceeded = 4,
+}
+
+export interface RawAppendOrReturnLiveStreamPublicationProofInput {
+  deliveryId: string;
+  publicationId: string;
+  eventFingerprint: string;
+  publishedAt: string;
+  proofVersion: number;
+  maxEntries: number;
+  maxSerializedBytes: number;
+  event: BaseEvent;
+}
+
+export interface RawAppendOrReturnLiveStreamPublicationProofResult {
+  result: RedisStreamPublicationProofAppendResult;
+  rawProof: string | null;
+}
+
+const redisHashSlotTag = (key: string): string => {
+  const openingBraceIndex = key.indexOf('{');
+  if (openingBraceIndex >= 0) {
+    const closingBraceIndex = key.indexOf('}', openingBraceIndex + 1);
+    if (closingBraceIndex > openingBraceIndex + 1) {
+      return key.slice(openingBraceIndex + 1, closingBraceIndex);
+    }
+  }
+  return key;
+};
+
+// EVAL touches the live stream and proof hash together, so both keys must share one Redis Cluster slot.
+const buildLiveStreamCoLocatedKey = (suffix: string): string => {
+  return `{${redisHashSlotTag(REDIS_LIVE_STREAM_NAME)}}:${suffix}`;
+};
+
+export const buildRedisStreamPublicationProofContainerKey = (deliveryId: string): string => {
+  return buildLiveStreamCoLocatedKey(`batch_stream_publication_proof:${deliveryId}`);
+};
+
+const APPEND_OR_RETURN_LIVE_STREAM_PUBLICATION_PROOF_SCRIPT = `
+  local function is_sha256_hex(value)
+    return type(value) == 'string'
+      and string.len(value) == 64
+      and string.match(value, '^[a-f0-9]+$') ~= nil
+  end
+
+  local function is_valid_proof(field, proof, proof_version)
+    if type(proof) ~= 'table' then
+      return false
+    end
+    local field_count = 0
+    for key, _ in pairs(proof) do
+      if key ~= 'publication_id'
+        and key ~= 'event_fingerprint'
+        and key ~= 'stream_entry_id'
+        and key ~= 'published_at'
+        and key ~= 'proof_version' then
+        return false
+      end
+      field_count = field_count + 1
+    end
+    return field_count == 5
+      and type(proof.publication_id) == 'string'
+      and proof.publication_id == field
+      and type(proof.event_fingerprint) == 'string'
+      and type(proof.stream_entry_id) == 'string'
+      and string.len(proof.stream_entry_id) > 0
+      and type(proof.published_at) == 'string'
+      and string.len(proof.published_at) > 0
+      and tostring(proof.proof_version) == proof_version
+  end
+
+  local proof_version = tonumber(ARGV[4])
+  local max_entries = tonumber(ARGV[5])
+  local max_serialized_bytes = tonumber(ARGV[6])
+  local max_stream_entry_id_bytes = tonumber(ARGV[7])
+  if not is_sha256_hex(ARGV[1])
+    or not is_sha256_hex(ARGV[2])
+    or string.len(ARGV[3]) == 0
+    or not proof_version
+    or proof_version < 1
+    or proof_version % 1 ~= 0
+    or tostring(proof_version) ~= ARGV[4]
+    or not max_entries
+    or max_entries < 1
+    or max_entries % 1 ~= 0
+    or not max_serialized_bytes
+    or max_serialized_bytes < 1
+    or max_serialized_bytes % 1 ~= 0
+    or not max_stream_entry_id_bytes
+    or max_stream_entry_id_bytes < 1
+    or max_stream_entry_id_bytes % 1 ~= 0 then
+    return {-1}
+  end
+
+  local current = redis.call('HGET', KEYS[2], ARGV[1])
+  if current then
+    local decoded, proof = pcall(cjson.decode, current)
+    if not decoded or not is_valid_proof(ARGV[1], proof, ARGV[4]) then
+      return {-1}
+    end
+    if proof.event_fingerprint ~= ARGV[2] then
+      return {0}
+    end
+    return {2, current}
+  end
+
+  if redis.call('HLEN', KEYS[2]) >= max_entries then
+    return {3}
+  end
+
+  local current_fields = redis.call('HGETALL', KEYS[2])
+  local current_serialized_bytes = 0
+  for index = 1, #current_fields, 2 do
+    local field = current_fields[index]
+    local raw_proof = current_fields[index + 1]
+    local decoded, proof = pcall(cjson.decode, raw_proof)
+    if not decoded or not is_valid_proof(field, proof, ARGV[4]) then
+      return {-1}
+    end
+    current_serialized_bytes = current_serialized_bytes + string.len(field) + string.len(raw_proof)
+  end
+
+  local prospective_proof = cjson.encode({
+    publication_id = ARGV[1],
+    event_fingerprint = ARGV[2],
+    stream_entry_id = string.rep('0', max_stream_entry_id_bytes),
+    published_at = ARGV[3],
+    proof_version = proof_version,
+  })
+  if current_serialized_bytes + string.len(ARGV[1]) + string.len(prospective_proof) > max_serialized_bytes then
+    return {4}
+  end
+
+  local stream_entry_id
+  if ARGV[8] == '1' then
+    stream_entry_id = redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[9], '*', unpack(ARGV, 10))
+  else
+    stream_entry_id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 10))
+  end
+  local proof = cjson.encode({
+    publication_id = ARGV[1],
+    event_fingerprint = ARGV[2],
+    stream_entry_id = stream_entry_id,
+    published_at = ARGV[3],
+    proof_version = proof_version,
+  })
+  redis.call('HSET', KEYS[2], ARGV[1], proof)
+  return {1, proof}
+`;
 
 const convertStreamName = (streamName = LIVE_STREAM_NAME) => {
   switch (streamName) {
@@ -66,6 +226,53 @@ const rawPushToStream = async <T extends BaseEvent> (event: T) => {
   } else {
     await redisClient.call('XADD', REDIS_LIVE_STREAM_NAME, '*', ...eventStreamData);
   }
+};
+
+export const rawAppendOrReturnLiveStreamPublicationProof = async (
+  input: RawAppendOrReturnLiveStreamPublicationProofInput,
+): Promise<RawAppendOrReturnLiveStreamPublicationProofResult> => {
+  const eventStreamData = mapJSToStream(input.event);
+  const maxEntries = Math.min(input.maxEntries, REDIS_STREAM_PUBLICATION_PROOF_MAX_ENTRIES);
+  const maxSerializedBytes = Math.min(input.maxSerializedBytes, REDIS_STREAM_PUBLICATION_PROOF_MAX_SERIALIZED_BYTES);
+  const result = await getClientBase().call(
+    'EVAL',
+    APPEND_OR_RETURN_LIVE_STREAM_PUBLICATION_PROOF_SCRIPT,
+    2,
+    REDIS_LIVE_STREAM_NAME,
+    buildRedisStreamPublicationProofContainerKey(input.deliveryId),
+    input.publicationId,
+    input.eventFingerprint,
+    input.publishedAt,
+    `${input.proofVersion}`,
+    `${maxEntries}`,
+    `${maxSerializedBytes}`,
+    `${MAX_REDIS_STREAM_ENTRY_ID_BYTES}`,
+    streamTrimming ? '1' : '0',
+    `${streamTrimming}`,
+    ...eventStreamData,
+  ) as unknown;
+  if (!Array.isArray(result) || result.length === 0) {
+    throw DatabaseError('Redis stream publication proof append returned an invalid response', {
+      delivery_id: input.deliveryId,
+      publication_id: input.publicationId,
+    });
+  }
+  return {
+    result: Number(result[0]) as RedisStreamPublicationProofAppendResult,
+    rawProof: typeof result[1] === 'string' ? result[1] : null,
+  };
+};
+
+export const rawReadLiveStreamPublicationProof = async (
+  deliveryId: string,
+  publicationId: string,
+): Promise<string | null> => {
+  const result = await getClientBase().call(
+    'HGET',
+    buildRedisStreamPublicationProofContainerKey(deliveryId),
+    publicationId,
+  );
+  return typeof result === 'string' ? result : null;
 };
 const processStreamResult = async (results: Array<any>, callback: any, withInternal: boolean | undefined) => {
   const transform = (r: any) => mapStreamToJS(r);

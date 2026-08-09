@@ -137,6 +137,7 @@ export enum BatchAdmissionErrorCode {
   ExecutionReconciliationConflict = 'EXECUTION_RECONCILIATION_CONFLICT',
   ExecutionRequiresReconciliation = 'EXECUTION_REQUIRES_RECONCILIATION',
   ExecutionFailedTerminal = 'EXECUTION_FAILED_TERMINAL',
+  StreamPublicationProofConflict = 'STREAM_PUBLICATION_PROOF_CONFLICT',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
   UnsupportedExecutionPreference = 'UNSUPPORTED_EXECUTION_PREFERENCE',
   ExecutionPreferenceNotEligible = 'EXECUTION_PREFERENCE_NOT_ELIGIBLE',
@@ -403,6 +404,14 @@ export interface BatchBackendAttemptObservation {
   observed_at: string;
   expires_at: string;
   observation_version: number;
+}
+
+export interface BatchStreamPublicationProof {
+  publication_id: string;
+  event_fingerprint: string;
+  stream_entry_id: string;
+  published_at: string;
+  proof_version: number;
 }
 
 export interface BatchDeliveryChildReservationInput {

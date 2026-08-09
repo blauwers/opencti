@@ -3,11 +3,13 @@ import * as jsonpatch from 'fast-json-patch';
 import { BatchMutationKind, BatchSideEffectKind, executeBatchMutations } from '../../../src/modules/batch/batch-executor';
 import { STIX_EXT_OCTI } from '../../../src/types/stix-2-1-extensions';
 
-const { mockRawPushToStream } = vi.hoisted(() => ({
+const { mockRawAppendOrReturnLiveStreamPublicationProof, mockRawPushToStream } = vi.hoisted(() => ({
+  mockRawAppendOrReturnLiveStreamPublicationProof: vi.fn(),
   mockRawPushToStream: vi.fn(),
 }));
 
 vi.mock('../../../src/database/redis-stream', () => ({
+  rawAppendOrReturnLiveStreamPublicationProof: mockRawAppendOrReturnLiveStreamPublicationProof,
   rawRedisStreamClient: {
     rawPushToStream: mockRawPushToStream,
   },
@@ -35,6 +37,7 @@ describe('stream handler batch publication', () => {
       ...event,
       event_id: context.eventId,
     });
+    expect(mockRawAppendOrReturnLiveStreamPublicationProof).not.toHaveBeenCalled();
   });
 
   it('does not publish stream events from an aborted batch', async () => {
@@ -69,6 +72,7 @@ describe('stream handler batch publication', () => {
       ...event,
       event_id: context.eventId,
     });
+    expect(mockRawAppendOrReturnLiveStreamPublicationProof).not.toHaveBeenCalled();
   });
 
   it('coalesces create and update publications for the same object inside a batch', async () => {
