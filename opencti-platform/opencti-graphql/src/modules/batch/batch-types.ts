@@ -6,6 +6,7 @@ export const ENTITY_TYPE_BATCH_DELIVERY = 'BatchDelivery';
 export const ENTITY_TYPE_BATCH_EXECUTION_RECEIPT = 'BatchExecutionReceipt';
 export const ENTITY_TYPE_BATCH_EXECUTION_RECONCILIATION = 'BatchExecutionReconciliation';
 export const ENTITY_TYPE_BATCH_STREAM_PUBLICATION_MANIFEST = 'BatchStreamPublicationManifest';
+export const ENTITY_TYPE_BATCH_EXECUTION_RESULT_STAGING = 'BatchExecutionResultStaging';
 
 export enum BatchAdmissionStatus {
   Accepted = 'ACCEPTED',
@@ -139,6 +140,7 @@ export enum BatchAdmissionErrorCode {
   ExecutionReconciliationConflict = 'EXECUTION_RECONCILIATION_CONFLICT',
   ExecutionRequiresReconciliation = 'EXECUTION_REQUIRES_RECONCILIATION',
   ExecutionFailedTerminal = 'EXECUTION_FAILED_TERMINAL',
+  ExecutionResultStagingConflict = 'EXECUTION_RESULT_STAGING_CONFLICT',
   StreamPublicationProofConflict = 'STREAM_PUBLICATION_PROOF_CONFLICT',
   StreamPublicationManifestConflict = 'STREAM_PUBLICATION_MANIFEST_CONFLICT',
   InvalidWaitUntil = 'INVALID_WAIT_UNTIL',
@@ -455,6 +457,35 @@ export interface BatchStreamPublicationManifest {
   updated_at: string;
 }
 
+export interface BatchExecutionResultStaging {
+  id: string;
+  internal_id: string;
+  _id?: string;
+  _index?: string;
+  sort?: unknown;
+  standard_id: string;
+  entity_type: typeof ENTITY_TYPE_BATCH_EXECUTION_RESULT_STAGING;
+  base_type: 'ENTITY';
+  parent_types: string[];
+  staging_id: string;
+  receipt_id: string;
+  delivery_id: string;
+  submission_id: string;
+  request_fingerprint: string;
+  request_contract_version: number;
+  result_version: number;
+  operation_count: number;
+  operation_errors: BatchExecutionReceiptOperationError[];
+  execution_mode: BatchExecutionMode;
+  wait_until: BatchWaitUntil;
+  side_effect_kinds: string[];
+  serialized_bytes: number;
+  staging_fingerprint: string;
+  staged_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BatchDeliveryChildReservationInput {
   branchKind: Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>;
   branchSequence: number;
@@ -542,6 +573,14 @@ export interface BatchExecutionReceiptOperationError {
   objectId?: string;
   operationIndex: number;
   retryable: boolean;
+}
+
+export interface BatchExecutionResultStagingPayload {
+  operationCount: number;
+  operationErrors: BatchExecutionReceiptOperationError[];
+  executionMode: BatchExecutionMode;
+  waitUntil: BatchWaitUntil;
+  sideEffectKinds: string[];
 }
 
 export interface BatchExecutionReceiptResultMetadata {
