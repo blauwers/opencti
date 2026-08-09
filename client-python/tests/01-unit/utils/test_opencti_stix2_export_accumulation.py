@@ -171,6 +171,13 @@ def _relationship_from_root(identifier, root_identifier, target_identifier):
     return relationship
 
 
+def _security_coverage_relationship(identifier, target_identifier):
+    relationship = _relationship(identifier, target_identifier)
+    relationship["to"]["standard_id"] = f"security-coverage--{target_identifier}"
+    relationship["to"]["entity_type"] = "Security-Coverage"
+    return relationship
+
+
 def _raw_relationship_from_root(identifier, root_identifier, target_identifier):
     relationship = _relationship_from_root(
         identifier, root_identifier, target_identifier
@@ -598,6 +605,106 @@ def test_prepare_export_full_batches_unique_related_object_reads_by_type():
         "malware--target-2",
         "malware--target-3",
     ]
+
+
+def test_prepare_export_full_batches_security_coverage_related_objects_with_registered_lister():
+    helper = _full_helper(
+        [
+            _security_coverage_relationship("relationship--1", "target-1"),
+            _security_coverage_relationship("relationship--2", "target-2"),
+            _security_coverage_relationship("relationship--3", "target-3"),
+        ]
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            f"target-target-{index}": {
+                "id": f"target-target-{index}",
+                "standard_id": f"security-coverage--target-{index}",
+                "entity_type": "Security-Coverage",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+            for index in range(1, 4)
+        }
+    )
+    helper.opencti.security_coverage = SimpleNamespace(list=lister.list)
+    helper.get_lister = OpenCTIStix2.get_lister.__get__(helper, OpenCTIStix2)
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    helper.generate_export = lambda entity: (
+        {
+            "id": entity["standard_id"],
+            "type": entity["entity_type"].lower(),
+            "x_opencti_id": entity["id"],
+        }
+        if "standard_id" in entity
+        else entity.copy()
+    )
+    helper.get_reader = lambda resolve_type: lambda filters: (_ for _ in ()).throw(
+        AssertionError("Security-Coverage targets should use the registered lister")
+    )
+
+    result = helper.prepare_export(entity=_root_entities(1)[0], mode="full")
+
+    assert lister.kwargs == [
+        {
+            "filters": ["target-target-1", "target-target-2", "target-target-3"],
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [item["id"] for item in result] == [
+        "indicator--root-1",
+        "relationship--1",
+        "relationship--2",
+        "relationship--3",
+        "security-coverage--target-1",
+        "security-coverage--target-2",
+        "security-coverage--target-3",
+    ]
+
+
+def test_prepare_export_full_keeps_single_security_coverage_related_object_reader_fallback():
+    helper = _full_helper(
+        [_security_coverage_relationship("relationship--1", "target-1")]
+    )
+    lister = _CountingRelatedObjectLister(
+        {
+            "target-target-1": {
+                "id": "target-target-1",
+                "standard_id": "security-coverage--target-1",
+                "entity_type": "Security-Coverage",
+                "parent_types": ["Stix-Domain-Object"],
+            }
+        }
+    )
+    helper.opencti.security_coverage = SimpleNamespace(list=lister.list)
+    helper.get_lister = OpenCTIStix2.get_lister.__get__(helper, OpenCTIStix2)
+    helper.prepare_id_filters_export = lambda entity_id, access_filter: entity_id
+    helper.generate_export = lambda entity: (
+        {
+            "id": entity["standard_id"],
+            "type": entity["entity_type"].lower(),
+            "x_opencti_id": entity["id"],
+        }
+        if "standard_id" in entity
+        else entity.copy()
+    )
+    read_calls = []
+
+    def read(filters):
+        read_calls.append(filters)
+        return {
+            "id": "target-target-1",
+            "standard_id": "security-coverage--target-1",
+            "entity_type": "Security-Coverage",
+            "parent_types": ["Stix-Domain-Object"],
+        }
+
+    helper.get_reader = lambda resolve_type: read
+
+    helper.prepare_export(entity=_root_entities(1)[0], mode="full")
+
+    assert lister.kwargs == []
+    assert read_calls == ["target-target-1"]
 
 
 def test_prepare_export_full_chunks_unique_related_object_reads():
