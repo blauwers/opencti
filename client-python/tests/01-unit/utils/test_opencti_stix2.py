@@ -702,6 +702,283 @@ def test_import_bundle_falls_back_to_per_item_external_reference_create_when_pre
     ]
 
 
+class _KillChainPhasePrefetchRecorder:
+    def __init__(self):
+        self.list_filters = []
+        self.list_first = []
+        self.create_payloads = []
+        self.list_order = 0
+
+    @staticmethod
+    def generate_id(phase_name, kill_chain_name):
+        return f"kill-chain-phase--{kill_chain_name}|{phase_name}"
+
+    def list(self, **kwargs):
+        ids = kwargs["filters"]["filters"][0]["values"]
+        self.list_filters.append(ids)
+        self.list_first.append(kwargs["first"])
+        return [
+            {
+                "id": f"internal--{standard_id}",
+                "standard_id": standard_id,
+                "entity_type": "Kill-Chain-Phase",
+                "kill_chain_name": standard_id.removeprefix("kill-chain-phase--").split(
+                    "|", 1
+                )[0],
+                "phase_name": standard_id.removeprefix("kill-chain-phase--").split(
+                    "|", 1
+                )[1],
+                "x_opencti_order": self.list_order,
+            }
+            for standard_id in ids
+        ]
+
+    def create(self, **kwargs):
+        self.create_payloads.append(kwargs)
+        standard_id = self.generate_id(kwargs["phase_name"], kwargs["kill_chain_name"])
+        return {
+            "id": f"internal--{standard_id}",
+            "standard_id": standard_id,
+            "entity_type": "Kill-Chain-Phase",
+        }
+
+
+def _kill_chain_phase_prefetch_opencti():
+    opencti = _external_reference_opencti()
+    opencti.kill_chain_phase = _KillChainPhasePrefetchRecorder()
+    return opencti
+
+
+def test_get_import_kill_chain_phases_preserves_field_precedence():
+    opencti = _kill_chain_phase_prefetch_opencti()
+    extension_phase = [{"kill_chain_name": "extension", "phase_name": "phase"}]
+    legacy_phase = [{"kill_chain_name": "legacy", "phase_name": "phase"}]
+    top_level_phase = [{"kill_chain_name": "top-level", "phase_name": "phase"}]
+    extension_reads = []
+
+    def get_attribute_in_extension(attribute, _entity):
+        extension_reads.append(attribute)
+        return extension_phase if attribute == "kill_chain_phases" else None
+
+    opencti.get_attribute_in_extension = get_attribute_in_extension
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    assert (
+        opencti_stix2._get_import_kill_chain_phases(
+            {
+                "kill_chain_phases": top_level_phase,
+                "x_opencti_kill_chain_phases": legacy_phase,
+            }
+        )
+        == top_level_phase
+    )
+    assert extension_reads == []
+    assert (
+        opencti_stix2._get_import_kill_chain_phases(
+            {
+                "kill_chain_phases": None,
+                "x_opencti_kill_chain_phases": legacy_phase,
+            }
+        )
+        == legacy_phase
+    )
+    assert extension_reads == []
+    assert (
+        opencti_stix2._get_import_kill_chain_phases(
+            {"x_opencti_kill_chain_phases": legacy_phase}
+        )
+        == extension_phase
+    )
+    assert extension_reads == ["kill_chain_phases"]
+
+    opencti.get_attribute_in_extension = lambda _attribute, _entity: None
+    assert (
+        opencti_stix2._get_import_kill_chain_phases(
+            {"x_opencti_kill_chain_phases": legacy_phase}
+        )
+        == legacy_phase
+    )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["kill_chain_phases", "x_opencti_kill_chain_phases"]
+)
+def test_import_bundle_prefetches_existing_kill_chain_phases_before_item_import(
+    field_name,
+):
+    opencti = _kill_chain_phase_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            field_name: [
+                {
+                    "kill_chain_name": "benchmark",
+                    "phase_name": f"phase-{index}",
+                }
+            ],
+        }
+        for index in range(3)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.kill_chain_phase.list_filters == [
+        [
+            "kill-chain-phase--benchmark|phase-0",
+            "kill-chain-phase--benchmark|phase-1",
+            "kill-chain-phase--benchmark|phase-2",
+        ]
+    ]
+    assert opencti.kill_chain_phase.list_first == [3]
+    assert opencti.kill_chain_phase.create_payloads == []
+
+
+def test_import_bundle_keeps_single_kill_chain_phase_on_per_item_create():
+    opencti = _kill_chain_phase_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+
+    _import_bundle_extracting_relationships(
+        opencti_stix2,
+        [
+            {
+                "id": "malware--1",
+                "type": "malware",
+                "kill_chain_phases": [
+                    {
+                        "kill_chain_name": "benchmark",
+                        "phase_name": "phase-1",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert opencti.kill_chain_phase.list_filters == []
+    assert [
+        payload["phase_name"] for payload in opencti.kill_chain_phase.create_payloads
+    ] == ["phase-1"]
+
+
+def test_import_bundle_prefetches_existing_kill_chain_phases_in_bounded_chunks():
+    opencti = _kill_chain_phase_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "kill_chain_phases": [
+                {
+                    "kill_chain_name": "benchmark",
+                    "phase_name": f"phase-{index}",
+                }
+            ],
+        }
+        for index in range(IMPORT_PREFETCH_BATCH_SIZE + 1)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.kill_chain_phase.list_filters[0] == [
+        f"kill-chain-phase--benchmark|phase-{index}"
+        for index in range(IMPORT_PREFETCH_BATCH_SIZE)
+    ]
+    assert opencti.kill_chain_phase.list_filters[1] == [
+        f"kill-chain-phase--benchmark|phase-{IMPORT_PREFETCH_BATCH_SIZE}"
+    ]
+    assert opencti.kill_chain_phase.list_first == [IMPORT_PREFETCH_BATCH_SIZE, 1]
+    assert opencti.kill_chain_phase.create_payloads == []
+
+
+def test_import_bundle_keeps_changed_kill_chain_phase_order_on_per_item_create():
+    opencti = _kill_chain_phase_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "kill_chain_phases": [
+                {
+                    "kill_chain_name": "benchmark",
+                    "phase_name": f"phase-{index}",
+                    "x_opencti_order": 1,
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.kill_chain_phase.list_filters == [
+        [
+            "kill-chain-phase--benchmark|phase-0",
+            "kill-chain-phase--benchmark|phase-1",
+        ]
+    ]
+    assert [
+        payload["x_opencti_order"]
+        for payload in opencti.kill_chain_phase.create_payloads
+    ] == [1, 1]
+
+
+def test_import_bundle_keeps_id_bearing_kill_chain_phase_on_per_item_create():
+    opencti = _kill_chain_phase_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "kill_chain_phases": [
+                {
+                    "id": f"kill-chain-phase--explicit-{index}",
+                    "kill_chain_name": "benchmark",
+                    "phase_name": f"phase-{index}",
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.kill_chain_phase.list_filters == []
+    assert [
+        payload["stix_id"] for payload in opencti.kill_chain_phase.create_payloads
+    ] == [
+        "kill-chain-phase--explicit-0",
+        "kill-chain-phase--explicit-1",
+    ]
+
+
+def test_import_bundle_falls_back_to_per_item_kill_chain_phase_create_when_prefetch_fails():
+    opencti = _kill_chain_phase_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    opencti.kill_chain_phase.list = lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("prefetch failed")
+    )
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "kill_chain_phases": [
+                {
+                    "kill_chain_name": "benchmark",
+                    "phase_name": f"phase-{index}",
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert [
+        payload["phase_name"] for payload in opencti.kill_chain_phase.create_payloads
+    ] == ["phase-0", "phase-1"]
+
+
 class _LabelPrefetchRecorder:
     def __init__(self):
         self.list_filters = []
