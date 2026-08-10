@@ -10,6 +10,13 @@ type BatchRetainedLockState = {
   participantIdsByDraft: Map<string, Set<string>>;
 };
 
+export type BatchLockOptions = {
+  draftId?: string;
+  retryCount?: number;
+  extensionRetryCount?: number;
+  releaseRetryCount?: number;
+};
+
 const BATCH_RETAINED_LOCKS_METADATA_KEY = 'batch.retained-locks';
 const BATCH_LOCK_RETRY_COUNT_CONFIG_KEY = 'app:concurrency:batch_retry_count';
 const STANDARD_LOCK_RETRY_COUNT_CONFIG_KEY = 'app:concurrency:retry_count';
@@ -56,13 +63,10 @@ export const getBatchRetainedLockIds = (draftId?: string): string[] => {
   return Array.from(getBatchRetainedLockState()?.participantIdsByDraft.get(getDraftKey(draftId)) ?? []);
 };
 
-export const getBatchAwareLockOptions = (
+export const getBatchLongWaitLockOptions = (
   draftId?: string,
-): { draftId?: string; retryCount?: number; extensionRetryCount?: number; releaseRetryCount?: number } => {
+): BatchLockOptions => {
   const lockOptions = { draftId };
-  if (!isBatchWriteBoundaryOpen()) {
-    return lockOptions;
-  }
   const batchRetryCount = Number(conf.get(BATCH_LOCK_RETRY_COUNT_CONFIG_KEY));
   if (!Number.isInteger(batchRetryCount) || batchRetryCount < 0) {
     return lockOptions;
@@ -74,4 +78,13 @@ export const getBatchAwareLockOptions = (
     extensionRetryCount: Number.isInteger(standardRetryCount) && standardRetryCount >= 0 ? standardRetryCount : undefined,
     releaseRetryCount: 0,
   };
+};
+
+export const getBatchAwareLockOptions = (
+  draftId?: string,
+): BatchLockOptions => {
+  if (!isBatchWriteBoundaryOpen()) {
+    return { draftId };
+  }
+  return getBatchLongWaitLockOptions(draftId);
 };

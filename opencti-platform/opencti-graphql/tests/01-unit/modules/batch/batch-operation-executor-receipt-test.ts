@@ -4,6 +4,7 @@ import { elIndex, elLoadById, elUpdate } from '../../../../src/database/engine';
 import { lockResources } from '../../../../src/lock/master-lock';
 import { loadBatchDelivery, readBatchDeliveryQueueMessage } from '../../../../src/modules/batch/batch-delivery-domain';
 import { startBatchBackendAttemptObservationRefreshLoop } from '../../../../src/modules/batch/batch-backend-attempt-observation-domain';
+import { buildBatchDirectDeliveryExecutionLockId } from '../../../../src/modules/batch/batch-direct-delivery-execution-lock';
 import { buildBatchExecutionReconciliationId, openBatchExecutionReconciliation } from '../../../../src/modules/batch/batch-execution-reconciliation-domain';
 import {
   buildBatchExecutionReceiptId,
@@ -92,6 +93,27 @@ const directDeliveryContext: BatchDirectDeliveryContext = {
   delivery_branch_sequence: 0,
   delivery_branch_ordinal: 0,
 };
+const buildDirectDeliveryContext = (candidate: BatchDelivery): BatchDirectDeliveryContext => ({
+  submission_id: candidate.submission_id,
+  delivery_id: candidate.internal_id,
+  parent_delivery_id: candidate.parent_delivery_id,
+  delivery_kind: candidate.delivery_kind,
+  delivery_protocol_version: BatchDeliveryProtocol.V2,
+  delivery_branch_kind: candidate.branch_kind,
+  delivery_branch_sequence: candidate.branch_sequence,
+  delivery_branch_ordinal: candidate.branch_ordinal,
+});
+const buildOversizedDelivery = (deliveryId: string, branchOrdinal: number): BatchDelivery => ({
+  ...delivery,
+  id: deliveryId,
+  internal_id: deliveryId,
+  standard_id: deliveryId,
+  parent_delivery_id: 'batch-delivery--oversized-parent',
+  delivery_kind: BatchDeliveryKind.Child,
+  branch_kind: BatchDeliveryBranchKind.OversizedChunk,
+  branch_ordinal: branchOrdinal,
+  payload_fingerprint: `payload-fingerprint-oversized-${branchOrdinal}`,
+});
 const operation = {
   query,
   variables: JSON.stringify({ value: 'one' }),
@@ -166,17 +188,19 @@ const buildPreparedReceiptInput = () => ({
 
 describe('batch GraphQL execution receipt boundary', () => {
   let receipts: Map<string, any>;
+  let deliveries: Map<string, BatchDelivery>;
   let stopAttemptObservationRefreshLoop: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     receipts = new Map();
+    deliveries = new Map([[delivery.internal_id, delivery]]);
     stopAttemptObservationRefreshLoop = vi.fn().mockResolvedValue(undefined);
     vi.mocked(lockResources).mockResolvedValue({ unlock: vi.fn() } as any);
-    vi.mocked(loadBatchDelivery).mockResolvedValue(delivery);
-    vi.mocked(readBatchDeliveryQueueMessage).mockReturnValue({
-      submission_id: delivery.submission_id,
-    } as any);
+    vi.mocked(loadBatchDelivery).mockImplementation(async (_context, deliveryId) => deliveries.get(deliveryId) ?? null);
+    vi.mocked(readBatchDeliveryQueueMessage).mockImplementation((candidate) => ({
+      submission_id: candidate.submission_id,
+    } as any));
     vi.mocked(startBatchBackendAttemptObservationRefreshLoop).mockResolvedValue({
       stop: stopAttemptObservationRefreshLoop as unknown as () => Promise<void>,
     });
@@ -254,6 +278,121 @@ describe('batch GraphQL execution receipt boundary', () => {
     });
 
     expect(calls).toEqual(['observation:start', 'write:one', 'observation:stop']);
+  });
+
+  it('serializes oversized descendants from one submission before batch admission', async () => {
+    const firstDelivery = buildOversizedDelivery('batch-delivery--oversized-one', 0);
+    const secondDelivery = buildOversizedDelivery('batch-delivery--oversized-two', 1);
+    deliveries.set(firstDelivery.internal_id, firstDelivery);
+    deliveries.set(secondDelivery.internal_id, secondDelivery);
+    const firstWriteStarted = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((promiseResolve) => {
+        resolve = promiseResolve;
+      });
+      return { promise, resolve };
+    })();
+    const releaseFirstWrite = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((promiseResolve) => {
+        resolve = promiseResolve;
+      });
+      return { promise, resolve };
+    })();
+    const secondSerializationAttempted = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((promiseResolve) => {
+        resolve = promiseResolve;
+      });
+      return { promise, resolve };
+    })();
+    const serializationLockId = buildBatchDirectDeliveryExecutionLockId(firstDelivery.submission_id);
+    let serializationLockHeld = false;
+    let releaseSerializationWaiter: (() => void) | undefined;
+    vi.mocked(lockResources).mockImplementation(async (ids) => {
+      if (ids[0] !== serializationLockId) {
+        return { unlock: vi.fn() } as any;
+      }
+      if (serializationLockHeld) {
+        secondSerializationAttempted.resolve();
+        await new Promise<void>((resolve) => {
+          releaseSerializationWaiter = resolve;
+        });
+      }
+      serializationLockHeld = true;
+      return {
+        unlock: vi.fn(async () => {
+          serializationLockHeld = false;
+          releaseSerializationWaiter?.();
+          releaseSerializationWaiter = undefined;
+        }),
+      } as any;
+    });
+    const calls: string[] = [];
+    const schema = makeExecutableSchema({
+      typeDefs: `
+        type Query {
+          status: String!
+        }
+
+        type Mutation {
+          record(value: String!): String!
+        }
+      `,
+      resolvers: {
+        Query: {
+          status: () => 'ok',
+        },
+        Mutation: {
+          record: async (_: unknown, { value }: { value: string }) => {
+            calls.push(`write:${value}`);
+            if (value === 'one') {
+              firstWriteStarted.resolve();
+              await releaseFirstWrite.promise;
+            }
+            return value;
+          },
+        },
+      },
+    });
+
+    const firstExecution = executeBatchGraphqlOperations(schema, testContext, [operation], {
+      directDeliveryContext: buildDirectDeliveryContext(firstDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+    await firstWriteStarted.promise;
+    const secondExecution = executeBatchGraphqlOperations(schema, testContext, [{
+      ...operation,
+      variables: JSON.stringify({ value: 'two' }),
+      objectId: 'indicator--2',
+    }], {
+      directDeliveryContext: buildDirectDeliveryContext(secondDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+    await secondSerializationAttempted.promise;
+
+    expect(calls).toEqual(['write:one']);
+    expect(lockResources).toHaveBeenCalledWith([serializationLockId], expect.objectContaining({
+      retryCount: expect.any(Number),
+      releaseRetryCount: 0,
+    }));
+
+    releaseFirstWrite.resolve();
+    await Promise.all([firstExecution, secondExecution]);
+
+    expect(calls).toEqual(['write:one', 'write:two']);
+  });
+
+  it('does not serialize root direct deliveries by submission', async () => {
+    const calls: string[] = [];
+
+    await executeBatchGraphqlOperations(buildSchema(calls), testContext, [operation], {
+      directDeliveryContext,
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    const serializationLockId = buildBatchDirectDeliveryExecutionLockId(delivery.submission_id);
+    expect(vi.mocked(lockResources).mock.calls.some(([ids]) => ids[0] === serializationLockId)).toBe(false);
   });
 
   it('keeps direct execution semantics unchanged when observation startup fails', async () => {

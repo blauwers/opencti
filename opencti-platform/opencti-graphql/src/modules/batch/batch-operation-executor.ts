@@ -26,6 +26,7 @@ import {
   waitForBatchEntityCreateCoordinatorPromise,
 } from './batch-entity-create-coordinator';
 import { startBatchBackendAttemptObservationRefreshLoop, type BatchBackendAttemptObservationRefreshLoop } from './batch-backend-attempt-observation-domain';
+import { acquireBatchDirectDeliveryExecutionLock } from './batch-direct-delivery-execution-lock';
 import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
 import {
   ensureBatchExecutionReconciliationBeforeRequiresReconciliation,
@@ -52,6 +53,7 @@ import {
 import { BatchMutationKind, executeBatchMutations, normalizeBatchExecutionOptions, type BatchExecutionOptions, type BatchExecutionResult } from './batch-executor';
 import {
   BatchAdmissionErrorCode,
+  type BatchDelivery,
   type BatchDirectDeliveryContext,
   BatchExecutionMode,
   BatchExecutionReconciliationEvidenceClass,
@@ -1443,15 +1445,13 @@ const recordStartedBatchExecutionReceiptError = async (
   });
 };
 
-export const executeBatchGraphqlOperations = async (
+const executeBatchGraphqlOperationsWithAdmission = async (
   schema: GraphQLSchema,
   context: AuthContext,
   operations: BatchGraphqlOperationInput[],
   options: BatchGraphqlExecutionOptions = {},
+  validatedDirectDelivery?: BatchDelivery,
 ): Promise<BatchGraphqlExecutionResult> => {
-  if (!Array.isArray(operations) || operations.length === 0) {
-    throw FunctionalError('Batch GraphQL operations cannot be empty');
-  }
   batchGraphqlExecutionSequence += 1;
   const executionId = `batch-graphql-${batchGraphqlExecutionSequence}`;
   const admissionStats = getBatchGraphqlExecutionAdmissionStats(operations);
@@ -1492,7 +1492,7 @@ export const executeBatchGraphqlOperations = async (
     const normalizedOptions = normalizeBatchExecutionOptions(options);
     let receiptReservationInput: ReserveBatchExecutionReceiptInput | undefined;
     if (options.directDeliveryContext) {
-      const delivery = await assertBatchDirectDeliveryContext(context, options.directDeliveryContext);
+      const delivery = validatedDirectDelivery ?? await assertBatchDirectDeliveryContext(context, options.directDeliveryContext);
       receiptReservationInput = {
         deliveryId: delivery.internal_id,
         submissionId: delivery.submission_id,
@@ -1635,5 +1635,27 @@ export const executeBatchGraphqlOperations = async (
         admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
       });
     }
+  }
+};
+
+export const executeBatchGraphqlOperations = async (
+  schema: GraphQLSchema,
+  context: AuthContext,
+  operations: BatchGraphqlOperationInput[],
+  options: BatchGraphqlExecutionOptions = {},
+): Promise<BatchGraphqlExecutionResult> => {
+  if (!Array.isArray(operations) || operations.length === 0) {
+    throw FunctionalError('Batch GraphQL operations cannot be empty');
+  }
+  let directDeliveryExecutionLock: { unlock: () => Promise<void> } | undefined;
+  let directDelivery: BatchDelivery | undefined;
+  if (options.directDeliveryContext) {
+    directDelivery = await assertBatchDirectDeliveryContext(context, options.directDeliveryContext);
+    directDeliveryExecutionLock = await acquireBatchDirectDeliveryExecutionLock(directDelivery);
+  }
+  try {
+    return await executeBatchGraphqlOperationsWithAdmission(schema, context, operations, options, directDelivery);
+  } finally {
+    await directDeliveryExecutionLock?.unlock();
   }
 };
