@@ -2,6 +2,7 @@ import jsonCanonicalize from 'canonicalize';
 import { FunctionalError } from '../../config/errors';
 import { elFindByIds, elIndex, elLoadById, elUpdate } from '../../database/engine';
 import { INDEX_INTERNAL_OBJECTS, READ_INDEX_INTERNAL_OBJECTS } from '../../database/utils';
+import { updateBatchExpectation } from '../../domain/work';
 import { lockResources } from '../../lock/master-lock';
 import { BASE_TYPE_ENTITY } from '../../schema/general';
 import { getParentTypes } from '../../schema/schemaUtils';
@@ -37,6 +38,10 @@ const BATCH_DELIVERY_HANDOFF_EVIDENCE_ORDER = {
   [BatchDeliveryHandoffEvidence.ChildrenReserved]: 2,
   [BatchDeliveryHandoffEvidence.ChildrenPublished]: 3,
 };
+const BATCH_DELIVERY_EXPECTATION_REPLACEMENT_BRANCH_KINDS = new Set([
+  BatchDeliveryBranchKind.LegacySplit,
+  BatchDeliveryBranchKind.OversizedChunk,
+]);
 
 export interface ReserveBatchDeliveryInput {
   deliveryId: string;
@@ -727,6 +732,53 @@ const buildReserveBatchDeliveryChildInputs = (
   return childInputs;
 };
 
+const buildBatchDeliveryExpectationWorkIds = (parentDelivery: BatchDelivery): string[] => {
+  const queueMessage = readBatchDeliveryQueueMessage(parentDelivery);
+  const additionalWorkIds = queueMessage.additional_work_ids === undefined || queueMessage.additional_work_ids === null
+    ? []
+    : queueMessage.additional_work_ids;
+  if (
+    typeof queueMessage.work_id !== 'string'
+    || queueMessage.work_id.length === 0
+    || !Array.isArray(additionalWorkIds)
+    || additionalWorkIds.some((workId) => typeof workId !== 'string' || workId.length === 0)
+  ) {
+    throw batchDeliveryConflict('Batch delivery queue payload has invalid work attribution', {
+      delivery_id: parentDelivery.internal_id,
+    });
+  }
+  return [...new Set([queueMessage.work_id, ...additionalWorkIds])];
+};
+
+const getBatchDeliveryExpectationReplacementDelta = (childInputs: ReserveBatchDeliveryInput[]): number => {
+  const hasReplacementBranch = childInputs.some((childInput) => BATCH_DELIVERY_EXPECTATION_REPLACEMENT_BRANCH_KINDS.has(childInput.branchKind));
+  if (!hasReplacementBranch) {
+    return 0;
+  }
+  if (!childInputs.every((childInput) => BATCH_DELIVERY_EXPECTATION_REPLACEMENT_BRANCH_KINDS.has(childInput.branchKind))) {
+    throw batchDeliveryConflict('Batch delivery child set mixes expectation replacement and preservation branches', {
+      child_branch_kinds: [...new Set(childInputs.map((childInput) => childInput.branchKind))],
+    });
+  }
+  return childInputs.length - 1;
+};
+
+const applyBatchDeliveryExpectationReplacement = async (
+  context: AuthContext,
+  parentDelivery: BatchDelivery,
+  expectationWorkIds: string[],
+  expectationDelta: number,
+) => {
+  if (expectationDelta === 0) {
+    return;
+  }
+  // Split handoff replaces one already-recorded parent expectation with N
+  // child expectations, so only the net delta is applied here.
+  for (const workId of expectationWorkIds) {
+    await updateBatchExpectation(context, SYSTEM_USER, workId, expectationDelta, parentDelivery.internal_id);
+  }
+};
+
 export const reserveBatchDeliveryChildren = async (
   context: AuthContext,
   parentDeliveryId: string,
@@ -744,6 +796,8 @@ export const reserveBatchDeliveryChildren = async (
     const childInputs = buildReserveBatchDeliveryChildInputs(parentDelivery, children);
     const childDeliveryIds = childInputs.map((child) => child.deliveryId);
     const childSetFingerprint = buildBatchDeliveryChildSetFingerprint(childInputs);
+    const expectationDelta = getBatchDeliveryExpectationReplacementDelta(childInputs);
+    const expectationWorkIds = expectationDelta === 0 ? [] : buildBatchDeliveryExpectationWorkIds(parentDelivery);
     if (getBatchDeliveryHandoffEvidence(parentDelivery) === BatchDeliveryHandoffEvidence.None) {
       parentDelivery = await advanceBatchDeliveryHandoffEvidence(context, parentDelivery, BatchDeliveryHandoffEvidence.Planned, {
         child_set_fingerprint: childSetFingerprint,
@@ -761,6 +815,7 @@ export const reserveBatchDeliveryChildren = async (
     for (const childInput of childInputs) {
       await reserveBatchDelivery(context, childInput);
     }
+    await applyBatchDeliveryExpectationReplacement(context, parentDelivery, expectationWorkIds, expectationDelta);
     parentDelivery = await advanceBatchDeliveryHandoffEvidence(context, parentDelivery, BatchDeliveryHandoffEvidence.ChildrenReserved, {
       children_reserved_at: now(),
     });

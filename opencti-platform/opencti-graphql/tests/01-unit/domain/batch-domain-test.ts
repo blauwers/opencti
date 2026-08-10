@@ -57,12 +57,11 @@ vi.mock('../../../src/database/rabbitmq', async (importOriginal) => {
   };
 });
 
-vi.mock('../../../src/domain/work', async (importOriginal) => {
-  const actual: object = await importOriginal();
+vi.mock('../../../src/domain/work', () => {
   return {
-    ...actual,
     createWork: vi.fn(),
     loadWorkById: vi.fn(),
+    updateBatchExpectation: vi.fn(),
     updateBatchSubmissionExpectation: vi.fn(),
     updateExpectationsNumber: vi.fn(),
   };
@@ -542,6 +541,33 @@ describe('submitStixBundle', () => {
       1,
       buildBatchSubmissionId('connector-1', 'enrichment-batch-result:batch--1'),
     );
+  });
+
+  it('records one parent expectation before v2 legacy split handoff replacement', async () => {
+    vi.mocked(resolveRequiredBatchDeliveryProtocol).mockResolvedValue(BatchDeliveryProtocol.V2);
+
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-caller-1', {
+      idempotencyKey: 'feed-run-v2-legacy-split',
+      splitBundles: true,
+    });
+
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledWith(
+      testContext,
+      ADMIN_USER,
+      'work-caller-1',
+      1,
+      buildBatchSubmissionId('connector-1', 'feed-run-v2-legacy-split'),
+    );
+  });
+
+  it('keeps v1 legacy split root expectation accounting on the worker path', async () => {
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-caller-1', {
+      idempotencyKey: 'feed-run-v1-legacy-split',
+      splitBundles: true,
+    });
+
+    expect(updateBatchSubmissionExpectation).not.toHaveBeenCalled();
   });
 
   it('backfills a pre-bootstrap submission as v1 without rewriting its stored queue contract', async () => {

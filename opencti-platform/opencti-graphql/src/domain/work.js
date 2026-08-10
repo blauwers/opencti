@@ -11,7 +11,7 @@ import {
   redisGetWork,
   redisGetWorkCompletionState,
   redisInitializeWork,
-  redisApplyBatchSubmissionExpectation,
+  redisApplyBatchExpectation,
   redisMarkWorkAsProcessed,
   redisUpdateActionExpectation,
   redisUpdateWorkFigures,
@@ -472,44 +472,48 @@ export const updateExpectationsNumber = async (context, user, workId, expectatio
   return workId;
 };
 
-export const updateBatchSubmissionExpectation = async (context, user, workId, expectations, submissionId) => {
+export const updateBatchExpectation = async (context, user, workId, expectations, expectationKey) => {
   const currentWork = await loadWorkById(context, user, workId);
   if (!currentWork) {
-    logApp.warn('The work cannot be found in database, batch submission expectation cannot be updated.', { workId, expectations, submissionId });
+    logApp.warn('The work cannot be found in database, batch expectation cannot be updated.', { workId, expectations, expectationKey });
     return workId;
   }
 
   const params = {
     updated_at: now(),
     import_expected_number: expectations,
-    submission_id: submissionId,
+    expectation_key: expectationKey,
   };
   let source = 'if (ctx._source.batch_expectation_submission_ids == null) { ctx._source.batch_expectation_submission_ids = []; }';
-  source += `if (!ctx._source.batch_expectation_submission_ids.contains(params.submission_id)) {
-    ctx._source.batch_expectation_submission_ids.add(params.submission_id);
+  source += `if (!ctx._source.batch_expectation_submission_ids.contains(params.expectation_key)) {
+    ctx._source.batch_expectation_submission_ids.add(params.expectation_key);
     ctx._source.updated_at = params.updated_at;
     ctx._source["import_expected_number"] = ctx._source["import_expected_number"] + params.import_expected_number;
   }`;
   await elUpdateWithBufferedApply(context, currentWork._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
     const submissionIds = Array.isArray(existing.batch_expectation_submission_ids) ? existing.batch_expectation_submission_ids : [];
-    if (submissionIds.includes(submissionId)) {
+    if (submissionIds.includes(expectationKey)) {
       return existing;
     }
     return {
       ...existing,
       updated_at: params.updated_at,
       import_expected_number: (existing.import_expected_number ?? 0) + params.import_expected_number,
-      batch_expectation_submission_ids: [...submissionIds, submissionId],
+      batch_expectation_submission_ids: [...submissionIds, expectationKey],
     };
   });
 
-  await redisApplyBatchSubmissionExpectation(workId, submissionId, expectations);
+  await redisApplyBatchExpectation(workId, expectationKey, expectations);
   const workAlive = await isWorkAlive(context, user, workId);
   if (!workAlive) {
     await redisDeleteWorks([workId]);
-    logApp.warn('The work cannot be found in database, batch submission expectation cannot be updated.', { workId, expectations, submissionId });
+    logApp.warn('The work cannot be found in database, batch expectation cannot be updated.', { workId, expectations, expectationKey });
   }
   return workId;
+};
+
+export const updateBatchSubmissionExpectation = async (context, user, workId, expectations, submissionId) => {
+  return updateBatchExpectation(context, user, workId, expectations, submissionId);
 };
 
 /**

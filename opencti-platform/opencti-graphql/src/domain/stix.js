@@ -228,7 +228,10 @@ const submitExplicitBatch = async (context, user, connector, connectorId, workId
   let rootDelivery = await reserveRootBatchDelivery(context, submission);
   submission = await bindBatchSubmissionWork(context, user, connector, submission);
   if (!isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.ExpectationRecorded)) {
-    if (submission.execution_mode !== BatchExecutionMode.LegacySplit) {
+    if (
+      submission.execution_mode !== BatchExecutionMode.LegacySplit
+      || submission.required_delivery_protocol === BatchDeliveryProtocol.V2
+    ) {
       const expectationWorkIds = Array.from(new Set([
         submission.work_id,
         ...(preparedBundle.additionalWorkIds ?? []),

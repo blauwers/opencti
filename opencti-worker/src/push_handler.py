@@ -252,6 +252,10 @@ def should_report_batch_expectation(data: Dict[str, Any]) -> bool:
     return data.get("split_bundles") is False
 
 
+def uses_platform_split_expectation_accounting(data: Dict[str, Any]) -> bool:
+    return data.get("delivery_protocol_version") == BATCH_DELIVERY_PROTOCOL_V2
+
+
 def batch_expectation_work_ids(
     data: Dict[str, Any], work_id: Optional[str]
 ) -> List[str]:
@@ -762,6 +766,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         report_parent_expectation: bool,
     ) -> Literal["ack"]:
         work_ids = batch_expectation_work_ids(data, work_id)
+        platform_accounts_split_expectations = (
+            uses_platform_split_expectation_accounting(data)
+        )
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
                 self._confirm_delivery(push_channel, data)
@@ -773,7 +780,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
                     True,
                 ):
-                    if report_parent_expectation:
+                    if (
+                        report_parent_expectation
+                        and not platform_accounts_split_expectations
+                    ):
                         self._report_bundle_expectations(data, work_ids, content, [])
                     return "ack"
                 event_version = content.get("x_opencti_event_version")
@@ -786,8 +796,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         data.get("cleanup_inconsistent_bundle", False),
                     )
                 )
-                if add_expectations and not self._add_expectations(
-                    work_ids, expectations
+                if (
+                    add_expectations
+                    and not platform_accounts_split_expectations
+                    and not self._add_expectations(work_ids, expectations)
                 ):
                     return "ack"
                 split_queue_messages = []
@@ -811,7 +823,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     split_queue_messages,
                     True,
                 )
-                if report_parent_expectation:
+                if (
+                    report_parent_expectation
+                    and not platform_accounts_split_expectations
+                ):
                     self._report_bundle_expectations(data, work_ids, content, [])
         return "ack"
 
@@ -823,6 +838,9 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         error: Exception,
     ) -> Optional[Literal["ack"]]:
         work_ids = batch_expectation_work_ids(data, work_id)
+        platform_accounts_split_expectations = (
+            uses_platform_split_expectation_accounting(data)
+        )
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
                 self._confirm_delivery(push_channel, data)
@@ -833,7 +851,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     data,
                     BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
                 ):
-                    self._report_bundle_expectations(data, work_ids, content, [])
+                    if not platform_accounts_split_expectations:
+                        self._report_bundle_expectations(data, work_ids, content, [])
                     return "ack"
                 chunks = OpenCTIStix2.build_oversized_batch_plan_chunks(
                     content,
@@ -863,7 +882,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     ),
                     log_context,
                 )
-                if not self._add_expectations(work_ids, len(chunks)):
+                if (
+                    not platform_accounts_split_expectations
+                    and not self._add_expectations(work_ids, len(chunks))
+                ):
                     return "ack"
                 chunk_queue_messages = []
                 for chunk_ordinal, (
@@ -888,7 +910,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     data,
                     chunk_queue_messages,
                 )
-                self._report_bundle_expectations(data, work_ids, content, [])
+                if not platform_accounts_split_expectations:
+                    self._report_bundle_expectations(data, work_ids, content, [])
         return "ack"
 
     def handle_message(
@@ -943,13 +966,6 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         self._resume_reserved_unsplit_child_handoff(data)
                     )
                     if resumed_handoff_branch is not None:
-                        if resumed_handoff_branch in {
-                            BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
-                            BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
-                        }:
-                            self._report_bundle_expectations(
-                                data, work_ids, content, []
-                            )
                         return "ack"
                     report_bundle_expectation = len(work_ids) > 0 and (
                         should_report_batch_expectation(data)

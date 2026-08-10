@@ -806,6 +806,8 @@ def test_handler_reserves_v2_oversized_chunks_before_publishing(monkeypatch):
             ),
         ],
     )
+    handler.api.work.add_expectations.assert_not_called()
+    handler.api.work.report_expectation.assert_not_called()
 
 
 def test_handler_resumes_reserved_v2_chunks_before_reimport(monkeypatch):
@@ -856,7 +858,7 @@ def test_handler_resumes_reserved_v2_chunks_before_reimport(monkeypatch):
         chunk_child,
         False,
     )
-    handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+    handler.api.work.report_expectation.assert_not_called()
 
 
 def test_handler_requeues_transient_api_connection_failures(monkeypatch):
@@ -1321,6 +1323,8 @@ def test_handler_requeues_v2_split_children_with_stable_sibling_ids(monkeypatch)
         1,
     )
     assert first_child["delivery_id"] != second_child["delivery_id"]
+    handler.api.work.add_expectations.assert_not_called()
+    handler.api.work.report_expectation.assert_not_called()
 
 
 def test_handler_resumes_reserved_v2_fallback_split_children_before_reimport(
@@ -1373,7 +1377,7 @@ def test_handler_resumes_reserved_v2_fallback_split_children_before_reimport(
         split_child,
         True,
     )
-    handler.api.work.report_expectation.assert_called_once_with("work--1", None)
+    handler.api.work.report_expectation.assert_not_called()
 
 
 def test_handler_recovers_only_missing_reserved_v2_split_children(monkeypatch):

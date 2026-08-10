@@ -22,7 +22,9 @@ import {
   type BatchQueueMessage,
 } from '../../../../src/modules/batch/batch-types';
 import { elFindByIds, elIndex, elLoadById, elUpdate } from '../../../../src/database/engine';
+import { updateBatchExpectation } from '../../../../src/domain/work';
 import { lockResources } from '../../../../src/lock/master-lock';
+import { SYSTEM_USER } from '../../../../src/utils/access';
 import { testContext } from '../../../utils/testQuery';
 
 vi.mock('../../../../src/database/engine', () => ({
@@ -34,6 +36,10 @@ vi.mock('../../../../src/database/engine', () => ({
 
 vi.mock('../../../../src/lock/master-lock', () => ({
   lockResources: vi.fn(),
+}));
+
+vi.mock('../../../../src/domain/work', () => ({
+  updateBatchExpectation: vi.fn(),
 }));
 
 const queueMessage = {
@@ -303,6 +309,56 @@ describe('batch delivery domain', () => {
     expect(replay.parentDelivery.child_set_fingerprint).toBe(first.parentDelivery.child_set_fingerprint);
     expect(replay.children.map((child) => child.internal_id)).toEqual(first.children.map((child) => child.internal_id));
     expect(elIndex).toHaveBeenCalledTimes(3);
+    expect(updateBatchExpectation).toHaveBeenCalledTimes(1);
+    expect(updateBatchExpectation).toHaveBeenCalledWith(testContext, SYSTEM_USER, 'work-1', 1, root.internal_id);
+  });
+
+  it('applies one split replacement delta to every attributed work id', async () => {
+    const rootEnvelope = buildRootBatchDeliveryEnvelope('batch-submission--1');
+    const root = await reserveBatchDelivery(testContext, {
+      deliveryId: rootEnvelope.delivery_id,
+      submissionId: 'batch-submission--1',
+      parentDeliveryId: null,
+      deliveryKind: BatchDeliveryKind.Root,
+      branchKind: BatchDeliveryBranchKind.Root,
+      branchSequence: 0,
+      branchOrdinal: 0,
+      payloadFingerprint: buildBatchDeliveryPayloadFingerprint({ type: 'bundle', id: 'bundle--1' }),
+      queueMessage: {
+        ...queueMessage,
+        additional_work_ids: ['work-2', 'work-1'],
+        content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1' })).toString('base64'),
+        ...rootEnvelope,
+      },
+      requiredWorkerProtocol: BatchDeliveryProtocol.V2,
+    });
+
+    await reserveBatchDeliveryChildren(testContext, root.internal_id, [
+      {
+        branchKind: BatchDeliveryBranchKind.OversizedChunk,
+        branchSequence: 0,
+        branchOrdinal: 0,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--1' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.OversizedChunk, 0, 0),
+        },
+      },
+      {
+        branchKind: BatchDeliveryBranchKind.OversizedChunk,
+        branchSequence: 0,
+        branchOrdinal: 1,
+        queueMessage: {
+          ...queueMessage,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--2' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.OversizedChunk, 0, 1),
+        },
+      },
+    ]);
+
+    expect(updateBatchExpectation).toHaveBeenCalledTimes(2);
+    expect(updateBatchExpectation).toHaveBeenNthCalledWith(1, testContext, SYSTEM_USER, 'work-1', 1, root.internal_id);
+    expect(updateBatchExpectation).toHaveBeenNthCalledWith(2, testContext, SYSTEM_USER, 'work-2', 1, root.internal_id);
   });
 
   it('fails closed when an already planned child set changes membership or payload', async () => {
@@ -381,6 +437,7 @@ describe('batch delivery domain', () => {
         }),
       }),
     }));
+    expect(updateBatchExpectation).not.toHaveBeenCalled();
   });
 
   it('fails closed when a planned child set changes queue metadata before child inserts complete', async () => {
