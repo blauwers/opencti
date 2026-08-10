@@ -1727,6 +1727,7 @@ class OpenCTIStix2:
         self, stix_objects: Iterable[Dict]
     ) -> None:
         cache_keys_by_generated_ref_id = {}
+        repeated_cache_keys = set()
         seen_cache_keys = set()
         try:
             for stix_object in stix_objects:
@@ -1759,6 +1760,7 @@ class OpenCTIStix2:
                         description,
                     )
                     if cache_key in seen_cache_keys:
+                        repeated_cache_keys.add(cache_key)
                         continue
                     seen_cache_keys.add(cache_key)
                     if self.get_in_cache(cache_key) is not None:
@@ -1767,7 +1769,12 @@ class OpenCTIStix2:
                         generated_ref_id, set()
                     ).add(cache_key)
 
-            if len(cache_keys_by_generated_ref_id) <= 1:
+            if len(cache_keys_by_generated_ref_id) == 0:
+                return
+            if (
+                len(cache_keys_by_generated_ref_id) == 1
+                and len(repeated_cache_keys) == 0
+            ):
                 return
 
             generated_ref_ids = list(cache_keys_by_generated_ref_id.keys())

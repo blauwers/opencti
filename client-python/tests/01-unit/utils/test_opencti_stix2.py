@@ -1021,6 +1021,31 @@ def test_import_bundle_keeps_single_external_reference_on_per_item_create():
     assert opencti.external_reference.create_calls == 1
 
 
+def test_import_bundle_prefetches_repeated_single_external_reference_before_item_import():
+    opencti = _external_reference_prefetch_opencti()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    objects = [
+        {
+            "id": f"malware--{index}",
+            "type": "malware",
+            "external_references": [
+                {
+                    "source_name": "benchmark",
+                    "url": "https://example.test/reference/shared",
+                }
+            ],
+        }
+        for index in range(2)
+    ]
+
+    _import_bundle_extracting_relationships(opencti_stix2, objects)
+
+    assert opencti.external_reference.list_filters == [
+        ["external-reference--https://example.test/reference/shared"]
+    ]
+    assert opencti.external_reference.create_calls == 0
+
+
 def test_import_bundle_prefetches_existing_external_references_in_bounded_chunks():
     opencti = _external_reference_prefetch_opencti()
     opencti_stix2 = OpenCTIStix2(opencti)
