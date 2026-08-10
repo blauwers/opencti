@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { v4 as uuid } from 'uuid';
 import moment from 'moment/moment';
-import { findById as findWorkById, worksForConnector } from '../../../src/domain/work';
+import { createWork, findById as findWorkById, updateExpectationsNumber, updateProcessedTime, updateReceivedTime, worksForConnector } from '../../../src/domain/work';
 import { registerConnector } from '../../../src/domain/connector';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 import type { RegisterConnectorInput } from '../../../src/generated/graphql';
@@ -9,10 +9,11 @@ import { ConnectorType } from '../../../src/generated/graphql';
 import { elIndex } from '../../../src/database/engine';
 import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
 import { INDEX_HISTORY, RABBIT_QUEUE_PREFIX } from '../../../src/database/utils';
-import { deleteCompletedWorks } from '../../../src/manager/connectorManager';
+import { closeOldWorks, deleteCompletedWorks } from '../../../src/manager/connectorManager';
 import type { BasicStoreEntityConnector } from '../../../src/types/connector';
 import type { Work } from '../../../src/types/work';
 import { unregisterConnector, metrics } from '../../../src/database/rabbitmq';
+import { redisGetWorkCompletionState, redisUpdateWorkFigures } from '../../../src/database/redis';
 
 describe('Old work of connector cleanup test', () => {
   let testConnector: BasicStoreEntityConnector;
@@ -88,6 +89,74 @@ describe('Old work of connector cleanup test', () => {
     expect(allWorkAfterCleanup.some((workItem: Work) => workItem.name === 'Work 2 days old and complete')).toBeTruthy();
     expect(allWorkAfterCleanup.some((workItem: Work) => workItem.name === 'Work 9 days old and not complete')).toBeTruthy();
     expect(allWorkAfterCleanup.some((workItem: Work) => workItem.name === 'Work 8 days old and complete')).toBeFalsy();
+  });
+
+  it('should not force complete an older live work when a newer work reports progress', async () => {
+    const liveTimestamp = moment().subtract(2, 'minutes').toISOString();
+    const newerTimestamp = moment().subtract(1, 'minute').toISOString();
+    const liveWork = await createWork(testContext, ADMIN_USER, testConnector, 'Live concurrent work', testConnector.id, {
+      preallocatedWork: {
+        id: `work_${testConnector.id}_${liveTimestamp}_${uuid()}`,
+        timestamp: liveTimestamp,
+      },
+    }) as unknown as Work;
+    await updateReceivedTime(testContext, ADMIN_USER, liveWork.id, 'Connector ready to process the operation');
+
+    const newerWork = await createWork(testContext, ADMIN_USER, testConnector, 'Newer concurrent work', testConnector.id, {
+      preallocatedWork: {
+        id: `work_${testConnector.id}_${newerTimestamp}_${uuid()}`,
+        timestamp: newerTimestamp,
+      },
+    }) as unknown as Work;
+    await redisUpdateWorkFigures(newerWork.id);
+
+    await closeOldWorks(testContext, testConnector);
+
+    const liveWorkAfterCleanup = await findWorkById(testContext, ADMIN_USER, liveWork.id) as unknown as Work;
+    expect(liveWorkAfterCleanup.status).toBe('progress');
+    expect(liveWorkAfterCleanup.completed_time).toBeNull();
+  });
+
+  it('should reconcile an older work when Redis proves completion', async () => {
+    const settledTimestamp = moment().subtract(4, 'minutes').toISOString();
+    const newerTimestamp = moment().subtract(3, 'minutes').toISOString();
+    const settledWork = await createWork(testContext, ADMIN_USER, testConnector, 'Settled work with stale projection', testConnector.id, {
+      preallocatedWork: {
+        id: `work_${testConnector.id}_${settledTimestamp}_${uuid()}`,
+        timestamp: settledTimestamp,
+      },
+    }) as unknown as Work;
+    await updateReceivedTime(testContext, ADMIN_USER, settledWork.id, 'Connector ready to process the operation');
+    await updateExpectationsNumber(testContext, ADMIN_USER, settledWork.id, 1);
+    await redisUpdateWorkFigures(settledWork.id);
+
+    const newerWork = await createWork(testContext, ADMIN_USER, testConnector, 'Newer work after settled projection', testConnector.id, {
+      preallocatedWork: {
+        id: `work_${testConnector.id}_${newerTimestamp}_${uuid()}`,
+        timestamp: newerTimestamp,
+      },
+    }) as unknown as Work;
+    await redisUpdateWorkFigures(newerWork.id);
+
+    await closeOldWorks(testContext, testConnector);
+
+    const settledWorkAfterCleanup = await findWorkById(testContext, ADMIN_USER, settledWork.id) as unknown as Work;
+    expect(settledWorkAfterCleanup.status).toBe('complete');
+    expect(settledWorkAfterCleanup.completed_number).toBe(1);
+  });
+
+  it('should retain a connector completion signal for zero-output work', async () => {
+    const zeroOutputWork = await createWork(testContext, ADMIN_USER, testConnector, 'Zero output work', testConnector.id) as unknown as Work;
+    await updateReceivedTime(testContext, ADMIN_USER, zeroOutputWork.id, 'Connector ready to process the operation');
+    await updateProcessedTime(testContext, ADMIN_USER, zeroOutputWork.id, 'No changes produced by connector');
+
+    const completionState = await redisGetWorkCompletionState(zeroOutputWork.id);
+    expect(completionState).toEqual({
+      expected: 0,
+      total: 0,
+      isProcessed: true,
+      isMultiPartWork: false,
+    });
   });
 
   it('should delete connector', async () => {

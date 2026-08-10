@@ -313,6 +313,18 @@ const updateWorkTaskToComplete = async (context, user, work) => {
 
 const isWorkFinished = (expected, total) => total >= expected;
 
+export const canReconcileWorkCompletionFromRedis = ({ expected, total, isProcessed, isMultiPartWork }) => {
+  if (!Number.isFinite(expected) || !Number.isFinite(total) || !isWorkFinished(expected, total)) {
+    return false;
+  }
+  if (isMultiPartWork) {
+    return isProcessed;
+  }
+  // Non-multipart work can complete from its first settled expectation report.
+  // Zero-output work needs an explicit connector completion signal instead.
+  return isProcessed || total > 0;
+};
+
 // Works exist for the whole connector surface (imports, exports, analysis,
 // notifications...). The ingestion volume proxy must only count import-side
 // pipelines, and only ONCE per work: reportExpectation and updateProcessedTime
@@ -557,11 +569,12 @@ export const updateProcessedTime = async (context, user, workId, message, inErro
     logApp.warn('The work cannot be found in database, processed time cannot be updated.', { workId });
     return workId;
   }
-  const { expected, total, isMultiPartWork } = await redisGetWorkCompletionState(workId);
+  const { expected, total } = await redisGetWorkCompletionState(workId);
   const isComplete = isWorkFinished(expected, total);
-  if (isMultiPartWork && !isComplete) {
-    await redisMarkWorkAsProcessed(workId);
-  }
+  // Persist the connector-side completion signal for every work. The connector
+  // manager can then reconcile stale ES projections without inferring completion
+  // solely from timestamp ordering between concurrent works.
+  await redisMarkWorkAsProcessed(workId);
   const params = { processed_time: now(), message };
   let source = 'ctx._source["processed_time"] = params.processed_time;';
   if (isComplete) {

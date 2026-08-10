@@ -1,5 +1,5 @@
 import { clearIntervalAsync, setIntervalAsync } from 'set-interval-async/fixed';
-import { redisGetConnectorStatus, redisGetWork } from '../database/redis';
+import { redisGetConnectorStatus, redisGetWorkCompletionState } from '../database/redis';
 import { lockResources } from '../lock/master-lock';
 import conf, { booleanConf, logApp } from '../config/conf';
 import { TYPE_LOCK_ERROR } from '../config/errors';
@@ -8,7 +8,7 @@ import { elList, elUpdateWithBufferedApply } from '../database/engine';
 import { executionContext, SYSTEM_USER } from '../utils/access';
 import { READ_INDEX_HISTORY } from '../database/utils';
 import { now } from '../utils/format';
-import { deleteWorksRaw } from '../domain/work';
+import { canReconcileWorkCompletionFromRedis, deleteWorksRaw } from '../domain/work';
 
 // Manage work created by connectors
 // Update status to complete when needed
@@ -19,7 +19,7 @@ const CONNECTOR_WORK_RANGE = conf.get('connector_manager:works_day_range') || 7;
 const BATCH_SIZE = conf.get('connector_manager:batch_size') || 10000;
 let running = false;
 
-const closeOldWorks = async (context, connector) => {
+export const closeOldWorks = async (context, connector) => {
   // Get current status from Redis
   const status = await redisGetConnectorStatus(connector.internal_id);
   // If status is here we can try to close all old open works
@@ -39,9 +39,9 @@ const closeOldWorks = async (context, connector) => {
       for (let i = 0; i < elements.length; i += 1) {
         const element = elements[i];
         try {
-          const currentWorkStatus = await redisGetWork(element.internal_id);
-          if (currentWorkStatus) {
-            const params = { completed_time: now(), completed_number: parseInt(currentWorkStatus.import_processed_number, 10) };
+          const completionState = await redisGetWorkCompletionState(element.internal_id);
+          if (canReconcileWorkCompletionFromRedis(completionState)) {
+            const params = { completed_time: now(), completed_number: completionState.total };
             const sourceScript = `ctx._source['status'] = "complete";
                 ctx._source['completed_time'] = params.completed_time;
                 ctx._source['completed_number'] = params.completed_number;`;
@@ -57,7 +57,10 @@ const closeOldWorks = async (context, connector) => {
               completed_time: params.completed_time,
               completed_number: params.completed_number,
             }));
-            logApp.info('Work completed by force due to age', { workId: element.internal_id });
+            logApp.info('Work completion reconciled from Redis state', {
+              workId: element.internal_id,
+              completedNumber: completionState.total,
+            });
           }
         } catch (e) {
           logApp.error('[OPENCTI-MODULE] Connector manager error processing work closing', { cause: e });
