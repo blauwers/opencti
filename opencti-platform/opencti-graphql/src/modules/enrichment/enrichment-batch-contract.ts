@@ -475,7 +475,7 @@ const buildGroupContextFingerprint = (groupContext: Omit<EnrichmentBatchGroupCon
   ));
 };
 
-const buildGroupContext = (candidate: EnrichmentBatchCandidate): EnrichmentBatchGroupContext => {
+export const buildEnrichmentBatchGroupContext = (candidate: EnrichmentBatchCandidate): EnrichmentBatchGroupContext => {
   const groupContext = buildGroupContextWithoutFingerprint(candidate);
   return {
     ...groupContext,
@@ -779,9 +779,9 @@ export const buildEnrichmentBatchEnvelope = (
   if (!Array.isArray(candidates) || candidates.length === 0) {
     throw enrichmentBatchContractError('Enrichment batch envelope must contain candidates', EnrichmentBatchContractErrorCode.InvalidEnvelope);
   }
-  const groupContext = buildGroupContext(candidates[0]);
+  const groupContext = buildEnrichmentBatchGroupContext(candidates[0]);
   const itemResults = candidates.map((candidate) => {
-    const candidateGroupContext = buildGroupContext(candidate);
+    const candidateGroupContext = buildEnrichmentBatchGroupContext(candidate);
     assertCompatibleGroupContext(groupContext, candidateGroupContext);
     return buildItemFromCandidate(candidate, groupContext.context_fingerprint);
   });

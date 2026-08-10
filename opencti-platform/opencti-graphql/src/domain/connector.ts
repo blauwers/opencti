@@ -75,6 +75,7 @@ import { extractContentFrom } from '../utils/fileToContent';
 import type { FileHandle } from 'fs/promises';
 import { encryptSynchronizerCredential } from './connector-sync-crypto';
 import { verifyIngestionUri } from '../modules/ingestion/ingestion-common';
+import { normalizeEnrichmentBatchCapability } from '../modules/enrichment/enrichment-batch-contract';
 
 const MINIMAL_SYNCHRONIZER_COMPATIBLE_VERSION = '6.9.6';
 const CONNECTOR_HEARTBEAT_PERSIST_INTERVAL_MS = 4 * 60 * 1000;
@@ -471,7 +472,14 @@ export const registerConnector = async (
   opts: RegisterOptions = {},
 ) => {
   const { id, name, type, scope, only_contextual = null, playbook_compatible = false, listen_callback_uri } = connectorData;
-  const { auto = null, auto_update = null, enrichment_resolution = null, xtm_one_intent = null } = connectorData;
+  const {
+    auto = null,
+    auto_update = null,
+    enrichment_resolution = null,
+    enrichment_batch_capability = null,
+    xtm_one_intent = null,
+  } = connectorData;
+  const normalizedEnrichmentBatchCapability = normalizeEnrichmentBatchCapability(enrichment_batch_capability);
   const conn = await storeLoadById(context, user, id, ENTITY_TYPE_CONNECTOR);
   // Register queues
   await registerConnectorQueues(id, name, type, scope);
@@ -485,6 +493,7 @@ export const registerConnector = async (
       auto,
       auto_update,
       enrichment_resolution,
+      enrichment_batch_capability: normalizedEnrichmentBatchCapability,
       only_contextual,
       playbook_compatible,
       listen_callback_uri,
@@ -510,6 +519,7 @@ export const registerConnector = async (
     auto,
     auto_update,
     enrichment_resolution,
+    enrichment_batch_capability: normalizedEnrichmentBatchCapability,
     only_contextual,
     playbook_compatible,
     listen_callback_uri,

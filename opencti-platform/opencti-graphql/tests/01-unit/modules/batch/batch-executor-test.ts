@@ -408,6 +408,60 @@ describe('batch executor', () => {
     expect(execution).toBe('result');
   });
 
+  it('coalesces auto enrichment side effects that share one explicit batch descriptor', async () => {
+    const calls: string[] = [];
+    const batchDescriptor = {
+      key: 'auto-enrichment.dispatch.v1',
+      execute: async (sideEffects: readonly { batchPayload?: unknown }[]) => {
+        calls.push(`batch:${sideEffects.map((sideEffect) => sideEffect.batchPayload).join(',')}`);
+      },
+    };
+
+    const execution = await executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'first-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          batchDescriptor,
+          batchPayload: 'first',
+          execute: async () => {
+            calls.push('legacy:first');
+          },
+        }],
+      },
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'second-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          batchDescriptor,
+          batchPayload: 'second',
+          execute: async () => {
+            calls.push('legacy:second');
+          },
+        }],
+      },
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => 'third-result',
+        sideEffects: () => [{
+          kind: BatchSideEffectKind.AutoEnrichment,
+          execute: async () => {
+            calls.push('legacy:third');
+          },
+        }],
+      },
+    ]);
+
+    expect(calls).toEqual(['batch:first,second', 'legacy:third']);
+    expect(execution.sideEffectKinds).toEqual([
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.AutoEnrichment,
+    ]);
+  });
+
   it('keeps compatibility projections unsealed until they have a narrow descriptor', async () => {
     let sealSnapshot: ReturnType<typeof evaluateBatchSideEffectSeal> = undefined;
 

@@ -285,6 +285,7 @@ type Query {
 
 type Mutation {
   stixBundleSubmit(connectorId: String!, bundle: String!, work_id: String, options: BatchSubmitOptionsInput): BatchAdmission! @auth(for: [CONNECTORAPI])
+  enrichmentBatchResultSubmit(connectorId: String!, envelope: String!, result: String!): Boolean! @auth(for: [CONNECTORAPI])
   batchMutationsExecute(operations: [BatchGraphqlOperationInput!]!, options: BatchExecuteOptionsInput): BatchMutationExecution! @auth(for: [CONNECTORAPI])
   batchDeliveryReserveChildren(parent_delivery_id: ID!, children: [BatchDeliveryChildReservationInput!]!): BatchDeliveryHandoff! @auth(for: [CONNECTORAPI])
   batchDeliveryMarkChildrenPublished(parent_delivery_id: ID!, child_delivery_ids: [ID!]!): BatchDeliveryHandoff! @auth(for: [CONNECTORAPI])

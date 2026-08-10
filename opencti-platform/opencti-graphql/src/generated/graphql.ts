@@ -4841,6 +4841,7 @@ export type Connector = BasicObject & InternalObject & {
   connector_user?: Maybe<User>;
   connector_user_id?: Maybe<Scalars['ID']['output']>;
   created_at?: Maybe<Scalars['DateTime']['output']>;
+  enrichment_batch_capability?: Maybe<Scalars['JSON']['output']>;
   enrichment_resolution?: Maybe<Scalars['String']['output']>;
   entity_type: Scalars['String']['output'];
   id: Scalars['ID']['output'];
@@ -17531,6 +17532,7 @@ export type Mutation = {
   emailTemplateDelete?: Maybe<Scalars['ID']['output']>;
   emailTemplateFieldPatch?: Maybe<EmailTemplate>;
   emailTemplateTestSend?: Maybe<Scalars['Boolean']['output']>;
+  enrichmentBatchResultSubmit: Scalars['Boolean']['output'];
   entitySettingsFieldPatch?: Maybe<Array<Maybe<EntitySetting>>>;
   eventAdd?: Maybe<Event>;
   eventContextClean?: Maybe<Event>;
@@ -18624,6 +18626,13 @@ export type MutationEmailTemplateFieldPatchArgs = {
 
 export type MutationEmailTemplateTestSendArgs = {
   id: Scalars['ID']['input'];
+};
+
+
+export type MutationEnrichmentBatchResultSubmitArgs = {
+  connectorId: Scalars['String']['input'];
+  envelope: Scalars['String']['input'];
+  result: Scalars['String']['input'];
 };
 
 
@@ -28871,6 +28880,7 @@ export enum RegionsOrdering {
 export type RegisterConnectorInput = {
   auto?: InputMaybe<Scalars['Boolean']['input']>;
   auto_update?: InputMaybe<Scalars['Boolean']['input']>;
+  enrichment_batch_capability?: InputMaybe<Scalars['JSON']['input']>;
   enrichment_resolution?: InputMaybe<Scalars['String']['input']>;
   id: Scalars['ID']['input'];
   listen_callback_uri?: InputMaybe<Scalars['String']['input']>;
@@ -43816,6 +43826,7 @@ export type ConnectorResolvers<ContextType = any, ParentType extends ResolversPa
   connector_user?: Resolver<Maybe<ResolversTypes['User']>, ParentType, ContextType>;
   connector_user_id?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
   created_at?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
+  enrichment_batch_capability?: Resolver<Maybe<ResolversTypes['JSON']>, ParentType, ContextType>;
   enrichment_resolution?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   entity_type?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
@@ -48341,6 +48352,7 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   emailTemplateDelete?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType, RequireFields<MutationEmailTemplateDeleteArgs, 'id'>>;
   emailTemplateFieldPatch?: Resolver<Maybe<ResolversTypes['EmailTemplate']>, ParentType, ContextType, RequireFields<MutationEmailTemplateFieldPatchArgs, 'id' | 'input'>>;
   emailTemplateTestSend?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType, RequireFields<MutationEmailTemplateTestSendArgs, 'id'>>;
+  enrichmentBatchResultSubmit?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationEnrichmentBatchResultSubmitArgs, 'connectorId' | 'envelope' | 'result'>>;
   entitySettingsFieldPatch?: Resolver<Maybe<Array<Maybe<ResolversTypes['EntitySetting']>>>, ParentType, ContextType, RequireFields<MutationEntitySettingsFieldPatchArgs, 'ids' | 'input'>>;
   eventAdd?: Resolver<Maybe<ResolversTypes['Event']>, ParentType, ContextType, RequireFields<MutationEventAddArgs, 'input'>>;
   eventContextClean?: Resolver<Maybe<ResolversTypes['Event']>, ParentType, ContextType, RequireFields<MutationEventContextCleanArgs, 'id'>>;

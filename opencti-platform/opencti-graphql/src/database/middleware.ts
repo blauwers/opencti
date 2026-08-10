@@ -183,7 +183,7 @@ import {
 } from '../utils/access';
 import { isRuleUser, RULES_ATTRIBUTES_BEHAVIOR } from '../rules/rules-utils';
 import { instanceMetaRefsExtractor, isSingleRelationsRef } from '../schema/stixEmbeddedRelationship';
-import { createEntityAutoEnrichment, updateEntityAutoEnrichment } from '../domain/enrichment';
+import { buildAutoEnrichmentSideEffect, updateEntityAutoEnrichment } from '../domain/enrichment';
 import {
   BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
   BatchMutationKind,
@@ -3146,14 +3146,11 @@ const generateEnrichmentLoaders = (context: AuthContext, user: AuthUser, element
     bundleById: () => stixBundleByIdStringify(context, user, element.entity_type, element.internal_id),
   };
 };
-const triggerCreateEntityAutoEnrichment = async (context: AuthContext, user: AuthUser, element: BasicStoreBase) => {
-  const loaders = generateEnrichmentLoaders(context, user, element);
-  await createEntityAutoEnrichment(context, user, element, element.entity_type, loaders);
+const buildEntityAutoEnrichmentSideEffect = (context: AuthContext, user: AuthUser, element: BasicStoreBase, trigger: 'create' | 'update') => {
+  return buildAutoEnrichmentSideEffect(context, user, element, trigger, generateEnrichmentLoaders(context, user, element));
 };
 const triggerEntityUpdateAutoEnrichment = async (context: AuthContext, user: AuthUser, element: BasicStoreBase) => {
-  // If element really updated, try to enrich if needed
-  const loaders = generateEnrichmentLoaders(context, user, element);
-  await updateEntityAutoEnrichment(context, user, element, element.entity_type, loaders);
+  await updateEntityAutoEnrichment(context, user, element, element.entity_type, generateEnrichmentLoaders(context, user, element));
 };
 type UpdateAttributeOpts = LoadByIdsWithDependeciesOpts & UpdateAttributeMetaResolvedOpts;
 type UpdateAttributeExecutionOpts = { noEnrich?: boolean } & UpdateAttributeOpts;
@@ -3179,11 +3176,9 @@ const executeUpdateAttributeMutation = async <T extends StoreObject>(
       // Continue update
       return updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
     },
-    sideEffects: (data) => (!opts.noEnrich && data.outcome === MutationOutcome.Updated && data.event ? [{
-      kind: BatchSideEffectKind.AutoEnrichment,
-      sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
-      execute: () => triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase),
-    }] : []),
+    sideEffects: (data) => (!opts.noEnrich && data.outcome === MutationOutcome.Updated && data.event
+      ? [buildEntityAutoEnrichmentSideEffect(context, user, data.element as BasicStoreBase, 'update')]
+      : []),
   }, { waitUntil });
   const streamEventEligible = isStixExportableInStreamData(data.element as StoreObject);
   recordMutationResultMetrics(BatchMutationKind.UpdateAttribute, data, {
@@ -4395,18 +4390,10 @@ export async function createEntity(
     executeWrite: () => createEntityRaw(context, user, input, type, opts),
     sideEffects: (result) => {
       if (result.outcome === MutationOutcome.Created) {
-        return [{
-          kind: BatchSideEffectKind.AutoEnrichment,
-          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentCreateEntity,
-          execute: () => triggerCreateEntityAutoEnrichment(context, user, result.element),
-        }];
+        return [buildEntityAutoEnrichmentSideEffect(context, user, result.element, 'create')];
       }
       if (result.outcome === MutationOutcome.Updated) {
-        return [{
-          kind: BatchSideEffectKind.AutoEnrichment,
-          sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
-          execute: () => triggerEntityUpdateAutoEnrichment(context, user, result.element),
-        }];
+        return [buildEntityAutoEnrichmentSideEffect(context, user, result.element, 'update')];
       }
       return [];
     },

@@ -229,7 +229,13 @@ const submitExplicitBatch = async (context, user, connector, connectorId, workId
   submission = await bindBatchSubmissionWork(context, user, connector, submission);
   if (!isBatchSubmissionStateAtLeast(submission, BatchSubmissionState.ExpectationRecorded)) {
     if (submission.execution_mode !== BatchExecutionMode.LegacySplit) {
-      await updateBatchSubmissionExpectation(context, user, submission.work_id, 1, submission.internal_id);
+      const expectationWorkIds = Array.from(new Set([
+        submission.work_id,
+        ...(preparedBundle.additionalWorkIds ?? []),
+      ]));
+      for (const expectationWorkId of expectationWorkIds) {
+        await updateBatchSubmissionExpectation(context, user, expectationWorkId, 1, submission.internal_id);
+      }
     }
     submission = await advanceBatchSubmissionState(context, submission, BatchSubmissionState.ExpectationRecorded, {
       expectation_recorded_at: now(),

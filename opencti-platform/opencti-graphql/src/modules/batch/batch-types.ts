@@ -154,6 +154,9 @@ export interface BatchSubmitOptions {
   idempotencyKey?: string | null;
   splitBundles?: boolean | null;
   cleanupInconsistentBundle?: boolean | null;
+  enrichmentBatchResult?: string | null;
+  additionalWorkIds?: string[] | null;
+  fingerprintContext?: unknown;
 }
 
 export interface PreparedBundleSubmission {
@@ -171,6 +174,8 @@ export interface PreparedBundleSubmission {
   idempotencyKey: string;
   payloadFingerprint: string;
   cleanupInconsistentBundle: boolean;
+  enrichmentBatchResult?: string;
+  additionalWorkIds?: string[];
 }
 
 export interface BatchAdmission {
@@ -193,6 +198,8 @@ export interface BatchAdmission {
   submissionId?: string;
   rootDeliveryId?: string;
   requiredDeliveryProtocol?: BatchDeliveryProtocol;
+  enrichmentBatchResult?: string;
+  additionalWorkIds?: string[];
 }
 
 export interface BatchDeliveryEnvelope {
@@ -224,6 +231,8 @@ export interface BatchQueueMessage {
   batch_eligible_execution_modes: BatchExecutionMode[];
   batch_wait_until: BatchWaitUntil;
   batch_idempotency_key: string;
+  enrichment_batch_result?: string;
+  additional_work_ids?: string[];
   submission_id?: string;
   delivery_id?: string;
   parent_delivery_id?: string | null;

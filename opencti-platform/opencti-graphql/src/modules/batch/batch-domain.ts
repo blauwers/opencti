@@ -22,8 +22,12 @@ const batchContractError = (message: string, code: BatchAdmissionErrorCode, data
   return FunctionalError(message, { batch_error_code: code, ...data });
 };
 
-const buildPayloadFingerprint = (normalizedBundle: Record<string, any>): string => {
-  const canonicalPayload = jsonCanonicalize(normalizedBundle);
+const buildPayloadFingerprint = (normalizedBundle: Record<string, any>, fingerprintContext?: unknown): string => {
+  const canonicalPayload = jsonCanonicalize(
+    fingerprintContext === undefined
+      ? normalizedBundle
+      : { bundle: normalizedBundle, context: fingerprintContext },
+  );
   if (typeof canonicalPayload !== 'string') {
     throw batchContractError('Invalid stix bundle payload', BatchAdmissionErrorCode.InvalidBundle);
   }
@@ -168,7 +172,7 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
   const { executionPreference, executionMode, executionReason, eligibleExecutionModes } = normalizeExecutionPreference(options);
   const waitUntil = normalizeWaitUntil(options.waitUntil);
   const idempotencyKey = normalizeIdempotencyKey(options.idempotencyKey, bundleId);
-  const payloadFingerprint = buildPayloadFingerprint(normalizedBundle);
+  const payloadFingerprint = buildPayloadFingerprint(normalizedBundle, options.fingerprintContext);
   let bundlePlan;
   try {
     bundlePlan = planStixBundleObjects(jsonBundle.objects, {
@@ -196,6 +200,8 @@ export const prepareBundleSubmission = (bundle: string, options: BatchSubmitOpti
     idempotencyKey,
     payloadFingerprint,
     cleanupInconsistentBundle: options.cleanupInconsistentBundle === true,
+    ...(typeof options.enrichmentBatchResult === 'string' ? { enrichmentBatchResult: options.enrichmentBatchResult } : {}),
+    ...(Array.isArray(options.additionalWorkIds) ? { additionalWorkIds: [...options.additionalWorkIds] } : {}),
   };
 };
 
@@ -227,6 +233,8 @@ export const buildBatchAdmission = (
     idempotencyKey: prepared.idempotencyKey,
     cleanupInconsistentBundle: prepared.cleanupInconsistentBundle,
     bundle: prepared.bundle,
+    ...(prepared.enrichmentBatchResult ? { enrichmentBatchResult: prepared.enrichmentBatchResult } : {}),
+    ...(prepared.additionalWorkIds ? { additionalWorkIds: [...prepared.additionalWorkIds] } : {}),
     ...(submissionId ? { submissionId } : {}),
     ...(rootDeliveryId ? { rootDeliveryId } : {}),
     ...(requiredDeliveryProtocol ? { requiredDeliveryProtocol } : {}),
@@ -254,6 +262,8 @@ export const buildBatchQueueMessage = (
     batch_eligible_execution_modes: admission.eligibleExecutionModes,
     batch_wait_until: admission.waitUntil,
     batch_idempotency_key: admission.idempotencyKey,
+    ...(admission.enrichmentBatchResult ? { enrichment_batch_result: admission.enrichmentBatchResult } : {}),
+    ...(admission.additionalWorkIds ? { additional_work_ids: [...admission.additionalWorkIds] } : {}),
     ...(admission.submissionId ? { submission_id: admission.submissionId } : {}),
     ...(deliveryEnvelope ?? {}),
     batch_plan: {

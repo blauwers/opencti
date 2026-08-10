@@ -14,6 +14,7 @@ export interface BasicStoreEntityConnector extends StoreEntity {
   auto: boolean;
   auto_update: boolean;
   enrichment_resolution: string;
+  enrichment_batch_capability: Record<string, unknown> | null;
   only_contextual: boolean;
   connector_type: string;
   connector_scope: string;

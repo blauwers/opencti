@@ -1987,6 +1987,7 @@ input RegisterConnectorInput {
   auto: Boolean
   auto_update: Boolean
   enrichment_resolution: String
+  enrichment_batch_capability: JSON
   only_contextual: Boolean
   playbook_compatible: Boolean
   listen_callback_uri: String
@@ -2219,6 +2220,7 @@ type Connector implements BasicObject & InternalObject {
   auto: Boolean
   auto_update: Boolean
   enrichment_resolution: String
+  enrichment_batch_capability: JSON
   only_contextual: Boolean
   playbook_compatible: Boolean
   connector_trigger_filters: String

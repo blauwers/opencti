@@ -1,5 +1,6 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
+import { submitEnrichmentBatchResult } from '../enrichment/enrichment-batch-domain';
 import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, reserveBatchDeliveryChildren } from './batch-delivery-domain';
 import { loadBatchExecutionReconciliation } from './batch-execution-reconciliation-domain';
 import { loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';
@@ -116,6 +117,11 @@ const batchResolvers = {
       splitBundles: options?.split_bundles,
       cleanupInconsistentBundle: options?.cleanup_inconsistent_bundle,
     }),
+    enrichmentBatchResultSubmit: (
+      _: unknown,
+      { connectorId, envelope, result }: { connectorId: string; envelope: string; result: string },
+      context: any,
+    ) => submitEnrichmentBatchResult(context, context.user, connectorId, envelope, result),
     batchMutationsExecute: (
       _: unknown,
       {

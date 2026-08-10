@@ -5,33 +5,185 @@ import { pushToConnector } from '../database/rabbitmq';
 import { ENTITY_TYPE_CONNECTOR } from '../schema/internalObject';
 import { isStixObject } from '../schema/stixCoreObject';
 import { getEntitiesListFromCache } from '../database/cache';
-import { CONNECTOR_INTERNAL_ENRICHMENT, ENRICHMENT_RESOLUTION_DEFERRED, ENRICHMENT_RESOLUTION_STIX_BUNDLE } from '../schema/general';
+import { CONNECTOR_INTERNAL_ENRICHMENT, ENRICHMENT_RESOLUTION_DEFERRED, ENRICHMENT_RESOLUTION_STIX_BUNDLE, INPUT_GRANTED_REFS } from '../schema/general';
 import { isStixMatchFilterGroup } from '../utils/filtering/filtering-stix/stix-filtering';
 import { isFilterGroupNotEmpty } from '../utils/filtering/filtering-utils';
 import { isUserCanAccessStoreElement, SYSTEM_USER } from '../utils/access';
 import { getDraftContext } from '../utils/draftContext';
+import { promiseMap } from '../utils/promiseUtils';
 import { resolveUserByIdFromCache } from './user';
 import { convertStoreToStix_2_1 } from '../database/stix-2-1-converter';
+import {
+  buildEnrichmentBatchEnvelope,
+  buildEnrichmentBatchGroupContext,
+  EnrichmentBatchContractErrorCode,
+  EnrichmentBatchMode,
+  EnrichmentBatchTrigger,
+  normalizeEnrichmentBatchCapability,
+  serializeEnrichmentBatchEnvelope,
+} from '../modules/enrichment/enrichment-batch-contract';
+import { BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS, BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind } from '../modules/batch/batch-executor';
 
-const publishEventToConnectors = async (context, user, element, targetConnectors, trigger, stixLoaders) => {
-  const draftContext = getDraftContext(context, user);
-  const contextOutOfDraft = { ...context, draft_context: '' };
-  const elementStandardId = element.standard_id;
+const AUTO_ENRICHMENT_BATCH_DESCRIPTOR_KEY = 'auto-enrichment.dispatch.v1';
+
+const resolveEnrichmentResolution = (connector) => connector.enrichment_resolution ?? ENRICHMENT_RESOLUTION_STIX_BUNDLE;
+
+const buildLegacyEnrichmentMessage = (element, work, trigger, draftContext, stixEntity, stixObjects) => ({
+  internal: {
+    work_id: work.id,
+    applicant_id: null,
+    draft_id: draftContext ?? null,
+    trigger,
+    mode: 'auto',
+  },
+  event: {
+    event_type: CONNECTOR_INTERNAL_ENRICHMENT,
+    entity_id: element.standard_id,
+    entity_type: element.entity_type,
+    stix_entity: stixEntity,
+    stix_objects: stixObjects,
+  },
+});
+
+const buildBatchEnrichmentMessage = (envelope) => ({
+  internal: {
+    work_id: null,
+    applicant_id: envelope.group_context.applicant_id,
+    draft_id: envelope.group_context.draft_id,
+    trigger: envelope.group_context.trigger,
+    mode: envelope.group_context.mode,
+  },
+  event: {
+    event_type: CONNECTOR_INTERNAL_ENRICHMENT,
+    enrichment_batch: serializeEnrichmentBatchEnvelope(envelope),
+  },
+});
+
+const extractSharedOrganizationIds = (element) => {
+  return (element[INPUT_GRANTED_REFS] ?? [])
+    .map((organization) => organization?.standard_id)
+    .filter((organizationId) => typeof organizationId === 'string' && organizationId.length > 0);
+};
+
+const isEnrichmentBatchLimitError = (error) => {
+  return error?.extensions?.data?.enrichment_batch_error_code === EnrichmentBatchContractErrorCode.LimitExceeded;
+};
+
+const pushLegacyEnrichmentItem = async (item) => {
+  const { connector, element, work, trigger, draftContext, stixEntity, stixObjects } = item;
+  await pushToConnector(
+    connector.internal_id,
+    buildLegacyEnrichmentMessage(element, work, trigger, draftContext, stixEntity, stixObjects),
+  );
+};
+
+const pushBatchEnvelopeOrLegacyItems = async (connector, capability, items) => {
+  if (items.length < 2) {
+    await Promise.all(items.map((item) => pushLegacyEnrichmentItem(item)));
+    return;
+  }
+  const pendingItems = [];
+  const flushPendingItems = async () => {
+    if (pendingItems.length < 2) {
+      await Promise.all(pendingItems.map((item) => pushLegacyEnrichmentItem(item)));
+      pendingItems.length = 0;
+      return;
+    }
+    const envelope = buildEnrichmentBatchEnvelope(
+      pendingItems.map((item) => item.candidate),
+      capability,
+    );
+    await pushToConnector(connector.internal_id, buildBatchEnrichmentMessage(envelope));
+    pendingItems.length = 0;
+  };
+
+  for (const item of items) {
+    try {
+      buildEnrichmentBatchEnvelope(
+        [...pendingItems, item].map((pendingItem) => pendingItem.candidate),
+        capability,
+      );
+      pendingItems.push(item);
+    } catch (error) {
+      if (!isEnrichmentBatchLimitError(error)) {
+        throw error;
+      }
+      await flushPendingItems();
+      try {
+        buildEnrichmentBatchEnvelope([item.candidate], capability);
+        pendingItems.push(item);
+      } catch (singleItemError) {
+        if (!isEnrichmentBatchLimitError(singleItemError)) {
+          throw singleItemError;
+        }
+        await pushLegacyEnrichmentItem(item);
+      }
+    }
+  }
+  await flushPendingItems();
+};
+
+const buildPreparedEnrichmentItem = async (request, connector, work) => {
+  const stixResolutionMode = resolveEnrichmentResolution(connector);
+  const stixEntity = stixResolutionMode === ENRICHMENT_RESOLUTION_DEFERRED ? null : await request.loadStixEntity();
+  const stixObjects = stixResolutionMode === ENRICHMENT_RESOLUTION_STIX_BUNDLE ? await request.loadStixObjects() : null;
+  return {
+    connector,
+    element: request.element,
+    work,
+    trigger: request.trigger,
+    draftContext: request.draftContext,
+    stixEntity,
+    stixObjects,
+    candidate: {
+      connectorId: connector.internal_id,
+      workId: work.id,
+      entityId: request.element.standard_id,
+      entityType: request.element.entity_type,
+      applicantId: null,
+      draftId: request.draftContext ?? null,
+      mode: EnrichmentBatchMode.Auto,
+      trigger: request.trigger === 'create' ? EnrichmentBatchTrigger.Create : EnrichmentBatchTrigger.Update,
+      resolution: stixResolutionMode,
+      playbookContext: null,
+      configuration: null,
+      sharedOrganizationIds: extractSharedOrganizationIds(request.element),
+      stixEntity,
+      stixObjects,
+    },
+  };
+};
+
+const buildAutoEnrichmentRequest = (context, user, element, scope, trigger, stixLoaders) => {
+  const draftContext = getDraftContext(context, user) || null;
   let stixEntityPromise;
   let stixObjectsPromise;
-  const loadStixEntity = () => {
-    stixEntityPromise ??= stixLoaders.loadById();
-    return stixEntityPromise;
+  return {
+    context,
+    user,
+    element,
+    scope,
+    trigger,
+    draftContext,
+    contextOutOfDraft: { ...context, draft_context: '' },
+    loadStixEntity: () => {
+      stixEntityPromise ??= stixLoaders.loadById();
+      return stixEntityPromise;
+    },
+    loadStixObjects: () => {
+      stixObjectsPromise ??= stixLoaders.bundleById();
+      return stixObjectsPromise;
+    },
   };
-  const loadStixObjects = () => {
-    stixObjectsPromise ??= stixLoaders.bundleById();
-    return stixObjectsPromise;
-  };
+};
+
+const publishLegacyEnrichmentRequest = async (request, targetConnectors) => {
+  const elementStandardId = request.element.standard_id;
   // Create a work for each connector
-  const workMessage = draftContext ? `Enrichment (${elementStandardId}) in draft ${draftContext}` : `Enrichment (${elementStandardId})`;
+  const workMessage = request.draftContext ? `Enrichment (${elementStandardId}) in draft ${request.draftContext}` : `Enrichment (${elementStandardId})`;
   const workList = await Promise.all(
     map((connector) => {
-      return createWork(contextOutOfDraft, user, connector, workMessage, elementStandardId, { draftContext }).then((work) => {
+      return createWork(request.contextOutOfDraft, request.user, connector, workMessage, elementStandardId, { draftContext: request.draftContext }).then((work) => {
         return { connector, work };
       });
     }, targetConnectors),
@@ -40,32 +192,104 @@ const publishEventToConnectors = async (context, user, element, targetConnectors
   for (let index = 0; index < workList.length; index += 1) {
     const workListElement = workList[index];
     const { connector, work } = workListElement;
-    let stix_objects = null;
-    const stixResolutionMode = connector.enrichment_resolution ?? ENRICHMENT_RESOLUTION_STIX_BUNDLE;
-    const stix_entity = stixResolutionMode === ENRICHMENT_RESOLUTION_DEFERRED ? null : await loadStixEntity();
-    if (stixResolutionMode === ENRICHMENT_RESOLUTION_STIX_BUNDLE) {
-      stix_objects = await loadStixObjects();
-    }
-    const message = {
-      internal: {
-        work_id: work.id, // Related action for history
-        applicant_id: null, // No specific user asking for the import
-        draft_id: draftContext ?? null,
-        trigger, // create | update
-        mode: 'auto',
-      },
-      event: {
-        event_type: CONNECTOR_INTERNAL_ENRICHMENT,
-        entity_id: elementStandardId,
-        entity_type: element.entity_type,
-        stix_entity,
-        stix_objects,
-      },
-    };
-    await pushToConnector(connector.internal_id, message);
+    await pushLegacyEnrichmentItem(await buildPreparedEnrichmentItem(request, connector, work));
   }
   return workList;
 };
+
+const publishEventToConnectors = async (context, user, element, targetConnectors, trigger, stixLoaders) => {
+  return publishLegacyEnrichmentRequest(
+    buildAutoEnrichmentRequest(context, user, element, element.entity_type, trigger, stixLoaders),
+    targetConnectors,
+  );
+};
+
+const publishBatchAutoEnrichmentRequests = async (requests) => {
+  const legacyRequests = [];
+  const selectedItemsByKey = new Map();
+  for (const request of requests) {
+    if (!isStixObject(request.element.entity_type) || request.element.auto_enrichment_disable) {
+      continue;
+    }
+    const targetConnectors = await findConnectorsForElementEnrichment(
+      request.context,
+      request.user,
+      request.element,
+      request.scope,
+      { mode: request.trigger === 'create' ? 'creation' : 'update' },
+    );
+    const legacyConnectors = [];
+    for (const connector of targetConnectors) {
+      const capability = normalizeEnrichmentBatchCapability(connector.enrichment_batch_capability ?? null);
+      if (!capability) {
+        legacyConnectors.push(connector);
+        continue;
+      }
+      const dedupeKey = `${connector.internal_id}:${request.trigger}:${request.draftContext ?? ''}:${request.element.standard_id}`;
+      selectedItemsByKey.set(dedupeKey, { request, connector, capability });
+    }
+    if (legacyConnectors.length > 0) {
+      legacyRequests.push({ request, connectors: legacyConnectors });
+    }
+  }
+
+  await promiseMap(
+    legacyRequests,
+    ({ request, connectors }) => publishLegacyEnrichmentRequest(request, connectors),
+    BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS,
+  );
+
+  const preparedItems = [];
+  for (const { request, connector, capability } of selectedItemsByKey.values()) {
+    const workMessage = request.draftContext
+      ? `Enrichment (${request.element.standard_id}) in draft ${request.draftContext}`
+      : `Enrichment (${request.element.standard_id})`;
+    const work = await createWork(
+      request.contextOutOfDraft,
+      request.user,
+      connector,
+      workMessage,
+      request.element.standard_id,
+      { draftContext: request.draftContext },
+    );
+    preparedItems.push({
+      ...(await buildPreparedEnrichmentItem(request, connector, work)),
+      capability,
+    });
+  }
+
+  const batchGroups = new Map();
+  for (const item of preparedItems) {
+    const groupContext = buildEnrichmentBatchGroupContext(item.candidate);
+    const groupKey = `${item.connector.internal_id}:${groupContext.context_fingerprint}`;
+    const batchGroup = batchGroups.get(groupKey) ?? { connector: item.connector, capability: item.capability, items: [] };
+    batchGroup.items.push(item);
+    batchGroups.set(groupKey, batchGroup);
+  }
+
+  for (const batchGroup of batchGroups.values()) {
+    await pushBatchEnvelopeOrLegacyItems(batchGroup.connector, batchGroup.capability, batchGroup.items);
+  }
+};
+
+export const buildAutoEnrichmentSideEffect = (context, user, element, trigger, stixLoaders) => ({
+  kind: BatchSideEffectKind.AutoEnrichment,
+  sealDescriptor: trigger === 'create'
+    ? BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentCreateEntity
+    : BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
+  batchDescriptor: {
+    key: AUTO_ENRICHMENT_BATCH_DESCRIPTOR_KEY,
+    execute: async (sideEffects) => publishBatchAutoEnrichmentRequests(sideEffects.map((sideEffect) => sideEffect.batchPayload)),
+  },
+  batchPayload: buildAutoEnrichmentRequest(context, user, element, element.entity_type, trigger, stixLoaders),
+  execute: async () => {
+    if (trigger === 'create') {
+      await createEntityAutoEnrichment(context, user, element, element.entity_type, stixLoaders);
+    } else {
+      await updateEntityAutoEnrichment(context, user, element, element.entity_type, stixLoaders);
+    }
+  },
+});
 
 export const updateEntityAutoEnrichment = async (context, user, element, scope, stixLoaders) => {
   if (!isStixObject(element.entity_type)) {

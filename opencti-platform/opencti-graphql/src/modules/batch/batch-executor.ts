@@ -109,7 +109,14 @@ export const BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS = Object.freeze({
 export interface BatchSideEffect {
   kind: BatchSideEffectKind;
   sealDescriptor?: BatchSideEffectSealDescriptor;
+  batchDescriptor?: BatchSideEffectBatchDescriptor;
+  batchPayload?: unknown;
   execute: () => Promise<void>;
+}
+
+export interface BatchSideEffectBatchDescriptor {
+  key: string;
+  execute: (sideEffects: readonly BatchSideEffect[]) => Promise<void>;
 }
 
 export interface BatchCommitter {
@@ -195,7 +202,7 @@ const BATCH_SIDE_EFFECT_PROGRESS_INTERVAL_MS = 5000;
 const BATCH_SIDE_EFFECT_DEFAULT_MAX_ACTIVE_AUTO_ENRICHMENTS = 4;
 const BATCH_SIDE_EFFECT_SEAL_CLASS_VALUES = new Set(Object.values(BatchSideEffectSealClass));
 const configuredBatchMaxActiveAutoEnrichments = Number(conf.get('app:concurrency:batch_max_active_auto_enrichments'));
-const BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS = Number.isInteger(configuredBatchMaxActiveAutoEnrichments)
+export const BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS = Number.isInteger(configuredBatchMaxActiveAutoEnrichments)
   && configuredBatchMaxActiveAutoEnrichments > 0
   ? configuredBatchMaxActiveAutoEnrichments
   : BATCH_SIDE_EFFECT_DEFAULT_MAX_ACTIVE_AUTO_ENRICHMENTS;
@@ -318,10 +325,15 @@ const logBatchSideEffectProgress = (state: BatchExecutionState) => {
   });
 };
 
-const executeBatchSideEffect = async (state: BatchExecutionState, sideEffect: BatchSideEffect) => {
+const executeBatchSideEffect = async (
+  state: BatchExecutionState,
+  sideEffect: BatchSideEffect,
+  execute: () => Promise<void> = sideEffect.execute,
+  logicalSideEffectCount = 1,
+) => {
   const materializationState = state.materializationState;
   if (!materializationState) {
-    await sideEffect.execute();
+    await execute();
     return;
   }
   const startedAt = Date.now();
@@ -330,12 +342,12 @@ const executeBatchSideEffect = async (state: BatchExecutionState, sideEffect: Ba
   activeExecutions.add(activeExecution);
   materializationState.activeExecutionsByKind.set(sideEffect.kind, activeExecutions);
   try {
-    await sideEffect.execute();
+    await execute();
   } finally {
-    materializationState.completedCount += 1;
+    materializationState.completedCount += logicalSideEffectCount;
     materializationState.completedCountByKind.set(
       sideEffect.kind,
-      (materializationState.completedCountByKind.get(sideEffect.kind) ?? 0) + 1,
+      (materializationState.completedCountByKind.get(sideEffect.kind) ?? 0) + logicalSideEffectCount,
     );
     materializationState.inclusiveDurationMsByKind.set(
       sideEffect.kind,
@@ -379,19 +391,56 @@ const executeWrites = async <T>(
   return results;
 };
 
-const executeAutoEnrichmentSideEffect = async (state: BatchExecutionState, sideEffect: BatchSideEffect) => {
+const executeAutoEnrichmentSideEffectGroup = async (
+  state: BatchExecutionState,
+  sideEffects: readonly BatchSideEffect[],
+) => {
+  const firstSideEffect = sideEffects[0];
+  if (!firstSideEffect) {
+    return;
+  }
   const releaseAdmission = await batchAutoEnrichmentMaterializationGate.acquire();
   try {
-    await executeBatchSideEffect(state, sideEffect);
+    if (sideEffects.length === 1 || !firstSideEffect.batchDescriptor) {
+      await executeBatchSideEffect(state, firstSideEffect);
+      return;
+    }
+    await executeBatchSideEffect(
+      state,
+      firstSideEffect,
+      () => firstSideEffect.batchDescriptor!.execute(sideEffects),
+      sideEffects.length,
+    );
   } finally {
     releaseAdmission();
   }
+};
+
+const groupAutoEnrichmentSideEffects = (sideEffects: readonly BatchSideEffect[]): BatchSideEffect[][] => {
+  const groupedSideEffects: BatchSideEffect[][] = [];
+  const groupIndexes = new Map<string, number>();
+  for (const sideEffect of sideEffects) {
+    const batchKey = sideEffect.batchDescriptor?.key;
+    if (!batchKey) {
+      groupedSideEffects.push([sideEffect]);
+      continue;
+    }
+    const existingGroupIndex = groupIndexes.get(batchKey);
+    if (existingGroupIndex === undefined) {
+      groupIndexes.set(batchKey, groupedSideEffects.length);
+      groupedSideEffects.push([sideEffect]);
+    } else {
+      groupedSideEffects[existingGroupIndex].push(sideEffect);
+    }
+  }
+  return groupedSideEffects;
 };
 
 const materializeSideEffects = async (state: BatchExecutionState) => {
   const queuedSideEffects = state.sideEffects.slice();
   const orderedSideEffects = queuedSideEffects.filter((sideEffect) => sideEffect.kind !== BatchSideEffectKind.AutoEnrichment);
   const autoEnrichmentSideEffects = queuedSideEffects.filter((sideEffect) => sideEffect.kind === BatchSideEffectKind.AutoEnrichment);
+  const autoEnrichmentSideEffectGroups = groupAutoEnrichmentSideEffects(autoEnrichmentSideEffects);
   const materializationState: BatchSideEffectMaterializationState = {
     active: true,
     activeExecutionsByKind: new Map(),
@@ -426,8 +475,8 @@ const materializeSideEffects = async (state: BatchExecutionState) => {
     }
     materializationState.stage = 'auto_enrichment';
     await promiseMap(
-      autoEnrichmentSideEffects,
-      (sideEffect) => executeAutoEnrichmentSideEffect(state, sideEffect),
+      autoEnrichmentSideEffectGroups,
+      (sideEffects) => executeAutoEnrichmentSideEffectGroup(state, sideEffects),
       BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS,
     );
   } finally {

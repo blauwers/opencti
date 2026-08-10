@@ -313,6 +313,33 @@ describe('batch admission contract', () => {
     });
     expect(JSON.parse(Buffer.from(message.content, 'base64').toString('utf-8'))).toEqual(JSON.parse(prepared.bundle));
   });
+
+  it('carries enrichment result attribution metadata and fingerprints its context', () => {
+    const fingerprintContext = { batch_id: 'enrichment-batch--1', results: [{ work_id: 'work-1' }] };
+    const prepared = prepareBundleSubmission(bundle, {
+      enrichmentBatchResult: '{"batch_id":"enrichment-batch--1"}',
+      additionalWorkIds: ['work-2'],
+      fingerprintContext,
+    });
+    const same = prepareBundleSubmission(reorderedBundle, {
+      enrichmentBatchResult: '{"batch_id":"enrichment-batch--1"}',
+      additionalWorkIds: ['work-2'],
+      fingerprintContext,
+    });
+    const conflicting = prepareBundleSubmission(reorderedBundle, {
+      enrichmentBatchResult: '{"batch_id":"enrichment-batch--2"}',
+      additionalWorkIds: ['work-2'],
+      fingerprintContext: { batch_id: 'enrichment-batch--2', results: [{ work_id: 'work-1' }] },
+    });
+    const message = buildBatchQueueMessage(buildBatchAdmission('connector-1', 'work-1', prepared), 'user-1');
+
+    expect(same.payloadFingerprint).toBe(prepared.payloadFingerprint);
+    expect(conflicting.payloadFingerprint).not.toBe(prepared.payloadFingerprint);
+    expect(message).toMatchObject({
+      enrichment_batch_result: '{"batch_id":"enrichment-batch--1"}',
+      additional_work_ids: ['work-2'],
+    });
+  });
 });
 
 describe('submitStixBundle', () => {
@@ -489,6 +516,32 @@ describe('submitStixBundle', () => {
     expect(createWork).not.toHaveBeenCalled();
     expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(1);
     expect(pushToWorkerForConnector).toHaveBeenCalledTimes(1);
+  });
+
+  it('records explicit batch expectations once for every attributed work id', async () => {
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-caller-1', {
+      idempotencyKey: 'enrichment-batch-result:batch--1',
+      enrichmentBatchResult: '{"batch_id":"batch--1"}',
+      additionalWorkIds: ['work-caller-2', 'work-caller-2'],
+    });
+
+    expect(updateBatchSubmissionExpectation).toHaveBeenCalledTimes(2);
+    expect(updateBatchSubmissionExpectation).toHaveBeenNthCalledWith(
+      1,
+      testContext,
+      ADMIN_USER,
+      'work-caller-1',
+      1,
+      buildBatchSubmissionId('connector-1', 'enrichment-batch-result:batch--1'),
+    );
+    expect(updateBatchSubmissionExpectation).toHaveBeenNthCalledWith(
+      2,
+      testContext,
+      ADMIN_USER,
+      'work-caller-2',
+      1,
+      buildBatchSubmissionId('connector-1', 'enrichment-batch-result:batch--1'),
+    );
   });
 
   it('backfills a pre-bootstrap submission as v1 without rewriting its stored queue contract', async () => {
