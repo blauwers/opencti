@@ -205,6 +205,27 @@ describe('batch delivery domain', () => {
     expect(elIndex).toHaveBeenCalledTimes(1);
   });
 
+  it('treats null and omitted secondary work attribution as the same promotion input', async () => {
+    const candidateId = buildBatchDeliveryCandidateId();
+    const payloadFingerprint = buildBatchDeliveryPayloadFingerprint({ type: 'bundle' });
+
+    const first = await promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId,
+      payloadFingerprint,
+      workId: 'work-1',
+      additionalWorkIds: null,
+    });
+    const replay = await promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId,
+      payloadFingerprint,
+      workId: 'work-1',
+    });
+
+    expect(JSON.parse(first.queue_payload)).not.toHaveProperty('additional_work_ids');
+    expect(replay).toBe(first);
+    expect(elIndex).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects candidate promotion when the candidate or payload identity is invalid', async () => {
     const candidateId = buildBatchDeliveryCandidateId();
     const payloadFingerprint = buildBatchDeliveryPayloadFingerprint({ type: 'bundle' });

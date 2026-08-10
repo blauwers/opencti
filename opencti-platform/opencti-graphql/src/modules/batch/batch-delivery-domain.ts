@@ -330,7 +330,8 @@ export const promoteBatchDeliveryCandidateRoot = async (
   context: AuthContext,
   input: PromoteBatchDeliveryCandidateRootInput,
 ): Promise<BatchDelivery> => {
-  const { candidateId, payloadFingerprint, workId, additionalWorkIds = [] } = input;
+  const { candidateId, payloadFingerprint, workId } = input;
+  const additionalWorkIds = input.additionalWorkIds ?? [];
   if (!isBatchDeliveryCandidateId(candidateId)) {
     throw batchDeliveryConflict('Invalid batch delivery promotion candidate', {
       candidate_id: candidateId,
