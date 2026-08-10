@@ -461,7 +461,6 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
                 "data": {
                     "batchDeliveryPromoteRoot": {
                         "delivery_id": "batch-delivery--root",
-                        "queue_payload": "{}",
                     }
                 }
             },
@@ -493,7 +492,9 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
     handoff = client.batch_delivery_handoff("batch-delivery--parent")
     promoted = client.promote_batch_delivery_root(
         "batch-delivery-candidate--1",
-        '{"batch_delivery_candidate_id":"batch-delivery-candidate--1"}',
+        "a" * 64,
+        "work--1",
+        ["work--2"],
     )
     reserved = client.reserve_batch_delivery_children(
         "batch-delivery--parent", children
@@ -505,7 +506,6 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
     assert handoff == {"handoff_evidence": "NONE"}
     assert promoted == {
         "delivery_id": "batch-delivery--root",
-        "queue_payload": "{}",
     }
     assert reserved == {"handoff_evidence": "CHILDREN_RESERVED"}
     assert published == {"handoff_evidence": "CHILDREN_PUBLISHED"}
@@ -514,7 +514,9 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
     }
     assert client.query.call_args_list[1].args[1] == {
         "candidateId": "batch-delivery-candidate--1",
-        "queuePayload": '{"batch_delivery_candidate_id":"batch-delivery-candidate--1"}',
+        "payloadFingerprint": "a" * 64,
+        "workId": "work--1",
+        "additionalWorkIds": ["work--2"],
     }
     assert client.query.call_args_list[2].args[1] == {
         "parentDeliveryId": "batch-delivery--parent",
@@ -524,6 +526,44 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
         "parentDeliveryId": "batch-delivery--parent",
         "childDeliveryIds": ["batch-delivery--child"],
     }
+
+
+def test_batch_delivery_reserve_children_uses_multipart_for_oversized_manifest():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        bundle_submission_max_payload_size=1,
+    )
+    client.query = MagicMock(
+        return_value={
+            "data": {
+                "batchDeliveryReserveChildrenUpload": {
+                    "handoff_evidence": "CHILDREN_RESERVED"
+                }
+            }
+        }
+    )
+    children = [
+        {
+            "branch_kind": "LEGACY_SPLIT",
+            "branch_sequence": 0,
+            "branch_ordinal": 0,
+            "queue_payload": '{"content":"payload"}',
+        }
+    ]
+
+    reserved = client.reserve_batch_delivery_children(
+        "batch-delivery--parent", children
+    )
+
+    assert reserved == {"handoff_evidence": "CHILDREN_RESERVED"}
+    mutation, variables = client.query.call_args.args
+    assert "batchDeliveryReserveChildrenUpload" in mutation
+    assert variables["parentDeliveryId"] == "batch-delivery--parent"
+    assert isinstance(variables["children"], File)
+    assert variables["children"].name == "batch-delivery-children.json"
+    assert json.loads(variables["children"].data) == children
 
 
 def test_enrichment_batch_result_submit_forwards_graphql_variables_and_result():

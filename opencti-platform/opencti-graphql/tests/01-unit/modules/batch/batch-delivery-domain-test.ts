@@ -10,6 +10,7 @@ import {
   loadBatchDeliveryHandoff,
   markBatchDeliveryChildrenPublished,
   promoteBatchDeliveryCandidateRoot,
+  readBatchDeliveryQueueMessage,
   reserveBatchDelivery,
   reserveBatchDeliveryChildren,
 } from '../../../../src/modules/batch/batch-delivery-domain';
@@ -112,6 +113,21 @@ describe('batch delivery domain', () => {
     expect(new Set([firstSplitId, secondSplitId, replayId]).size).toBe(3);
   });
 
+  it('rejects unknown child branch kinds at the domain boundary', () => {
+    expect(() => buildChildBatchDeliveryId(
+      buildRootBatchDeliveryId('batch-submission--1'),
+      'NOT_A_BRANCH' as Exclude<BatchDeliveryBranchKind, BatchDeliveryBranchKind.Root>,
+      0,
+      0,
+    )).toThrowError(expect.objectContaining({
+      extensions: expect.objectContaining({
+        data: expect.objectContaining({
+          batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+        }),
+      }),
+    }));
+  });
+
   it('canonicalizes equivalent delivery payloads before hashing', () => {
     expect(buildBatchDeliveryPayloadFingerprint({ b: 2, a: 1 })).toBe(
       buildBatchDeliveryPayloadFingerprint({ a: 1, b: 2 }),
@@ -152,24 +168,31 @@ describe('batch delivery domain', () => {
 
   it('promotes one candidate-bearing root payload into durable v2 state and replays idempotently', async () => {
     const candidateId = buildBatchDeliveryCandidateId();
-    const candidateQueueMessage = {
-      ...queueMessage,
-      submission_id: undefined,
-      batch_delivery_candidate_id: candidateId,
-    } as unknown as BatchQueueMessage;
+    const payloadFingerprint = buildBatchDeliveryPayloadFingerprint({ type: 'bundle' });
+    const promotion = {
+      candidateId,
+      payloadFingerprint,
+      workId: 'work-1',
+      additionalWorkIds: ['work-2'],
+    };
 
-    const first = await promoteBatchDeliveryCandidateRoot(testContext, candidateId, candidateQueueMessage);
-    const replay = await promoteBatchDeliveryCandidateRoot(testContext, candidateId, candidateQueueMessage);
+    const first = await promoteBatchDeliveryCandidateRoot(testContext, promotion);
+    const replay = await promoteBatchDeliveryCandidateRoot(testContext, promotion);
 
     expect(first).toMatchObject({
       internal_id: buildRootBatchDeliveryId(candidateId),
       submission_id: candidateId,
       delivery_kind: BatchDeliveryKind.Root,
       branch_kind: BatchDeliveryBranchKind.Root,
+      payload_fingerprint: payloadFingerprint,
       required_worker_protocol: BatchDeliveryProtocol.V2,
     });
     expect(JSON.parse(first.queue_payload)).toMatchObject({
+      type: 'batch_delivery_handoff_anchor',
       batch_delivery_candidate_id: candidateId,
+      batch_delivery_candidate_payload_fingerprint: payloadFingerprint,
+      work_id: 'work-1',
+      additional_work_ids: ['work-2'],
       submission_id: candidateId,
       delivery_id: buildRootBatchDeliveryId(candidateId),
       parent_delivery_id: null,
@@ -177,19 +200,20 @@ describe('batch delivery domain', () => {
       delivery_protocol_version: BatchDeliveryProtocol.V2,
       delivery_branch_kind: BatchDeliveryBranchKind.Root,
     });
+    expect(() => readBatchDeliveryQueueMessage(first)).toThrowError('Batch delivery queue payload is a non-executable handoff anchor');
     expect(replay).toBe(first);
     expect(elIndex).toHaveBeenCalledTimes(1);
   });
 
   it('rejects candidate promotion when the candidate or payload identity is invalid', async () => {
     const candidateId = buildBatchDeliveryCandidateId();
-    const candidateQueueMessage = {
-      ...queueMessage,
-      submission_id: undefined,
-      batch_delivery_candidate_id: candidateId,
-    } as unknown as BatchQueueMessage;
+    const payloadFingerprint = buildBatchDeliveryPayloadFingerprint({ type: 'bundle' });
 
-    await expect(promoteBatchDeliveryCandidateRoot(testContext, 'batch-delivery-candidate--other', candidateQueueMessage))
+    await expect(promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId: 'not-a-candidate',
+      payloadFingerprint,
+      workId: 'work-1',
+    }))
       .rejects.toThrowError(expect.objectContaining({
         extensions: expect.objectContaining({
           data: expect.objectContaining({
@@ -197,9 +221,10 @@ describe('batch delivery domain', () => {
           }),
         }),
       }));
-    await expect(promoteBatchDeliveryCandidateRoot(testContext, candidateId, {
-      ...candidateQueueMessage,
-      submission_id: candidateId,
+    await expect(promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId,
+      payloadFingerprint: 'not-a-fingerprint',
+      workId: 'work-1',
     }))
       .rejects.toThrowError(expect.objectContaining({
         extensions: expect.objectContaining({
@@ -209,6 +234,69 @@ describe('batch delivery domain', () => {
         }),
       }));
     expect(elIndex).not.toHaveBeenCalled();
+  });
+
+  it('rejects candidate promotion replay when compact metadata changes', async () => {
+    const candidateId = buildBatchDeliveryCandidateId();
+    const payloadFingerprint = buildBatchDeliveryPayloadFingerprint({ type: 'bundle' });
+
+    await promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId,
+      payloadFingerprint,
+      workId: 'work-1',
+    });
+
+    await expect(promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId,
+      payloadFingerprint,
+      workId: 'work-2',
+    }))
+      .rejects.toThrowError(expect.objectContaining({
+        extensions: expect.objectContaining({
+          data: expect.objectContaining({
+            batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+          }),
+        }),
+      }));
+  });
+
+  it('uses compact promoted roots for platform-owned split expectation replacement', async () => {
+    const candidateId = buildBatchDeliveryCandidateId();
+    const root = await promoteBatchDeliveryCandidateRoot(testContext, {
+      candidateId,
+      payloadFingerprint: buildBatchDeliveryPayloadFingerprint({ type: 'bundle' }),
+      workId: 'work-1',
+      additionalWorkIds: ['work-2'],
+    });
+
+    await reserveBatchDeliveryChildren(testContext, root.internal_id, [
+      {
+        branchKind: BatchDeliveryBranchKind.OversizedChunk,
+        branchSequence: 0,
+        branchOrdinal: 0,
+        queueMessage: {
+          ...queueMessage,
+          submission_id: candidateId,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--1' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.OversizedChunk, 0, 0),
+        },
+      },
+      {
+        branchKind: BatchDeliveryBranchKind.OversizedChunk,
+        branchSequence: 0,
+        branchOrdinal: 1,
+        queueMessage: {
+          ...queueMessage,
+          submission_id: candidateId,
+          content: Buffer.from(JSON.stringify({ type: 'bundle', id: 'bundle--1', objects: [{ id: 'indicator--2' }] })).toString('base64'),
+          ...buildChildBatchDeliveryEnvelope(root.internal_id, BatchDeliveryBranchKind.OversizedChunk, 0, 1),
+        },
+      },
+    ]);
+
+    expect(updateBatchExpectation).toHaveBeenCalledTimes(2);
+    expect(updateBatchExpectation).toHaveBeenNthCalledWith(1, testContext, SYSTEM_USER, 'work-1', 1, root.internal_id);
+    expect(updateBatchExpectation).toHaveBeenNthCalledWith(2, testContext, SYSTEM_USER, 'work-2', 1, root.internal_id);
   });
 
   it('reserves one durable root delivery and returns it on an identical retry', async () => {

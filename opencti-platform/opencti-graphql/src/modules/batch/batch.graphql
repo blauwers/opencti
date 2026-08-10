@@ -202,7 +202,6 @@ type BatchDeliveryChild {
 
 type BatchDeliveryRootPromotion {
   delivery_id: ID!
-  queue_payload: String!
 }
 
 type BatchDeliveryHandoff {
@@ -292,7 +291,8 @@ type Mutation {
   stixBundleSubmit(connectorId: String!, bundle: String!, work_id: String, options: BatchSubmitOptionsInput): BatchAdmission! @auth(for: [CONNECTORAPI])
   enrichmentBatchResultSubmit(connectorId: String!, envelope: String!, result: String!): Boolean! @auth(for: [CONNECTORAPI])
   batchMutationsExecute(operations: [BatchGraphqlOperationInput!]!, options: BatchExecuteOptionsInput): BatchMutationExecution! @auth(for: [CONNECTORAPI])
-  batchDeliveryPromoteRoot(candidate_id: ID!, queue_payload: String!): BatchDeliveryRootPromotion! @auth(for: [CONNECTORAPI])
+  batchDeliveryPromoteRoot(candidate_id: ID!, payload_fingerprint: String!, work_id: String!, additional_work_ids: [String!]): BatchDeliveryRootPromotion! @auth(for: [CONNECTORAPI])
   batchDeliveryReserveChildren(parent_delivery_id: ID!, children: [BatchDeliveryChildReservationInput!]!): BatchDeliveryHandoff! @auth(for: [CONNECTORAPI])
+  batchDeliveryReserveChildrenUpload(parent_delivery_id: ID!, children: Upload!): BatchDeliveryHandoff! @auth(for: [CONNECTORAPI])
   batchDeliveryMarkChildrenPublished(parent_delivery_id: ID!, child_delivery_ids: [ID!]!): BatchDeliveryHandoff! @auth(for: [CONNECTORAPI])
 }

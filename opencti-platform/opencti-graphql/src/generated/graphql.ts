@@ -2174,7 +2174,6 @@ export enum BatchDeliveryKind {
 export type BatchDeliveryRootPromotion = {
   __typename?: 'BatchDeliveryRootPromotion';
   delivery_id: Scalars['ID']['output'];
-  queue_payload: Scalars['String']['output'];
 };
 
 export enum BatchDeliveryState {
@@ -17442,6 +17441,7 @@ export type Mutation = {
   batchDeliveryMarkChildrenPublished: BatchDeliveryHandoff;
   batchDeliveryPromoteRoot: BatchDeliveryRootPromotion;
   batchDeliveryReserveChildren: BatchDeliveryHandoff;
+  batchDeliveryReserveChildrenUpload: BatchDeliveryHandoff;
   batchMutationsExecute: BatchMutationExecution;
   bookmarkAdd?: Maybe<StixDomainObject>;
   bookmarkDelete?: Maybe<Scalars['ID']['output']>;
@@ -18100,13 +18100,21 @@ export type MutationBatchDeliveryMarkChildrenPublishedArgs = {
 
 
 export type MutationBatchDeliveryPromoteRootArgs = {
+  additional_work_ids?: InputMaybe<Array<Scalars['String']['input']>>;
   candidate_id: Scalars['ID']['input'];
-  queue_payload: Scalars['String']['input'];
+  payload_fingerprint: Scalars['String']['input'];
+  work_id: Scalars['String']['input'];
 };
 
 
 export type MutationBatchDeliveryReserveChildrenArgs = {
   children: Array<BatchDeliveryChildReservationInput>;
+  parent_delivery_id: Scalars['ID']['input'];
+};
+
+
+export type MutationBatchDeliveryReserveChildrenUploadArgs = {
+  children: Scalars['Upload']['input'];
   parent_delivery_id: Scalars['ID']['input'];
 };
 
@@ -43034,7 +43042,6 @@ export type BatchDeliveryHandoffResolvers<ContextType = any, ParentType extends 
 
 export type BatchDeliveryRootPromotionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchDeliveryRootPromotion'] = ResolversParentTypes['BatchDeliveryRootPromotion']> = ResolversObject<{
   delivery_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
-  queue_payload?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
 }>;
 
 export type BatchExecutionReceiptResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchExecutionReceipt'] = ResolversParentTypes['BatchExecutionReceipt']> = ResolversObject<{
@@ -48274,8 +48281,9 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   attackPatternEdit?: Resolver<Maybe<ResolversTypes['AttackPatternEditMutations']>, ParentType, ContextType, RequireFields<MutationAttackPatternEditArgs, 'id'>>;
   autoRegisterOpenCTI?: Resolver<ResolversTypes['Success'], ParentType, ContextType, RequireFields<MutationAutoRegisterOpenCtiArgs, 'input'>>;
   batchDeliveryMarkChildrenPublished?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<MutationBatchDeliveryMarkChildrenPublishedArgs, 'child_delivery_ids' | 'parent_delivery_id'>>;
-  batchDeliveryPromoteRoot?: Resolver<ResolversTypes['BatchDeliveryRootPromotion'], ParentType, ContextType, RequireFields<MutationBatchDeliveryPromoteRootArgs, 'candidate_id' | 'queue_payload'>>;
+  batchDeliveryPromoteRoot?: Resolver<ResolversTypes['BatchDeliveryRootPromotion'], ParentType, ContextType, RequireFields<MutationBatchDeliveryPromoteRootArgs, 'candidate_id' | 'payload_fingerprint' | 'work_id'>>;
   batchDeliveryReserveChildren?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<MutationBatchDeliveryReserveChildrenArgs, 'children' | 'parent_delivery_id'>>;
+  batchDeliveryReserveChildrenUpload?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<MutationBatchDeliveryReserveChildrenUploadArgs, 'children' | 'parent_delivery_id'>>;
   batchMutationsExecute?: Resolver<ResolversTypes['BatchMutationExecution'], ParentType, ContextType, RequireFields<MutationBatchMutationsExecuteArgs, 'operations'>>;
   bookmarkAdd?: Resolver<Maybe<ResolversTypes['StixDomainObject']>, ParentType, ContextType, RequireFields<MutationBookmarkAddArgs, 'id' | 'type'>>;
   bookmarkDelete?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType, RequireFields<MutationBookmarkDeleteArgs, 'id'>>;

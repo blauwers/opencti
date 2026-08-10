@@ -21,6 +21,9 @@ from requests import RequestException, Timeout
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
 BATCH_REPLAY_LIMIT = 4
 BATCH_DELIVERY_CANDIDATE_ID_KEY = "batch_delivery_candidate_id"
+BATCH_DELIVERY_CANDIDATE_PAYLOAD_FINGERPRINT_KEY = (
+    "batch_delivery_candidate_payload_fingerprint"
+)
 BATCH_DELIVERY_PROTOCOL_V2 = 2
 BATCH_DELIVERY_PREFIX = "batch-delivery--"
 BATCH_DELIVERY_KIND_ROOT = "ROOT"
@@ -71,6 +74,26 @@ def _build_delivery_id(parts: List[Any]) -> str:
 
 def build_root_delivery_id(submission_id: str) -> str:
     return _build_delivery_id([submission_id, BATCH_DELIVERY_BRANCH_ROOT, 0, 0])
+
+
+def build_root_delivery_message(
+    data: Dict[str, Any],
+    submission_id: str,
+) -> Dict[str, Any]:
+    root_data = dict(data)
+    root_data.update(
+        {
+            "submission_id": submission_id,
+            "delivery_id": build_root_delivery_id(submission_id),
+            "parent_delivery_id": None,
+            "delivery_kind": BATCH_DELIVERY_KIND_ROOT,
+            "delivery_protocol_version": BATCH_DELIVERY_PROTOCOL_V2,
+            "delivery_branch_kind": BATCH_DELIVERY_BRANCH_ROOT,
+            "delivery_branch_sequence": 0,
+            "delivery_branch_ordinal": 0,
+        }
+    )
+    return root_data
 
 
 def build_child_delivery_id(
@@ -715,18 +738,33 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             return data
         if not isinstance(candidate_id, str) or len(candidate_id) == 0:
             raise ValueError("Invalid batch delivery candidate")
+        payload_fingerprint = data.get(BATCH_DELIVERY_CANDIDATE_PAYLOAD_FINGERPRINT_KEY)
+        if not isinstance(payload_fingerprint, str) or len(payload_fingerprint) == 0:
+            raise ValueError("Invalid batch delivery candidate payload fingerprint")
+        work_id = data.get("work_id")
+        if not isinstance(work_id, str) or len(work_id) == 0:
+            raise ValueError("Invalid batch delivery candidate work attribution")
+        additional_work_ids = data.get("additional_work_ids")
+        if additional_work_ids is not None and (
+            not isinstance(additional_work_ids, list)
+            or any(
+                not isinstance(additional_work_id, str) or len(additional_work_id) == 0
+                for additional_work_id in additional_work_ids
+            )
+        ):
+            raise ValueError("Invalid batch delivery candidate work attribution")
         promotion = self.api.promote_batch_delivery_root(
             candidate_id,
-            json.dumps(data),
+            payload_fingerprint,
+            work_id,
+            additional_work_ids,
         )
-        queue_payload = promotion.get("queue_payload")
-        if not isinstance(queue_payload, str) or len(queue_payload) == 0:
-            raise ValueError("Invalid promoted batch delivery payload")
-        promoted_data = json.loads(queue_payload)
+        promoted_data = build_root_delivery_message(data, candidate_id)
         envelope = parse_batch_delivery_envelope(promoted_data)
         if (
             envelope is None
             or envelope.delivery_kind != BATCH_DELIVERY_KIND_ROOT
+            or promotion.get("delivery_id") != envelope.delivery_id
             or promoted_data.get(BATCH_DELIVERY_CANDIDATE_ID_KEY) != candidate_id
         ):
             raise ValueError("Invalid promoted batch delivery payload")

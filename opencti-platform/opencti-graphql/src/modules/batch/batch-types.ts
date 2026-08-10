@@ -199,6 +199,7 @@ export interface BatchAdmission {
   rootDeliveryId?: string;
   requiredDeliveryProtocol?: BatchDeliveryProtocol;
   deliveryCandidateId?: string;
+  deliveryCandidatePayloadFingerprint?: string;
   enrichmentBatchResult?: string;
   additionalWorkIds?: string[];
 }
@@ -235,6 +236,7 @@ export interface BatchQueueMessage {
   enrichment_batch_result?: string;
   additional_work_ids?: string[];
   batch_delivery_candidate_id?: string;
+  batch_delivery_candidate_payload_fingerprint?: string;
   submission_id?: string;
   delivery_id?: string;
   parent_delivery_id?: string | null;
@@ -262,6 +264,24 @@ export interface BatchQueueMessage {
     version: 1;
   };
 }
+
+export interface BatchDeliveryRootHandoffAnchor {
+  type: 'batch_delivery_handoff_anchor';
+  work_id: string;
+  additional_work_ids?: string[];
+  batch_delivery_candidate_id: string;
+  batch_delivery_candidate_payload_fingerprint: string;
+  submission_id: string;
+  delivery_id: string;
+  parent_delivery_id: null;
+  delivery_kind: BatchDeliveryKind.Root;
+  delivery_protocol_version: BatchDeliveryProtocol.V2;
+  delivery_branch_kind: BatchDeliveryBranchKind.Root;
+  delivery_branch_sequence: 0;
+  delivery_branch_ordinal: 0;
+}
+
+export type BatchDeliveryQueuePayload = BatchQueueMessage | BatchDeliveryRootHandoffAnchor;
 
 export interface BatchSubmission {
   id: string;

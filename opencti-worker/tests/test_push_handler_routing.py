@@ -12,6 +12,7 @@ from requests import ConnectionError
 from src import push_handler
 from src.push_handler import (
     BATCH_DELIVERY_CANDIDATE_ID_KEY,
+    BATCH_DELIVERY_CANDIDATE_PAYLOAD_FINGERPRINT_KEY,
     BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
     BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
     BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
@@ -126,6 +127,7 @@ def build_v2_message(**overrides):
 def build_candidate_message(**overrides):
     message = {
         BATCH_DELIVERY_CANDIDATE_ID_KEY: "batch-delivery-candidate--1",
+        BATCH_DELIVERY_CANDIDATE_PAYLOAD_FINGERPRINT_KEY: "a" * 64,
     }
     message.update(overrides)
     return build_message(**message)
@@ -859,7 +861,6 @@ def test_handler_promotes_candidate_before_reserving_oversized_chunks(monkeypatc
     )
     handler.api.promote_batch_delivery_root.return_value = {
         "delivery_id": promoted_data["delivery_id"],
-        "queue_payload": json.dumps(promoted_data),
     }
 
     result = handler.handle_message(
@@ -872,9 +873,13 @@ def test_handler_promotes_candidate_before_reserving_oversized_chunks(monkeypatc
 
     assert result == "ack"
     handler.api.promote_batch_delivery_root.assert_called_once()
-    candidate_id, queue_payload = handler.api.promote_batch_delivery_root.call_args.args
+    candidate_id, payload_fingerprint, work_id, additional_work_ids = (
+        handler.api.promote_batch_delivery_root.call_args.args
+    )
     assert candidate_id == "batch-delivery-candidate--1"
-    assert json.loads(queue_payload)[BATCH_DELIVERY_CANDIDATE_ID_KEY] == candidate_id
+    assert payload_fingerprint == "a" * 64
+    assert work_id == "work--1"
+    assert additional_work_ids is None
     reserve_call = handler.api.reserve_batch_delivery_children.call_args.args
     assert reserve_call[0] == build_root_delivery_id(candidate_id)
     handler.api.work.add_expectations.assert_not_called()

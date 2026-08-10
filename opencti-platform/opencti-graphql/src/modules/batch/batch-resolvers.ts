@@ -1,5 +1,8 @@
 import type { GraphQLResolveInfo } from 'graphql';
+import type { Readable } from 'node:stream';
+import { FunctionalError } from '../../config/errors';
 import { submitStixBundle } from '../../domain/stix';
+import { streamConverter } from '../../database/file-storage';
 import { submitEnrichmentBatchResult } from '../enrichment/enrichment-batch-domain';
 import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, promoteBatchDeliveryCandidateRoot, reserveBatchDeliveryChildren } from './batch-delivery-domain';
 import { loadBatchExecutionReconciliation } from './batch-execution-reconciliation-domain';
@@ -78,8 +81,52 @@ interface BatchDeliveryChildReservationInputValue {
   queue_payload: string;
 }
 
-const parseBatchDeliveryQueuePayload = (queuePayload: string): BatchQueueMessage => {
-  return JSON.parse(queuePayload) as BatchQueueMessage;
+interface BatchDeliveryPromotionInputValue {
+  candidate_id: string;
+  payload_fingerprint: string;
+  work_id: string;
+  additional_work_ids?: string[] | null;
+}
+
+const parseBatchDeliveryQueuePayload = (queuePayload: unknown): BatchQueueMessage => {
+  try {
+    if (typeof queuePayload !== 'string' || queuePayload.length === 0) {
+      throw new Error('Queue payload must be a non-empty string');
+    }
+    const parsedPayload = JSON.parse(queuePayload);
+    if (!parsedPayload || typeof parsedPayload !== 'object' || Array.isArray(parsedPayload)) {
+      throw new Error('Queue payload must be an object');
+    }
+    return parsedPayload as BatchQueueMessage;
+  } catch (cause) {
+    throw FunctionalError('Invalid batch delivery child queue payload', { cause });
+  }
+};
+
+const parseBatchDeliveryChildReservations = (children: unknown): BatchDeliveryChildReservationInput[] => {
+  if (!Array.isArray(children)) {
+    throw FunctionalError('Invalid batch delivery child reservation payload');
+  }
+  return children.map((child, childIndex): BatchDeliveryChildReservationInput => {
+    if (!child || typeof child !== 'object' || Array.isArray(child)) {
+      throw FunctionalError('Invalid batch delivery child reservation payload', { child_index: childIndex });
+    }
+    const childInput = child as BatchDeliveryChildReservationInputValue;
+    return {
+      branchKind: childInput.branch_kind,
+      branchSequence: childInput.branch_sequence,
+      branchOrdinal: childInput.branch_ordinal,
+      queueMessage: parseBatchDeliveryQueuePayload(childInput.queue_payload),
+    };
+  });
+};
+
+const parseBatchDeliveryChildReservationUpload = (payload: string): unknown => {
+  try {
+    return JSON.parse(payload);
+  } catch (cause) {
+    throw FunctionalError('Invalid batch delivery child reservation payload', { cause });
+  }
 };
 
 const batchResolvers = {
@@ -173,10 +220,17 @@ const batchResolvers = {
       _: unknown,
       {
         candidate_id,
-        queue_payload,
-      }: { candidate_id: string; queue_payload: string },
+        payload_fingerprint,
+        work_id,
+        additional_work_ids,
+      }: BatchDeliveryPromotionInputValue,
       context: any,
-    ) => promoteBatchDeliveryCandidateRoot(context, candidate_id, parseBatchDeliveryQueuePayload(queue_payload)),
+    ) => promoteBatchDeliveryCandidateRoot(context, {
+      candidateId: candidate_id,
+      payloadFingerprint: payload_fingerprint,
+      workId: work_id,
+      additionalWorkIds: additional_work_ids,
+    }),
     batchDeliveryReserveChildren: (
       _: unknown,
       {
@@ -184,12 +238,19 @@ const batchResolvers = {
         children,
       }: { parent_delivery_id: string; children: BatchDeliveryChildReservationInputValue[] },
       context: any,
-    ) => reserveBatchDeliveryChildren(context, parent_delivery_id, children.map((child): BatchDeliveryChildReservationInput => ({
-      branchKind: child.branch_kind,
-      branchSequence: child.branch_sequence,
-      branchOrdinal: child.branch_ordinal,
-      queueMessage: parseBatchDeliveryQueuePayload(child.queue_payload),
-    }))),
+    ) => reserveBatchDeliveryChildren(context, parent_delivery_id, parseBatchDeliveryChildReservations(children)),
+    batchDeliveryReserveChildrenUpload: async (
+      _: unknown,
+      {
+        parent_delivery_id,
+        children,
+      }: { parent_delivery_id: string; children: Promise<{ createReadStream: () => Readable }> },
+      context: any,
+    ) => {
+      const { createReadStream } = await children;
+      const uploadedChildren = parseBatchDeliveryChildReservationUpload(await streamConverter(createReadStream()));
+      return reserveBatchDeliveryChildren(context, parent_delivery_id, parseBatchDeliveryChildReservations(uploadedChildren));
+    },
     batchDeliveryMarkChildrenPublished: (
       _: unknown,
       {
@@ -238,7 +299,6 @@ const batchResolvers = {
   },
   BatchDeliveryRootPromotion: {
     delivery_id: (delivery: any) => delivery.internal_id,
-    queue_payload: (delivery: any) => delivery.queue_payload,
   },
   BatchExecutionReceipt: {
     receipt_id: (receipt: any) => receipt.internal_id,

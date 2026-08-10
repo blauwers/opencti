@@ -484,6 +484,7 @@ describe('submitStixBundle', () => {
       'connector-1',
       expect.objectContaining({
         batch_delivery_candidate_id: expect.stringMatching(/^batch-delivery-candidate--/),
+        batch_delivery_candidate_payload_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
         split_bundles: false,
       }),
     );

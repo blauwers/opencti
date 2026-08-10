@@ -156,11 +156,30 @@ BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION = """
                 }
             }
         """
+BATCH_DELIVERY_RESERVE_CHILDREN_UPLOAD_MUTATION = """
+            mutation BatchDeliveryReserveChildrenUpload($parentDeliveryId: ID!, $children: Upload!) {
+                batchDeliveryReserveChildrenUpload(parent_delivery_id: $parentDeliveryId, children: $children) {
+                    parent_delivery_id
+                    handoff_evidence
+                    child_set_fingerprint
+                    child_count
+                    children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                    pending_children {
+                        delivery_id
+                        state
+                        queue_payload
+                    }
+                }
+            }
+        """
 BATCH_DELIVERY_PROMOTE_ROOT_MUTATION = """
-            mutation BatchDeliveryPromoteRoot($candidateId: ID!, $queuePayload: String!) {
-                batchDeliveryPromoteRoot(candidate_id: $candidateId, queue_payload: $queuePayload) {
+            mutation BatchDeliveryPromoteRoot($candidateId: ID!, $payloadFingerprint: String!, $workId: String!, $additionalWorkIds: [String!]) {
+                batchDeliveryPromoteRoot(candidate_id: $candidateId, payload_fingerprint: $payloadFingerprint, work_id: $workId, additional_work_ids: $additionalWorkIds) {
                     delivery_id
-                    queue_payload
                 }
             }
         """
@@ -1340,26 +1359,66 @@ class OpenCTIApiClient:
         children: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Reserve an immutable child set before worker publication."""
+        variables = {
+            "parentDeliveryId": parent_delivery_id,
+            "children": children,
+        }
+        request_payload_size = len(
+            json.dumps(
+                {
+                    "query": BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION,
+                    "variables": variables,
+                }
+            ).encode("utf-8")
+        )
+        use_multipart = (
+            isinstance(self.session_bundle_submission_max_payload_size, int)
+            and not isinstance(self.session_bundle_submission_max_payload_size, bool)
+            and self.session_bundle_submission_max_payload_size > 0
+            and request_payload_size > self.session_bundle_submission_max_payload_size
+        )
+        if use_multipart:
+            self.app_logger.info(
+                "Reserving oversized batch delivery children through multipart API",
+                {
+                    "parent_delivery_id": parent_delivery_id,
+                    "request_payload_size": request_payload_size,
+                    "max_json_payload_size": self.session_bundle_submission_max_payload_size,
+                },
+            )
+            result = self.query(
+                BATCH_DELIVERY_RESERVE_CHILDREN_UPLOAD_MUTATION,
+                {
+                    "parentDeliveryId": parent_delivery_id,
+                    "children": File(
+                        "batch-delivery-children.json",
+                        json.dumps(children),
+                        "application/json",
+                    ),
+                },
+            )
+            return result["data"]["batchDeliveryReserveChildrenUpload"]
         result = self.query(
             BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION,
-            {
-                "parentDeliveryId": parent_delivery_id,
-                "children": children,
-            },
+            variables,
         )
         return result["data"]["batchDeliveryReserveChildren"]
 
     def promote_batch_delivery_root(
         self,
         candidate_id: str,
-        queue_payload: str,
+        payload_fingerprint: str,
+        work_id: str,
+        additional_work_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Promote one candidate-bearing legacy root into durable V2 delivery state."""
+        """Promote one candidate-bearing root into compact durable V2 handoff state."""
         result = self.query(
             BATCH_DELIVERY_PROMOTE_ROOT_MUTATION,
             {
                 "candidateId": candidate_id,
-                "queuePayload": queue_payload,
+                "payloadFingerprint": payload_fingerprint,
+                "workId": work_id,
+                "additionalWorkIds": additional_work_ids,
             },
         )
         return result["data"]["batchDeliveryPromoteRoot"]

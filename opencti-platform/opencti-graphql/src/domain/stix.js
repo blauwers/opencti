@@ -284,6 +284,7 @@ const submitUntrackedBatch = async (context, user, connector, connectorId, workI
     const requiredDeliveryProtocol = await resolveRequiredBatchDeliveryProtocol();
     if (requiredDeliveryProtocol === BatchDeliveryProtocol.V2) {
       admission.deliveryCandidateId = buildBatchDeliveryCandidateId();
+      admission.deliveryCandidatePayloadFingerprint = preparedBundle.payloadFingerprint;
     }
   }
   if (admission.executionMode !== BatchExecutionMode.LegacySplit) {

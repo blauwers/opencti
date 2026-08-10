@@ -265,6 +265,9 @@ export const buildBatchQueueMessage = (
     ...(admission.enrichmentBatchResult ? { enrichment_batch_result: admission.enrichmentBatchResult } : {}),
     ...(admission.additionalWorkIds ? { additional_work_ids: [...admission.additionalWorkIds] } : {}),
     ...(admission.deliveryCandidateId ? { batch_delivery_candidate_id: admission.deliveryCandidateId } : {}),
+    ...(admission.deliveryCandidatePayloadFingerprint
+      ? { batch_delivery_candidate_payload_fingerprint: admission.deliveryCandidatePayloadFingerprint }
+      : {}),
     ...(admission.submissionId ? { submission_id: admission.submissionId } : {}),
     ...(deliveryEnvelope ?? {}),
     batch_plan: {
