@@ -2359,6 +2359,79 @@ def test_import_bundle_batch_splits_bounded_plan_into_sequential_chunks(
     opencti.logger_class.return_value.warning.assert_called_once()
 
 
+def test_import_bundle_batch_splits_execution_group_limit_without_recursive_probes(
+    monkeypatch,
+) -> None:
+    opencti = MagicMock()
+    opencti_stix2 = OpenCTIStix2(opencti)
+    executed_object_ids = []
+
+    @contextmanager
+    def batch_mutation_plan(*args, **kwargs):
+        yield BatchMutationPlan()
+
+    def fake_import_bundle(stix_bundle, *args, **kwargs):
+        batch_plan = kwargs["batch_plan"]
+        imported = []
+        for item in stix_bundle["objects"]:
+            with batch_plan.execution_group(0, item["id"]):
+                batch_plan.capture(
+                    "mutation Record($value: String!) { record(value: $value) }",
+                    {"value": item["id"]},
+                    [],
+                )
+            imported.append({"id": item["id"], "type": item["type"]})
+        return imported, []
+
+    def execute_batch_mutation_plan(plan, **kwargs):
+        object_ids = [operation["object_id"] for operation in plan.operations]
+        executed_object_ids.append(object_ids)
+        if len(object_ids) > 2:
+            raise BatchMutationPlanTooManyExecutionGroups(3, 2)
+        return {"data": {"batchMutationsExecute": {"operation_errors": []}}}
+
+    object_ids = [f"indicator--{index}" for index in range(5)]
+    backend_batch_plan = {
+        "version": 1,
+        "ordered_object_ids": object_ids,
+        "incompatible_object_ids": [],
+        "ignored_object_count": 0,
+        "object_normalizations": [],
+        "execution_phases": [{"phase": 0, "object_ids": object_ids}],
+    }
+    opencti.batch_mutation_plan.side_effect = batch_mutation_plan
+    opencti.execute_batch_mutation_plan.side_effect = execute_batch_mutation_plan
+    monkeypatch.setattr(opencti_stix2, "import_bundle", fake_import_bundle)
+
+    imported, rejected = opencti_stix2.import_bundle_from_json_batch(
+        json.dumps(
+            {
+                "type": "bundle",
+                "id": "bundle--1",
+                "objects": [
+                    {"type": "indicator", "id": object_id} for object_id in object_ids
+                ],
+            }
+        ),
+        report_expectations=False,
+        execution_mode="BULK",
+        wait_until="COMMITTED",
+        backend_batch_plan=backend_batch_plan,
+        split_oversized_batch_plan=True,
+    )
+
+    assert imported == [
+        {"id": object_id, "type": "indicator"} for object_id in object_ids
+    ]
+    assert rejected == []
+    assert executed_object_ids == [
+        object_ids,
+        object_ids[:2],
+        object_ids[2:4],
+        object_ids[4:],
+    ]
+
+
 def test_import_bundle_batch_does_not_split_oversized_direct_delivery_context(
     monkeypatch,
 ) -> None:

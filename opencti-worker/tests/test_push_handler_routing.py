@@ -656,6 +656,48 @@ def test_handler_requeues_durable_batch_chunks_for_bounded_batch_plan(
     assert second_chunk_data["batch_plan"] == batch_chunks[1][1]
 
 
+def test_handler_passes_execution_group_limit_to_oversized_chunk_builder(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooManyExecutionGroups(3, 2)
+    )
+    builder_kwargs = {}
+
+    def build_chunks(*args, **kwargs):
+        builder_kwargs.update(kwargs)
+        return [
+            (
+                {
+                    "type": "bundle",
+                    "id": "bundle--1",
+                    "objects": [{"id": "indicator--1"}],
+                },
+                {"version": 1, "ordered_object_ids": ["indicator--1"]},
+            )
+        ]
+
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2,
+        "build_oversized_batch_plan_chunks",
+        build_chunks,
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(split_bundles=False, batch_plan={"version": 1})
+    )
+
+    assert result == "ack"
+    assert builder_kwargs["max_execution_groups"] == 2
+
+
 def test_handler_extends_all_enrichment_work_expectations_for_oversized_chunks(
     monkeypatch,
 ):

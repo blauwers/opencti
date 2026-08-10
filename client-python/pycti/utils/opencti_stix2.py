@@ -1149,7 +1149,14 @@ class OpenCTIStix2:
     ) -> Tuple[list, list]:
         data = json.loads(json_data)
         chunks = self.build_oversized_batch_plan_chunks(
-            data, cleanup_inconsistent_bundle, backend_batch_plan
+            data,
+            cleanup_inconsistent_bundle,
+            backend_batch_plan,
+            max_execution_groups=(
+                error.max_count
+                if isinstance(error, BatchMutationPlanTooManyExecutionGroups)
+                else None
+            ),
         )
         if chunks is None:
             raise error
@@ -1198,6 +1205,7 @@ class OpenCTIStix2:
         stix_bundle: Dict,
         cleanup_inconsistent_bundle: bool,
         backend_batch_plan: Optional[Dict],
+        max_execution_groups: Optional[int] = None,
     ) -> Optional[List[Tuple[Dict, Dict]]]:
         backend_preparation = cls._prepare_bundle_from_backend_plan(
             stix_bundle, backend_batch_plan
@@ -1214,7 +1222,22 @@ class OpenCTIStix2:
         if len(ordered_elements) <= 1:
             return None
 
-        split_index = len(ordered_elements) // 2
+        if (
+            isinstance(max_execution_groups, int)
+            and not isinstance(max_execution_groups, bool)
+            and max_execution_groups > 0
+            and len(ordered_elements) > max_execution_groups
+        ):
+            chunk_element_groups = [
+                ordered_elements[start_index : start_index + max_execution_groups]
+                for start_index in range(0, len(ordered_elements), max_execution_groups)
+            ]
+        else:
+            split_index = len(ordered_elements) // 2
+            chunk_element_groups = [
+                ordered_elements[:split_index],
+                ordered_elements[split_index:],
+            ]
         return [
             (
                 cls._build_oversized_batch_plan_chunk_bundle(
@@ -1224,10 +1247,7 @@ class OpenCTIStix2:
                     chunk_elements, backend_batch_plan
                 ),
             )
-            for chunk_elements in (
-                ordered_elements[:split_index],
-                ordered_elements[split_index:],
-            )
+            for chunk_elements in chunk_element_groups
         ]
 
     @staticmethod

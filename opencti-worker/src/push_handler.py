@@ -927,6 +927,11 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     content,
                     data.get("cleanup_inconsistent_bundle", False),
                     data.get("batch_plan"),
+                    max_execution_groups=(
+                        error.max_count
+                        if isinstance(error, BatchMutationPlanTooManyExecutionGroups)
+                        else None
+                    ),
                 )
                 if chunks is None:
                     return None
