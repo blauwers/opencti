@@ -588,3 +588,49 @@ def test_enrichment_batch_result_submit_forwards_graphql_variables_and_result():
         "envelope": '{"batch_id":"enrichment-batch--1"}',
         "result": '{"result_count":1}',
     }
+
+
+def test_enrichment_batch_received_submit_forwards_graphql_variables():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    client.query = MagicMock(
+        return_value={"data": {"enrichmentBatchReceivedSubmit": True}}
+    )
+
+    result = client.submit_enrichment_batch_received(
+        "connector--1",
+        '{"batch_id":"enrichment-batch--1"}',
+    )
+
+    assert result is True
+    assert client.query.call_args.args[1] == {
+        "connectorId": "connector--1",
+        "envelope": '{"batch_id":"enrichment-batch--1"}',
+    }
+
+
+def test_enrichment_batch_failure_submit_forwards_graphql_variables():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    client.query = MagicMock(
+        return_value={"data": {"enrichmentBatchFailureSubmit": True}}
+    )
+
+    result = client.submit_enrichment_batch_failure(
+        "connector--1",
+        '{"batch_id":"enrichment-batch--1"}',
+        "callback failed",
+    )
+
+    assert result is True
+    assert client.query.call_args.args[1] == {
+        "connectorId": "connector--1",
+        "envelope": '{"batch_id":"enrichment-batch--1"}',
+        "message": "callback failed",
+    }

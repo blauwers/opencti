@@ -17539,6 +17539,8 @@ export type Mutation = {
   emailTemplateDelete?: Maybe<Scalars['ID']['output']>;
   emailTemplateFieldPatch?: Maybe<EmailTemplate>;
   emailTemplateTestSend?: Maybe<Scalars['Boolean']['output']>;
+  enrichmentBatchFailureSubmit: Scalars['Boolean']['output'];
+  enrichmentBatchReceivedSubmit: Scalars['Boolean']['output'];
   enrichmentBatchResultSubmit: Scalars['Boolean']['output'];
   entitySettingsFieldPatch?: Maybe<Array<Maybe<EntitySetting>>>;
   eventAdd?: Maybe<Event>;
@@ -18647,6 +18649,19 @@ export type MutationEmailTemplateFieldPatchArgs = {
 
 export type MutationEmailTemplateTestSendArgs = {
   id: Scalars['ID']['input'];
+};
+
+
+export type MutationEnrichmentBatchFailureSubmitArgs = {
+  connectorId: Scalars['String']['input'];
+  envelope: Scalars['String']['input'];
+  message: Scalars['String']['input'];
+};
+
+
+export type MutationEnrichmentBatchReceivedSubmitArgs = {
+  connectorId: Scalars['String']['input'];
+  envelope: Scalars['String']['input'];
 };
 
 
@@ -48381,6 +48396,8 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   emailTemplateDelete?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType, RequireFields<MutationEmailTemplateDeleteArgs, 'id'>>;
   emailTemplateFieldPatch?: Resolver<Maybe<ResolversTypes['EmailTemplate']>, ParentType, ContextType, RequireFields<MutationEmailTemplateFieldPatchArgs, 'id' | 'input'>>;
   emailTemplateTestSend?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType, RequireFields<MutationEmailTemplateTestSendArgs, 'id'>>;
+  enrichmentBatchFailureSubmit?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationEnrichmentBatchFailureSubmitArgs, 'connectorId' | 'envelope' | 'message'>>;
+  enrichmentBatchReceivedSubmit?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationEnrichmentBatchReceivedSubmitArgs, 'connectorId' | 'envelope'>>;
   enrichmentBatchResultSubmit?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationEnrichmentBatchResultSubmitArgs, 'connectorId' | 'envelope' | 'result'>>;
   entitySettingsFieldPatch?: Resolver<Maybe<Array<Maybe<ResolversTypes['EntitySetting']>>>, ParentType, ContextType, RequireFields<MutationEntitySettingsFieldPatchArgs, 'ids' | 'input'>>;
   eventAdd?: Resolver<Maybe<ResolversTypes['Event']>, ParentType, ContextType, RequireFields<MutationEventAddArgs, 'input'>>;

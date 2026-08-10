@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BULK_TIMEOUT, elBulk, elFindByIds, elIndex, elLoadById } from '../../../src/database/engine';
-import { redisInitializeWork, redisInitializeWorks } from '../../../src/database/redis';
-import { createWorks } from '../../../src/domain/work';
+import { BULK_TIMEOUT, elBulk, elFindByIds, elIndex, elLoadById, elUpdateWithBufferedApply } from '../../../src/database/engine';
+import {
+  redisGetWorksCompletionState,
+  redisInitializeWork,
+  redisInitializeWorks,
+  redisMarkWorksAsProcessed,
+} from '../../../src/database/redis';
+import { createWorks, updateProcessedTimes, updateReceivedTimes } from '../../../src/domain/work';
 import { INDEX_HISTORY, READ_INDEX_HISTORY } from '../../../src/database/utils';
 import { ENTITY_TYPE_WORK } from '../../../src/schema/internalObject';
 
@@ -13,6 +18,7 @@ vi.mock('../../../src/database/engine', async (importOriginal) => {
     elFindByIds: vi.fn(),
     elIndex: vi.fn(),
     elLoadById: vi.fn(),
+    elUpdateWithBufferedApply: vi.fn(),
   };
 });
 
@@ -22,6 +28,8 @@ vi.mock('../../../src/database/redis', async (importOriginal) => {
     ...actual,
     redisInitializeWork: vi.fn(),
     redisInitializeWorks: vi.fn(),
+    redisGetWorksCompletionState: vi.fn(),
+    redisMarkWorksAsProcessed: vi.fn(),
   };
 });
 
@@ -51,6 +59,22 @@ describe('createWorks', () => {
     }) as never);
     vi.mocked(redisInitializeWork).mockResolvedValue(undefined as never);
     vi.mocked(redisInitializeWorks).mockResolvedValue(undefined as never);
+    vi.mocked(redisGetWorksCompletionState).mockResolvedValue({
+      'work--1': {
+        expected: 0,
+        total: 0,
+        isProcessed: false,
+        isMultiPartWork: false,
+      },
+      'work--2': {
+        expected: 2,
+        total: 1,
+        isProcessed: false,
+        isMultiPartWork: false,
+      },
+    } as never);
+    vi.mocked(redisMarkWorksAsProcessed).mockResolvedValue(undefined as never);
+    vi.mocked(elUpdateWithBufferedApply).mockResolvedValue(undefined as never);
   });
 
   it('bulk indexes and initializes multiple work documents once', async () => {
@@ -124,5 +148,73 @@ describe('createWorks', () => {
     expect(redisInitializeWork).toHaveBeenCalledWith('work--1', false);
     expect(redisInitializeWorks).not.toHaveBeenCalled();
     expect(works.map((work: { id?: string }) => work?.id)).toEqual(['work--1']);
+  });
+
+  it('buffers one received transition per loaded work under one batch execution', async () => {
+    await updateReceivedTimes(context, user, [
+      {
+        work: { _index: INDEX_HISTORY, id: 'work--1', internal_id: 'work--1' },
+        message: 'Connector ready to process the operation',
+      },
+      {
+        work: { _index: INDEX_HISTORY, id: 'work--2', internal_id: 'work--2' },
+        message: 'Connector ready to process the operation',
+      },
+    ]);
+
+    expect(elUpdateWithBufferedApply).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls.map((call) => call[2])).toEqual(['work--1', 'work--2']);
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[0][3]).toMatchObject({
+      script: { params: { message: 'Connector ready to process the operation' } },
+    });
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[1][3]).toMatchObject({
+      script: { params: { message: 'Connector ready to process the operation' } },
+    });
+  });
+
+  it('reads and marks Redis completion state once for one processed batch', async () => {
+    await updateProcessedTimes(context, user, [
+      {
+        work: {
+          _index: INDEX_HISTORY,
+          id: 'work--1',
+          internal_id: 'work--1',
+          event_type: 'OTHER',
+          status: 'progress',
+        },
+        message: 'updated',
+        inError: false,
+      },
+      {
+        work: {
+          _index: INDEX_HISTORY,
+          id: 'work--2',
+          internal_id: 'work--2',
+          event_type: 'OTHER',
+          status: 'progress',
+        },
+        message: 'failed',
+        inError: true,
+      },
+    ]);
+
+    expect(redisGetWorksCompletionState).toHaveBeenCalledWith(['work--1', 'work--2']);
+    expect(redisMarkWorksAsProcessed).toHaveBeenCalledWith(['work--1', 'work--2']);
+    expect(elUpdateWithBufferedApply).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[0][3]).toMatchObject({
+      script: {
+        params: {
+          message: 'updated',
+          completed_number: 1,
+        },
+      },
+    });
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[1][3]).toMatchObject({
+      script: {
+        params: {
+          message: 'failed',
+        },
+      },
+    });
   });
 });

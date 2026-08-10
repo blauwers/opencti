@@ -57,7 +57,6 @@ from pydantic import TypeAdapter
 from pycti.api.opencti_api_client import OpenCTIApiClient
 from pycti.connector.opencti_connector import OpenCTIConnector
 from pycti.connector.opencti_enrichment_batch import (
-    EnrichmentBatchResultStatus,
     build_enrichment_batch_result_envelope,
     enrichment_batch_work_ids,
     has_retryable_enrichment_batch_result,
@@ -1031,19 +1030,31 @@ class ListenQueue(threading.Thread):
             normalized_items.append({**item, **event_data})
         return normalized_items
 
-    @staticmethod
-    def _batch_work_message(result: Dict) -> str:
-        if result["message"]:
-            return result["message"]
-        if result["status"] == EnrichmentBatchResultStatus.UNCHANGED.value:
-            return "No changes produced by connector"
-        return "Connector successfully processed the operation"
-
     def _report_batch_callback_failure(
-        self, work_ids: List[str], error: Exception
+        self,
+        serialized_envelope: str,
+        envelope: Dict,
+        work_ids: List[str],
+        error: Exception,
     ) -> bool:
         if len(work_ids) == 0:
             return False
+        if envelope["group_context"]["connector_id"] == self.helper.connector_id:
+            try:
+                return (
+                    self.helper.api.submit_enrichment_batch_failure(
+                        self.helper.connector_id,
+                        serialized_envelope,
+                        str(error),
+                    )
+                    is True
+                )
+            except Exception:  # pylint: disable=broad-except
+                self.helper.metric.inc("error_count")
+                self.helper.connector_logger.error(
+                    "Failing reporting the enrichment batch failure"
+                )
+                return False
         durable = True
         for work_id in work_ids:
             try:
@@ -1058,6 +1069,9 @@ class ListenQueue(threading.Thread):
         serialized_envelope = json_data["event"]["enrichment_batch"]
         envelope = parse_enrichment_batch_envelope(serialized_envelope)
         work_ids = enrichment_batch_work_ids(envelope)
+        received_submission_attempted = False
+        received_submitted = False
+        result_submission_attempted = False
         result_submitted = False
         try:
             if self.helper.connect_type != "INTERNAL_ENRICHMENT":
@@ -1082,10 +1096,17 @@ class ListenQueue(threading.Thread):
                 group_context.get("shared_organization_ids") or None
             )
             self._set_applicant_id(group_context.get("applicant_id"))
-            for work_id in work_ids:
-                self.helper.api.work.to_received(
-                    work_id, "Connector ready to process the operation"
+            received_submission_attempted = True
+            received_submitted = (
+                self.helper.api.submit_enrichment_batch_received(
+                    self.helper.connector_id,
+                    serialized_envelope,
                 )
+                is True
+            )
+            if not received_submitted:
+                self._set_draft_id("")
+                return False
             batch_data = copy.deepcopy(envelope)
             batch_data["items"] = self._prepare_enrichment_batch_items(
                 envelope["items"]
@@ -1108,6 +1129,7 @@ class ListenQueue(threading.Thread):
             serialized_result = serialize_enrichment_batch_result_envelope(
                 result_envelope
             )
+            result_submission_attempted = True
             result_submitted = (
                 self.helper.api.submit_enrichment_batch_result(
                     self.helper.connector_id,
@@ -1117,13 +1139,8 @@ class ListenQueue(threading.Thread):
                 is True
             )
             if not result_submitted:
-                raise ValueError("Unable to submit enrichment batch result")
-            for result in result_envelope["results"]:
-                self.helper.api.work.to_processed(
-                    result["work_id"],
-                    self._batch_work_message(result),
-                    result["status"] == EnrichmentBatchResultStatus.FAILED.value,
-                )
+                self._set_draft_id("")
+                return False
             self._set_draft_id("")
             return True
         except Exception as err:  # pylint: disable=broad-except
@@ -1132,9 +1149,16 @@ class ListenQueue(threading.Thread):
                 "Error in enrichment batch processing, reporting error to API"
             )
             self._set_draft_id("")
-            if result_submitted:
+            if result_submission_attempted or (
+                received_submission_attempted and not received_submitted
+            ):
                 return False
-            return self._report_batch_callback_failure(work_ids, err)
+            return self._report_batch_callback_failure(
+                serialized_envelope,
+                envelope,
+                work_ids,
+                err,
+            )
 
     def _data_handler(self, json_data: Dict) -> bool:
         request_context = getattr(self.helper, "request_context", None)

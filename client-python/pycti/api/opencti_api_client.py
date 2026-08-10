@@ -208,6 +208,16 @@ ENRICHMENT_BATCH_RESULT_SUBMIT_MUTATION = """
                 enrichmentBatchResultSubmit(connectorId: $connectorId, envelope: $envelope, result: $result)
             }
         """
+ENRICHMENT_BATCH_RECEIVED_SUBMIT_MUTATION = """
+            mutation EnrichmentBatchReceivedSubmit($connectorId: String!, $envelope: String!) {
+                enrichmentBatchReceivedSubmit(connectorId: $connectorId, envelope: $envelope)
+            }
+        """
+ENRICHMENT_BATCH_FAILURE_SUBMIT_MUTATION = """
+            mutation EnrichmentBatchFailureSubmit($connectorId: String!, $envelope: String!, $message: String!) {
+                enrichmentBatchFailureSubmit(connectorId: $connectorId, envelope: $envelope, message: $message)
+            }
+        """
 
 # Global singleton variables for proxy certificate management
 _PROXY_CERT_BUNDLE = None
@@ -1455,6 +1465,40 @@ class OpenCTIApiClient:
             },
         )
         return query_result["data"]["enrichmentBatchResultSubmit"]
+
+    def submit_enrichment_batch_received(
+        self,
+        connector_id: str,
+        envelope: str,
+    ) -> bool:
+        """Mark one logical enrichment batch envelope as received."""
+
+        query_result = self.query(
+            ENRICHMENT_BATCH_RECEIVED_SUBMIT_MUTATION,
+            {
+                "connectorId": connector_id,
+                "envelope": envelope,
+            },
+        )
+        return query_result["data"]["enrichmentBatchReceivedSubmit"]
+
+    def submit_enrichment_batch_failure(
+        self,
+        connector_id: str,
+        envelope: str,
+        message: str,
+    ) -> bool:
+        """Mark one logical enrichment batch envelope as failed."""
+
+        query_result = self.query(
+            ENRICHMENT_BATCH_FAILURE_SUBMIT_MUTATION,
+            {
+                "connectorId": connector_id,
+                "envelope": envelope,
+                "message": message,
+            },
+        )
+        return query_result["data"]["enrichmentBatchFailureSubmit"]
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
         """Get file from the OpenCTI API.

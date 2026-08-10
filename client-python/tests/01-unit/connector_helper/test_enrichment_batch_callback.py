@@ -55,6 +55,8 @@ class _FakeApi:
             "ids": list(entity_ids)
         }
         self.stix2.prepare_simple_exports.side_effect = self._prepare_simple_exports
+        self.submitted_received = []
+        self.submitted_failures = []
         self.submitted_results = []
 
     def _get_reader(self, entity_type):
@@ -92,6 +94,14 @@ class _FakeApi:
 
     def submit_enrichment_batch_result(self, connector_id, envelope, result):
         self.submitted_results.append((connector_id, envelope, result))
+        return True
+
+    def submit_enrichment_batch_received(self, connector_id, envelope):
+        self.submitted_received.append((connector_id, envelope))
+        return True
+
+    def submit_enrichment_batch_failure(self, connector_id, envelope, message):
+        self.submitted_failures.append((connector_id, envelope, message))
         return True
 
 
@@ -184,7 +194,7 @@ def _listen_queue(callback):
     return listen_queue
 
 
-def test_batch_callback_submits_one_result_and_settles_each_work():
+def test_batch_callback_submits_one_received_and_one_terminal_result():
     output_bundle = json.dumps(
         {"type": "bundle", "objects": [{"id": "indicator--result-1"}]}
     )
@@ -216,14 +226,11 @@ def test_batch_callback_submits_one_result_and_settles_each_work():
     listen_queue = _listen_queue(callback)
 
     assert listen_queue._data_handler(_message()) is True
-    assert listen_queue.helper.api.work.received_calls == [
-        ("work--1", "Connector ready to process the operation"),
-        ("work--2", "Connector ready to process the operation"),
+    assert listen_queue.helper.api.submitted_received == [
+        ("connector--1", _message()["event"]["enrichment_batch"])
     ]
-    assert listen_queue.helper.api.work.processed_calls == [
-        ("work--1", "updated", False),
-        ("work--2", "No changes produced by connector", False),
-    ]
+    assert listen_queue.helper.api.work.received_calls == []
+    assert listen_queue.helper.api.work.processed_calls == []
     assert len(listen_queue.helper.api.submitted_results) == 1
     _, _, serialized_result = listen_queue.helper.api.submitted_results[0]
     assert json.loads(serialized_result)["output_object_count"] == 1
@@ -253,6 +260,7 @@ def test_batch_callback_requeues_whole_envelope_for_retryable_item():
     )
 
     assert listen_queue._data_handler(_message()) is False
+    assert len(listen_queue.helper.api.submitted_received) == 1
     assert listen_queue.helper.api.submitted_results == []
     assert listen_queue.helper.api.work.processed_calls == []
 
@@ -268,6 +276,8 @@ def test_batch_callback_rejects_misrouted_connector_envelope_before_callback():
     assert listen_queue._data_handler(message) is True
     callback.assert_not_called()
     assert listen_queue.helper.api.submitted_results == []
+    assert listen_queue.helper.api.submitted_received == []
+    assert listen_queue.helper.api.submitted_failures == []
     assert listen_queue.helper.api.work.received_calls == []
     assert listen_queue.helper.api.work.processed_calls == [
         (
@@ -281,6 +291,44 @@ def test_batch_callback_rejects_misrouted_connector_envelope_before_callback():
             True,
         ),
     ]
+
+
+def test_batch_callback_failure_submits_one_batch_failure():
+    listen_queue = _listen_queue(
+        lambda _batch_data: (_ for _ in ()).throw(RuntimeError("callback failed"))
+    )
+
+    assert listen_queue._data_handler(_message()) is True
+    assert len(listen_queue.helper.api.submitted_received) == 1
+    assert listen_queue.helper.api.submitted_results == []
+    assert listen_queue.helper.api.submitted_failures == [
+        ("connector--1", _message()["event"]["enrichment_batch"], "callback failed")
+    ]
+    assert listen_queue.helper.api.work.processed_calls == []
+
+
+def test_batch_result_submission_failure_requeues_without_marking_failed():
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.api.submit_enrichment_batch_result = MagicMock(
+        return_value=False
+    )
+
+    assert listen_queue._data_handler(_message()) is False
+    assert len(listen_queue.helper.api.submitted_received) == 1
+    assert listen_queue.helper.api.submitted_failures == []
+    assert listen_queue.helper.api.work.processed_calls == []
+
+
+def test_batch_received_submission_failure_requeues_without_marking_failed():
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.api.submit_enrichment_batch_received = MagicMock(
+        return_value=False
+    )
+
+    assert listen_queue._data_handler(_message()) is False
+    assert listen_queue.helper.api.submitted_results == []
+    assert listen_queue.helper.api.submitted_failures == []
+    assert listen_queue.helper.api.work.processed_calls == []
 
 
 def test_batch_callback_prefetches_same_type_entities_and_simple_exports():

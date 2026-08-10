@@ -289,6 +289,8 @@ type Query {
 
 type Mutation {
   stixBundleSubmit(connectorId: String!, bundle: String!, work_id: String, options: BatchSubmitOptionsInput): BatchAdmission! @auth(for: [CONNECTORAPI])
+  enrichmentBatchReceivedSubmit(connectorId: String!, envelope: String!): Boolean! @auth(for: [CONNECTORAPI])
+  enrichmentBatchFailureSubmit(connectorId: String!, envelope: String!, message: String!): Boolean! @auth(for: [CONNECTORAPI])
   enrichmentBatchResultSubmit(connectorId: String!, envelope: String!, result: String!): Boolean! @auth(for: [CONNECTORAPI])
   batchMutationsExecute(operations: [BatchGraphqlOperationInput!]!, options: BatchExecuteOptionsInput): BatchMutationExecution! @auth(for: [CONNECTORAPI])
   batchDeliveryPromoteRoot(candidate_id: ID!, payload_fingerprint: String!, work_id: String!, additional_work_ids: [String!]): BatchDeliveryRootPromotion! @auth(for: [CONNECTORAPI])

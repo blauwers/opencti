@@ -22,10 +22,12 @@ import {
   redisDeleteWorks,
   redisGetWork,
   redisGetWorkCompletionState,
+  redisGetWorksCompletionState,
   redisApplyBatchExpectation,
   redisInitializeWork,
   redisInitializeWorks,
   redisMarkWorkAsProcessed,
+  redisMarkWorksAsProcessed,
   redisUpdateActionExpectation,
   redisUpdateWorkFigures,
 } from '../database/redis';
@@ -40,7 +42,14 @@ import { RELATION_OBJECT_MARKING } from '../schema/stixRefRelationship';
 import { addFilter } from '../utils/filtering/filtering-utils';
 import { now, sinceNowInMinutes } from '../utils/format';
 import { addIngestionObjectsProcessedCount } from '../manager/telemetryManager';
-import { BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import {
+  BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
+  BatchMutationKind,
+  BatchSideEffectKind,
+  executeSingleBatchMutation,
+  isBatchWriteBoundaryOpen,
+  registerBatchSideEffect,
+} from '../modules/batch/batch-executor';
 
 export const workToExportFile = (work) => {
   const lastModifiedSinceMin = sinceNowInMinutes(work.updated_at);
@@ -437,6 +446,98 @@ const countIngestionObjectsProcessed = (work, objectsCount) => {
 const appendWorkEntry = (existing, key, entry) => {
   const entries = Array.isArray(existing[key]) ? existing[key] : [];
   return { ...existing, [key]: [...entries, entry] };
+};
+
+const workIdFromLoadedWork = (work) => work.id ?? work.internal_id;
+
+export const updateReceivedTimes = async (context, _user, workUpdates) => {
+  if (!Array.isArray(workUpdates) || workUpdates.length === 0) {
+    return [];
+  }
+  const receivedTime = now();
+  return executeSingleBatchMutation({
+    kind: BatchMutationKind.UpdateAttribute,
+    executeWrite: async () => {
+      for (const { work, message } of workUpdates) {
+        const workId = workIdFromLoadedWork(work);
+        const params = { received_time: receivedTime, message };
+        let source = 'ctx._source.status = "progress";';
+        source += 'ctx._source["received_time"] = params.received_time;';
+        if (isNotEmptyField(message)) {
+          source += 'ctx._source.messages.add(["timestamp": params.received_time, "message": params.message]); ';
+        }
+        await elUpdateWithBufferedApply(context, work._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+          const updated = {
+            ...existing,
+            status: 'progress',
+            received_time: params.received_time,
+          };
+          return isNotEmptyField(message)
+            ? appendWorkEntry(updated, 'messages', { timestamp: params.received_time, message: params.message })
+            : updated;
+        });
+      }
+      return workUpdates.map(({ work }) => workIdFromLoadedWork(work));
+    },
+  });
+};
+
+export const updateProcessedTimes = async (context, _user, workUpdates) => {
+  if (!Array.isArray(workUpdates) || workUpdates.length === 0) {
+    return [];
+  }
+  const workIds = workUpdates.map(({ work }) => workIdFromLoadedWork(work));
+  const completionStates = await redisGetWorksCompletionState(workIds);
+  await redisMarkWorksAsProcessed(workIds);
+  const processedTime = now();
+  return executeSingleBatchMutation({
+    kind: BatchMutationKind.UpdateAttribute,
+    executeWrite: async () => {
+      for (const { work, message, inError = false } of workUpdates) {
+        const workId = workIdFromLoadedWork(work);
+        const { expected, total } = completionStates[workId];
+        const isComplete = isWorkFinished(expected, total);
+        const params = { processed_time: processedTime, message };
+        let source = 'ctx._source["processed_time"] = params.processed_time;';
+        if (isComplete) {
+          params.completed_number = total && !Number.isNaN(total) ? total : 1;
+          source += `ctx._source['status'] = "complete";
+               ctx._source['import_expected_number'] = params.completed_number;
+               ctx._source['completed_number'] = params.completed_number;
+               ctx._source['completed_time'] = params.processed_time;`;
+          countIngestionObjectsProcessed(work, total);
+        }
+        if (isNotEmptyField(message)) {
+          if (inError) {
+            source += 'ctx._source.errors.add(["timestamp": params.processed_time, "message": params.message]); ';
+          } else {
+            source += 'ctx._source.messages.add(["timestamp": params.processed_time, "message": params.message]); ';
+          }
+        }
+        await elUpdateWithBufferedApply(context, work._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+          let updated = {
+            ...existing,
+            processed_time: params.processed_time,
+          };
+          if (isComplete) {
+            updated = {
+              ...updated,
+              status: 'complete',
+              import_expected_number: params.completed_number,
+              completed_number: params.completed_number,
+              completed_time: params.processed_time,
+            };
+          }
+          if (isNotEmptyField(message)) {
+            const key = inError ? 'errors' : 'messages';
+            updated = appendWorkEntry(updated, key, { timestamp: params.processed_time, message: params.message });
+          }
+          return updated;
+        });
+      }
+      return workIds;
+    },
+  });
 };
 
 export const reportExpectation = async (context, user, workId, errorData) => {

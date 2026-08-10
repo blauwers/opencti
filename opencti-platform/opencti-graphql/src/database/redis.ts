@@ -508,24 +508,54 @@ export const redisDeleteWorks = async (internalIds: Array<string>) => {
 export const redisGetWork = async (internalId: string) => {
   return getClientBase().hgetall(internalId);
 };
+const parseWorkCompletionState = (redisWork: Record<string, string>) => {
+  const {
+    import_processed_number: pn,
+    import_expected_number: en,
+    is_processed,
+    is_multipart,
+  } = redisWork;
+  const total = pn ? parseInt(pn, 10) : 0;
+  const expected = en ? parseInt(en, 10) : 0;
+  const isProcessed = is_processed === 'true';
+  const isMultiPartWork = is_multipart === 'true';
+  return { total, expected, isProcessed, isMultiPartWork };
+};
 export const redisMarkWorkAsProcessed = async (workId: string) => {
   const clientBase = getClientBase();
   await redisTx(clientBase, async (tx) => {
     await updateObjectRaw(tx, workId, { is_processed: true });
   });
 };
+export const redisMarkWorksAsProcessed = async (workIds: string[]) => {
+  if (workIds.length === 0) {
+    return;
+  }
+  await redisTx(getClientBase(), async (tx) => {
+    for (const workId of workIds) {
+      await updateObjectRaw(tx, workId, { is_processed: true });
+    }
+  });
+};
 export const redisGetWorkCompletionState = async (workId: string) => {
-  const {
-    import_processed_number: pn,
-    import_expected_number: en,
-    is_processed,
-    is_multipart,
-  } = await redisGetWork(workId);
-  const total = pn ? parseInt(pn, 10) : 0;
-  const expected = en ? parseInt(en, 10) : 0;
-  const isProcessed = is_processed === 'true';
-  const isMultiPartWork = is_multipart === 'true';
-  return { total, expected, isProcessed, isMultiPartWork };
+  return parseWorkCompletionState(await redisGetWork(workId));
+};
+export const redisGetWorksCompletionState = async (workIds: string[]) => {
+  if (workIds.length === 0) {
+    return {};
+  }
+  const pipeline = getClientBase().pipeline();
+  workIds.forEach((workId) => pipeline.hgetall(workId));
+  const results = await pipeline.exec();
+  if (!results) {
+    throw DatabaseError('Redis pipeline error');
+  }
+  return Object.fromEntries(results.map(([error, value], index) => {
+    if (error) {
+      throw DatabaseError('Redis pipeline error', { cause: error });
+    }
+    return [workIds[index], parseWorkCompletionState((value ?? {}) as Record<string, string>)];
+  }));
 };
 export const redisUpdateWorkFigures = async (workId: string) => {
   const timestamp = now();

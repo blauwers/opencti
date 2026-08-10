@@ -3,6 +3,7 @@ import { elFindByIds } from '../../../../src/database/engine';
 import { storeLoadById } from '../../../../src/database/middleware-loader';
 import { READ_INDEX_HISTORY } from '../../../../src/database/utils';
 import { submitStixBundle } from '../../../../src/domain/stix';
+import { updateProcessedTimes, updateReceivedTimes } from '../../../../src/domain/work';
 import {
   buildEnrichmentBatchEnvelope,
   buildEnrichmentBatchResultEnvelope,
@@ -14,7 +15,11 @@ import {
   serializeEnrichmentBatchResultEnvelope,
   type EnrichmentBatchCandidate,
 } from '../../../../src/modules/enrichment/enrichment-batch-contract';
-import { submitEnrichmentBatchResult } from '../../../../src/modules/enrichment/enrichment-batch-domain';
+import {
+  submitEnrichmentBatchFailure,
+  submitEnrichmentBatchReceived,
+  submitEnrichmentBatchResult,
+} from '../../../../src/modules/enrichment/enrichment-batch-domain';
 import { ENTITY_TYPE_WORK } from '../../../../src/schema/internalObject';
 import type { AuthContext, AuthUser } from '../../../../src/types/user';
 
@@ -28,6 +33,11 @@ vi.mock('../../../../src/database/middleware-loader', () => ({
 
 vi.mock('../../../../src/domain/stix', () => ({
   submitStixBundle: vi.fn(),
+}));
+
+vi.mock('../../../../src/domain/work', () => ({
+  updateProcessedTimes: vi.fn(),
+  updateReceivedTimes: vi.fn(),
 }));
 
 const testContext = {} as AuthContext;
@@ -68,6 +78,35 @@ describe('submitEnrichmentBatchResult', () => {
       }]),
     ) as never);
     vi.mocked(submitStixBundle).mockResolvedValue({ submissionId: 'submission--1' } as never);
+    vi.mocked(updateProcessedTimes).mockResolvedValue([] as never);
+    vi.mocked(updateReceivedTimes).mockResolvedValue([] as never);
+  });
+
+  it('marks one physical envelope received with one batch work transition', async () => {
+    const envelope = buildEnrichmentBatchEnvelope([
+      candidate(),
+      candidate({ workId: 'work--2', entityId: 'indicator--2' }),
+    ], DEFAULT_ENRICHMENT_BATCH_CAPABILITY);
+
+    await submitEnrichmentBatchReceived(
+      testContext,
+      testUser,
+      connector.internal_id,
+      serializeEnrichmentBatchEnvelope(envelope),
+    );
+
+    expect(elFindByIds).toHaveBeenCalledTimes(1);
+    expect(updateReceivedTimes).toHaveBeenCalledTimes(1);
+    expect(updateReceivedTimes).toHaveBeenCalledWith(testContext, testUser, [
+      {
+        work: expect.objectContaining({ internal_id: 'work--1' }),
+        message: 'Connector ready to process the operation',
+      },
+      {
+        work: expect.objectContaining({ internal_id: 'work--2' }),
+        message: 'Connector ready to process the operation',
+      },
+    ]);
   });
 
   it('submits one physical output bundle with idempotent multi-work attribution metadata', async () => {
@@ -125,6 +164,19 @@ describe('submitEnrichmentBatchResult', () => {
       },
     });
     expect(submitOptions.fingerprintContext).not.toHaveProperty('output_bundle');
+    expect(updateProcessedTimes).toHaveBeenCalledTimes(1);
+    expect(updateProcessedTimes).toHaveBeenCalledWith(testContext, testUser, [
+      {
+        work: expect.objectContaining({ internal_id: 'work--1' }),
+        message: 'Connector successfully processed the operation',
+        inError: false,
+      },
+      {
+        work: expect.objectContaining({ internal_id: 'work--2' }),
+        message: 'Connector successfully processed the operation',
+        inError: false,
+      },
+    ]);
   });
 
   it('does not enqueue an import when every item is unchanged or failed', async () => {
@@ -160,6 +212,73 @@ describe('submitEnrichmentBatchResult', () => {
     );
 
     expect(submitStixBundle).not.toHaveBeenCalled();
+    expect(updateProcessedTimes).toHaveBeenCalledWith(testContext, testUser, [
+      {
+        work: expect.objectContaining({ internal_id: 'work--1' }),
+        message: 'No changes produced by connector',
+        inError: false,
+      },
+      {
+        work: expect.objectContaining({ internal_id: 'work--2' }),
+        message: 'deterministic failure',
+        inError: true,
+      },
+    ]);
+  });
+
+  it('marks callback failures with one batch work transition', async () => {
+    const envelope = buildEnrichmentBatchEnvelope([
+      candidate(),
+      candidate({ workId: 'work--2', entityId: 'indicator--2' }),
+    ], DEFAULT_ENRICHMENT_BATCH_CAPABILITY);
+
+    await submitEnrichmentBatchFailure(
+      testContext,
+      testUser,
+      connector.internal_id,
+      serializeEnrichmentBatchEnvelope(envelope),
+      'callback failed',
+    );
+
+    expect(updateProcessedTimes).toHaveBeenCalledTimes(1);
+    expect(updateProcessedTimes).toHaveBeenCalledWith(testContext, testUser, [
+      {
+        work: expect.objectContaining({ internal_id: 'work--1' }),
+        message: 'callback failed',
+        inError: true,
+      },
+      {
+        work: expect.objectContaining({ internal_id: 'work--2' }),
+        message: 'callback failed',
+        inError: true,
+      },
+    ]);
+  });
+
+  it('rejects retryable result submission before terminal settlement', async () => {
+    const envelope = buildEnrichmentBatchEnvelope([candidate()], DEFAULT_ENRICHMENT_BATCH_CAPABILITY);
+    const resultEnvelope = buildEnrichmentBatchResultEnvelope(
+      envelope,
+      [{
+        itemId: envelope.items[0].item_id,
+        workId: envelope.items[0].work_id,
+        status: EnrichmentBatchResultStatus.Retryable,
+        message: 'retry later',
+      }],
+      null,
+      DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
+    );
+
+    await expect(submitEnrichmentBatchResult(
+      testContext,
+      testUser,
+      connector.internal_id,
+      serializeEnrichmentBatchEnvelope(envelope),
+      serializeEnrichmentBatchResultEnvelope(resultEnvelope),
+    )).rejects.toThrow('Retryable enrichment batch results cannot be submitted for terminal settlement');
+
+    expect(submitStixBundle).not.toHaveBeenCalled();
+    expect(updateProcessedTimes).not.toHaveBeenCalled();
   });
 
   it('rejects result attribution to a Work owned by another connector', async () => {
@@ -193,6 +312,26 @@ describe('submitEnrichmentBatchResult', () => {
       connector.internal_id,
       serializeEnrichmentBatchEnvelope(envelope),
       serializeEnrichmentBatchResultEnvelope(resultEnvelope),
-    )).rejects.toThrow('Enrichment batch result references a Work outside the connector partition');
+    )).rejects.toThrow('Enrichment batch lifecycle references a Work outside the connector partition');
+  });
+
+  it('rejects received settlement for a Work owned by another connector', async () => {
+    const envelope = buildEnrichmentBatchEnvelope([candidate()], DEFAULT_ENRICHMENT_BATCH_CAPABILITY);
+    vi.mocked(elFindByIds).mockResolvedValue({
+      'work--1': {
+        id: 'work--1',
+        internal_id: 'work--1',
+        connector_id: 'connector--other',
+      },
+    } as never);
+
+    await expect(submitEnrichmentBatchReceived(
+      testContext,
+      testUser,
+      connector.internal_id,
+      serializeEnrichmentBatchEnvelope(envelope),
+    )).rejects.toThrow('Enrichment batch lifecycle references a Work outside the connector partition');
+
+    expect(updateReceivedTimes).not.toHaveBeenCalled();
   });
 });

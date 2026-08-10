@@ -3,7 +3,11 @@ import type { Readable } from 'node:stream';
 import { FunctionalError } from '../../config/errors';
 import { submitStixBundle } from '../../domain/stix';
 import { streamConverter } from '../../database/file-storage';
-import { submitEnrichmentBatchResult } from '../enrichment/enrichment-batch-domain';
+import {
+  submitEnrichmentBatchFailure,
+  submitEnrichmentBatchReceived,
+  submitEnrichmentBatchResult,
+} from '../enrichment/enrichment-batch-domain';
 import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, promoteBatchDeliveryCandidateRoot, reserveBatchDeliveryChildren } from './batch-delivery-domain';
 import { loadBatchExecutionReconciliation } from './batch-execution-reconciliation-domain';
 import { loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';
@@ -164,6 +168,16 @@ const batchResolvers = {
       splitBundles: options?.split_bundles,
       cleanupInconsistentBundle: options?.cleanup_inconsistent_bundle,
     }),
+    enrichmentBatchReceivedSubmit: (
+      _: unknown,
+      { connectorId, envelope }: { connectorId: string; envelope: string },
+      context: any,
+    ) => submitEnrichmentBatchReceived(context, context.user, connectorId, envelope),
+    enrichmentBatchFailureSubmit: (
+      _: unknown,
+      { connectorId, envelope, message }: { connectorId: string; envelope: string; message: string },
+      context: any,
+    ) => submitEnrichmentBatchFailure(context, context.user, connectorId, envelope, message),
     enrichmentBatchResultSubmit: (
       _: unknown,
       { connectorId, envelope, result }: { connectorId: string; envelope: string; result: string },
