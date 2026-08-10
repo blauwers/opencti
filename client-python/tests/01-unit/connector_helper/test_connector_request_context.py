@@ -15,11 +15,17 @@ class _NoopMetric:
 
 
 class _FakeWork:
+    def __init__(self):
+        self.processed_calls = []
+        self.raise_on_processed = False
+
     def to_received(self, *_args, **_kwargs):
         pass
 
-    def to_processed(self, *_args, **_kwargs):
-        pass
+    def to_processed(self, *args, **kwargs):
+        self.processed_calls.append((args, kwargs))
+        if self.raise_on_processed:
+            raise RuntimeError("processing report failed")
 
 
 class _FakeApi:
@@ -159,3 +165,33 @@ def test_copied_context_does_not_share_helper_mutations():
 
         copied_context.run(mutate_child_context)
         assert helper.work_id == "work-parent"
+
+
+def test_data_handler_treats_reported_callback_failure_as_durable_outcome():
+    helper = _helper()
+    listen_queue = object.__new__(ListenQueue)
+    listen_queue.helper = helper
+    listen_queue.callback = lambda _event_data: (_ for _ in ()).throw(
+        RuntimeError("callback failed")
+    )
+    listen_queue.connector_applicant_id = "connector-applicant"
+
+    assert listen_queue._data_handler(_message("a")) is True
+    assert helper.api.work.processed_calls[-1][0] == (
+        "work-a",
+        "callback failed",
+        True,
+    )
+
+
+def test_data_handler_requeues_when_callback_failure_cannot_be_reported():
+    helper = _helper()
+    helper.api.work.raise_on_processed = True
+    listen_queue = object.__new__(ListenQueue)
+    listen_queue.helper = helper
+    listen_queue.callback = lambda _event_data: (_ for _ in ()).throw(
+        RuntimeError("callback failed")
+    )
+    listen_queue.connector_applicant_id = "connector-applicant"
+
+    assert listen_queue._data_handler(_message("a")) is False

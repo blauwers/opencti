@@ -34,9 +34,11 @@ import threading
 import time
 import uuid
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from enum import Enum
+from functools import partial
 from queue import Queue
 from typing import Callable, Dict, List, Optional, Union
 
@@ -72,6 +74,15 @@ _CONNECTOR_REQUEST_CONTEXT_FIELDS = (
     "enrichment_shared_organizations",
     "applicant_id",
 )
+
+DEFAULT_LISTEN_WORKER_COUNT = 1
+"""Default number of concurrent AMQP callback workers."""
+
+IN_FLIGHT_WORK_PING_INTERVAL_SECONDS = 60 * 5
+"""How often to ping long-running in-flight AMQP work."""
+
+IN_FLIGHT_WORK_PING_POLL_SECONDS = 5
+"""How often to check in-flight AMQP work for keepalive pings."""
 
 app = FastAPI()
 
@@ -482,6 +493,10 @@ class ListenQueue(threading.Thread):
     :type listen_protocol_api_port: int
     :param callback: Function to call when processing messages
     :type callback: Callable[[Dict], str]
+    :param listen_worker_count: Maximum concurrent AMQP callback workers
+    :type listen_worker_count: int
+    :param listen_prefetch_count: Maximum unacked AMQP deliveries held in flight
+    :type listen_prefetch_count: int or None
     """
 
     def __init__(
@@ -496,6 +511,8 @@ class ListenQueue(threading.Thread):
         listen_protocol_api_path: str,
         listen_protocol_api_port: int,
         callback: Callable[[Dict], str],
+        listen_worker_count: int = DEFAULT_LISTEN_WORKER_COUNT,
+        listen_prefetch_count: Optional[int] = None,
     ) -> None:
         """Initialize the ListenQueue thread.
 
@@ -519,6 +536,10 @@ class ListenQueue(threading.Thread):
         :type listen_protocol_api_port: int
         :param callback: Function to process received messages
         :type callback: Callable[[Dict], str]
+        :param listen_worker_count: Maximum concurrent AMQP callback workers
+        :type listen_worker_count: int
+        :param listen_prefetch_count: Maximum unacked AMQP deliveries held in flight
+        :type listen_prefetch_count: int or None
         """
         threading.Thread.__init__(self)
         self.pika_credentials = None
@@ -533,6 +554,12 @@ class ListenQueue(threading.Thread):
         self.listen_protocol_api_ssl = listen_protocol_api_ssl
         self.listen_protocol_api_path = listen_protocol_api_path
         self.listen_protocol_api_port = listen_protocol_api_port
+        self.listen_worker_count = listen_worker_count
+        self.listen_prefetch_count = (
+            listen_worker_count
+            if listen_prefetch_count is None
+            else listen_prefetch_count
+        )
         self.connector_applicant_id = applicant_id
         self.host = connector_config["connection"]["host"]
         self.vhost = connector_config["connection"]["vhost"]
@@ -543,15 +570,180 @@ class ListenQueue(threading.Thread):
         self.connector_jwks = PyJWKSet.from_json(connector_config["connector_jwks"])
         self.queue_name = connector_config["listen"]
         self.exit_event = threading.Event()
-        self.thread = None
+        self._worker_pool = None
+        self._in_flight_messages = {}
+        self._in_flight_lock = threading.Lock()
+        self._ping_timer_id = None
+
+    def _ensure_worker_pool(self) -> ThreadPoolExecutor:
+        if self._worker_pool is None:
+            self._worker_pool = ThreadPoolExecutor(
+                max_workers=self.listen_worker_count,
+                thread_name_prefix="opencti-listen",
+            )
+        return self._worker_pool
+
+    def _shutdown_worker_pool(self) -> None:
+        if self._worker_pool is not None:
+            self._worker_pool.shutdown(wait=True)
+            self._worker_pool = None
+
+    @staticmethod
+    def _message_key(channel, delivery_tag):
+        return id(channel), delivery_tag
+
+    def _remove_in_flight_message(self, message_key):
+        with self._in_flight_lock:
+            return self._in_flight_messages.pop(message_key, None)
+
+    def _has_in_flight_for_connection(self, connection) -> bool:
+        with self._in_flight_lock:
+            return any(
+                message["connection"] is connection
+                for message in self._in_flight_messages.values()
+            )
+
+    def _abandon_in_flight_for_connection(self, connection) -> int:
+        with self._in_flight_lock:
+            message_keys = [
+                message_key
+                for message_key, message in self._in_flight_messages.items()
+                if message["connection"] is connection
+            ]
+            for message_key in message_keys:
+                self._in_flight_messages.pop(message_key, None)
+        return len(message_keys)
+
+    @staticmethod
+    def _is_connection_open(connection) -> bool:
+        return connection is not None and not getattr(connection, "is_closed", False)
+
+    def _schedule_in_flight_ping_check(self, connection=None) -> None:
+        connection = connection or self.pika_connection
+        if (
+            self.exit_event.is_set()
+            or connection is not self.pika_connection
+            or not self._is_connection_open(connection)
+        ):
+            return
+        self._ping_timer_id = connection.call_later(
+            IN_FLIGHT_WORK_PING_POLL_SECONDS,
+            partial(self._ping_in_flight_work, connection),
+        )
+
+    def _cancel_in_flight_ping_check(self, connection) -> None:
+        timer_id = self._ping_timer_id
+        self._ping_timer_id = None
+        if timer_id is None or not self._is_connection_open(connection):
+            return
+        try:
+            connection.remove_timeout(timer_id)
+        except Exception as err:  # pylint: disable=broad-except
+            self.helper.connector_logger.debug(
+                "Unable to cancel in-flight work ping timer",
+                {"reason": str(err)},
+            )
+
+    def _ping_in_flight_work(self, connection) -> None:
+        if connection is not self.pika_connection:
+            return
+        self._ping_timer_id = None
+        now = time.monotonic()
+        work_ids = []
+        with self._in_flight_lock:
+            for message in self._in_flight_messages.values():
+                if message["connection"] is not connection:
+                    continue
+                work_id = message["work_id"]
+                if (
+                    work_id is not None
+                    and now - message["last_ping"]
+                    > IN_FLIGHT_WORK_PING_INTERVAL_SECONDS
+                ):
+                    message["last_ping"] = now
+                    work_ids.append(work_id)
+        for work_id in work_ids:
+            try:
+                self.helper.api.work.ping(work_id)
+            except Exception as err:  # pylint: disable=broad-except
+                self.helper.connector_logger.error(
+                    "Error pinging in-flight work",
+                    {"work_id": work_id, "reason": str(err)},
+                )
+        self._schedule_in_flight_ping_check(connection)
+
+    def _settle_message(
+        self,
+        message_key,
+        channel,
+        delivery_tag,
+        should_ack: bool,
+    ) -> None:
+        if self._remove_in_flight_message(message_key) is None:
+            return
+        if getattr(channel, "is_closed", False):
+            return
+        if should_ack:
+            channel.basic_ack(delivery_tag=delivery_tag)
+            self.helper.connector_logger.info("Message ack", {"tag": delivery_tag})
+        else:
+            channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            self.helper.connector_logger.error(
+                "Message nack",
+                {"tag": delivery_tag, "requeue": True},
+            )
+
+    def _on_message_processed(
+        self,
+        message_key,
+        connection,
+        channel,
+        delivery_tag,
+        future: Future,
+    ) -> None:
+        try:
+            should_ack = future.result() is True
+        except Exception as err:  # pylint: disable=broad-except
+            should_ack = False
+            self.helper.connector_logger.error(
+                "Unhandled error in message processing thread",
+                {"tag": delivery_tag, "reason": str(err)},
+            )
+        try:
+            connection.add_callback_threadsafe(
+                partial(
+                    self._settle_message,
+                    message_key,
+                    channel,
+                    delivery_tag,
+                    should_ack,
+                )
+            )
+        except Exception as err:  # pylint: disable=broad-except
+            self._remove_in_flight_message(message_key)
+            self.helper.connector_logger.error(
+                "Unable to settle message on RabbitMQ connection",
+                {"tag": delivery_tag, "reason": str(err)},
+            )
+
+    def _nack_submission_failure(
+        self, message_key, channel, delivery_tag, reason
+    ) -> None:
+        self._remove_in_flight_message(message_key)
+        if not getattr(channel, "is_closed", False):
+            channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+        self.helper.connector_logger.error(
+            "Unable to submit message for processing",
+            {"tag": delivery_tag, "reason": str(reason)},
+        )
 
     # noinspection PyUnusedLocal
     def _process_message(self, channel, method, properties, body) -> None:
         """Process a message from the RabbitMQ queue.
 
-        Acknowledges the message immediately before processing to prevent
-        infinite re-delivery if the connector fails. Spawns a separate thread
-        for data handling and maintains the connection alive during processing.
+        Submits the callback to a bounded worker pool and keeps the message
+        unacked until processing reaches a durable outcome. Completion handlers
+        schedule ACK/NACK work back onto Pika's connection thread.
 
         :param channel: The RabbitMQ channel instance
         :type channel: pika.channel.Channel
@@ -562,30 +754,44 @@ class ListenQueue(threading.Thread):
         :param body: The message body containing JSON data
         :type body: bytes
         """
-        json_data = json.loads(body)
+        if self.exit_event.is_set():
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            return
+        try:
+            json_data = json.loads(body)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as err:
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            self.helper.connector_logger.error(
+                "Invalid JSON payload, discarding message",
+                {"tag": method.delivery_tag, "reason": str(err)},
+            )
+            return
         work_id = json_data.get("internal", {}).get("work_id")
-        # Message should be ack before processing as we don't own the processing
-        # Not ACK the message here may lead to infinite re-deliver if the connector is broken
-        # Also ACK, will not have any impact on the blocking aspect of the following functions
-        channel.basic_ack(delivery_tag=method.delivery_tag)
-        self.helper.connector_logger.info("Message ack", {"tag": method.delivery_tag})
-
-        self.thread = threading.Thread(target=self._data_handler, args=[json_data])
-        self.thread.start()
-        five_minutes = 60 * 5
-        last_ping = time.monotonic()
-        # Wait for end of execution of the _data_handler
-        # pika_connection.sleep is required to keep servicing the connection I/O
-        # (AMQP heartbeats) while the processing thread is running
-        while self.thread.is_alive():  # Loop while the thread is processing
-            self.pika_connection.sleep(0.05)
-            now = time.monotonic()
-            # Ping every 5 minutes
-            if work_id is not None and now - last_ping > five_minutes:
-                self.helper.api.work.ping(work_id)
-                last_ping = now
+        message_key = self._message_key(channel, method.delivery_tag)
+        with self._in_flight_lock:
+            self._in_flight_messages[message_key] = {
+                "connection": self.pika_connection,
+                "work_id": work_id,
+                "last_ping": time.monotonic(),
+            }
+        try:
+            future = self._ensure_worker_pool().submit(self._data_handler, json_data)
+        except Exception as err:  # pylint: disable=broad-except
+            self._nack_submission_failure(
+                message_key, channel, method.delivery_tag, err
+            )
+            return
+        future.add_done_callback(
+            partial(
+                self._on_message_processed,
+                message_key,
+                self.pika_connection,
+                channel,
+                method.delivery_tag,
+            )
+        )
         self.helper.connector_logger.info(
-            "Message processed, thread terminated",
+            "Message submitted",
             {"tag": method.delivery_tag},
         )
 
@@ -599,13 +805,13 @@ class ListenQueue(threading.Thread):
         self.helper.api.set_draft_id(draft_id)
         self.helper.api_impersonate.set_draft_id(draft_id)
 
-    def _data_handler(self, json_data: Dict) -> None:
+    def _data_handler(self, json_data: Dict) -> bool:
         request_context = getattr(self.helper, "request_context", None)
         context = request_context() if request_context is not None else nullcontext()
         with context:
-            self._data_handler_in_context(json_data)
+            return self._data_handler_in_context(json_data)
 
-    def _data_handler_in_context(self, json_data: Dict) -> None:
+    def _data_handler_in_context(self, json_data: Dict) -> bool:
         """Process incoming message data and execute the callback.
 
         Handles the full message processing workflow including:
@@ -618,6 +824,8 @@ class ListenQueue(threading.Thread):
 
         :param json_data: The parsed JSON message data containing event and internal info
         :type json_data: Dict
+        :return: True when the message reached a durable processed outcome, False otherwise
+        :rtype: bool
         """
         work_id = None
         # Execute the callback
@@ -749,6 +957,7 @@ class ListenQueue(threading.Thread):
             if work_id:
                 self.helper.api.work.to_processed(work_id, message)
             self._set_draft_id("")
+            return True
 
         except Exception as e:  # pylint: disable=broad-except
             self.helper.metric.inc("error_count")
@@ -759,11 +968,13 @@ class ListenQueue(threading.Thread):
             if work_id:
                 try:
                     self.helper.api.work.to_processed(work_id, str(e), True)
+                    return True
                 except Exception:  # pylint: disable=broad-except
                     self.helper.metric.inc("error_count")
                     self.helper.connector_logger.error(
                         "Failing reporting the processing"
                     )
+            return False
 
     def is_token_valid(self, token):
         """
@@ -833,7 +1044,11 @@ class ListenQueue(threading.Thread):
                 content={"error": "Invalid JSON payload"},
             )
         try:
-            self._data_handler(data)
+            if self._data_handler(data) is False:
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "Error processing message"},
+                )
         except Exception as e:
             self.helper.connector_logger.error(
                 "Error processing message", {"cause": str(e)}
@@ -847,6 +1062,99 @@ class ListenQueue(threading.Thread):
             status_code=202, content={"message": "Message successfully received"}
         )
 
+    def _drain_settlement_callbacks(self, connection) -> None:
+        if not self._is_connection_open(connection):
+            self._abandon_in_flight_for_connection(connection)
+            return
+        for _ in range(100):
+            if not self._has_in_flight_for_connection(connection):
+                return
+            try:
+                connection.process_data_events(time_limit=0)
+            except Exception as err:  # pylint: disable=broad-except
+                abandoned = self._abandon_in_flight_for_connection(connection)
+                self.helper.connector_logger.error(
+                    "Unable to process in-flight settlement callbacks",
+                    {"count": abandoned, "reason": str(err)},
+                )
+                return
+        abandoned = self._abandon_in_flight_for_connection(connection)
+        if abandoned > 0:
+            self.helper.connector_logger.error(
+                "Unable to drain in-flight message settlement callbacks",
+                {"count": abandoned},
+            )
+
+    def _close_connection(self, connection) -> None:
+        if not self._is_connection_open(connection):
+            return
+        try:
+            connection.close()
+        except Exception as err:  # pylint: disable=broad-except
+            self.helper.connector_logger.debug(
+                type(err).__name__,
+                {"reason": str(err)},
+            )
+
+    def _run_amqp_listener(self) -> None:
+        self.helper.connector_logger.info("Starting ListenQueue thread")
+        while not self.exit_event.is_set():
+            connection = None
+            try:
+                self.helper.connector_logger.info("ListenQueue connecting to RabbitMQ.")
+                self.pika_credentials = pika.PlainCredentials(self.user, self.password)
+                self.pika_parameters = pika.ConnectionParameters(
+                    heartbeat=10,
+                    blocked_connection_timeout=30,
+                    host=self.host,
+                    port=self.port,
+                    virtual_host=self.vhost,
+                    credentials=self.pika_credentials,
+                    ssl_options=(
+                        pika.SSLOptions(create_mq_ssl_context(self.config), self.host)
+                        if self.use_ssl
+                        else None
+                    ),
+                )
+                connection = pika.BlockingConnection(self.pika_parameters)
+                self.pika_connection = connection
+                self.channel = connection.channel()
+                try:
+                    # confirm_delivery is only for cluster mode RabbitMQ
+                    # when not in cluster mode this line raise an exception
+                    self.channel.confirm_delivery()
+                except Exception as err:  # pylint: disable=broad-except
+                    self.helper.connector_logger.debug(str(err))
+                self.channel.basic_qos(prefetch_count=self.listen_prefetch_count)
+                self.channel.basic_consume(
+                    queue=self.queue_name, on_message_callback=self._process_message
+                )
+                self._schedule_in_flight_ping_check(connection)
+                self.channel.start_consuming()
+            except Exception as err:  # pylint: disable=broad-except
+                self.helper.connector_logger.error(
+                    type(err).__name__, {"reason": str(err)}
+                )
+            finally:
+                self._cancel_in_flight_ping_check(connection)
+                if self.exit_event.is_set() or self._is_connection_open(connection):
+                    self._shutdown_worker_pool()
+                    self._drain_settlement_callbacks(connection)
+                else:
+                    abandoned = self._abandon_in_flight_for_connection(connection)
+                    if abandoned > 0:
+                        self.helper.connector_logger.error(
+                            "Abandoning in-flight messages after AMQP connection loss",
+                            {"count": abandoned},
+                        )
+                    self._shutdown_worker_pool()
+                self._close_connection(connection)
+                if self.pika_connection is connection:
+                    self.pika_connection = None
+                    self.channel = None
+            if not self.exit_event.is_set():
+                time.sleep(10)
+
     def run(self) -> None:
         """Execute the message listening thread.
 
@@ -859,58 +1167,7 @@ class ListenQueue(threading.Thread):
         :raises ValueError: If an unsupported listen protocol is configured
         """
         if self.listen_protocol == "AMQP":
-            self.helper.connector_logger.info("Starting ListenQueue thread")
-            while not self.exit_event.is_set():
-                try:
-                    self.helper.connector_logger.info(
-                        "ListenQueue connecting to RabbitMQ."
-                    )
-                    # Connect the broker
-                    self.pika_credentials = pika.PlainCredentials(
-                        self.user, self.password
-                    )
-                    self.pika_parameters = pika.ConnectionParameters(
-                        heartbeat=10,
-                        blocked_connection_timeout=30,
-                        host=self.host,
-                        port=self.port,
-                        virtual_host=self.vhost,
-                        credentials=self.pika_credentials,
-                        ssl_options=(
-                            pika.SSLOptions(
-                                create_mq_ssl_context(self.config), self.host
-                            )
-                            if self.use_ssl
-                            else None
-                        ),
-                    )
-                    self.pika_connection = pika.BlockingConnection(self.pika_parameters)
-                    self.channel = self.pika_connection.channel()
-                    try:
-                        # confirm_delivery is only for cluster mode RabbitMQ
-                        # when not in cluster mode this line raise an exception
-                        self.channel.confirm_delivery()
-                    except Exception as err:  # pylint: disable=broad-except
-                        self.helper.connector_logger.debug(str(err))
-                    self.channel.basic_qos(prefetch_count=1)
-                    assert self.channel is not None
-                    self.channel.basic_consume(
-                        queue=self.queue_name, on_message_callback=self._process_message
-                    )
-                    self.channel.start_consuming()
-                except Exception as err:  # pylint: disable=broad-except
-                    try:
-                        self.pika_connection.close()
-                    except Exception as errInException:
-                        self.helper.connector_logger.debug(
-                            type(errInException).__name__,
-                            {"reason": str(errInException)},
-                        )
-                    self.helper.connector_logger.error(
-                        type(err).__name__, {"reason": str(err)}
-                    )
-                    # Wait some time and then retry ListenQueue again.
-                    time.sleep(10)
+            self._run_amqp_listener()
         elif self.listen_protocol == "API":
             self.helper.connector_logger.info("Starting Listen HTTP thread")
             app.add_api_route(
@@ -939,14 +1196,23 @@ class ListenQueue(threading.Thread):
     def stop(self):
         """Stop the ListenQueue thread and close connections.
 
-        This method sets the exit event, closes the RabbitMQ connection,
-        and waits for the processing thread to complete.
+        This method sets the exit event and asks the AMQP consumer loop to stop.
+        The listener thread then waits for in-flight callbacks and drains their
+        settlement callbacks before closing the connection.
         """
         self.helper.connector_logger.info("Preparing ListenQueue for clean shutdown")
         self.exit_event.set()
-        self.pika_connection.close()
-        if self.thread:
-            self.thread.join()
+        connection = self.pika_connection
+        if not self._is_connection_open(connection):
+            return
+        try:
+            connection.add_callback_threadsafe(self._stop_consuming)
+        except Exception:  # pylint: disable=broad-except
+            self._close_connection(connection)
+
+    def _stop_consuming(self) -> None:
+        if self.channel is not None and not getattr(self.channel, "is_closed", False):
+            self.channel.stop_consuming()
 
 
 class PingAlive(threading.Thread):
@@ -2199,6 +2465,27 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                 else "http://127.0.0.1:7070"
             ),
         )
+        self.listen_worker_count = get_config_variable(
+            "CONNECTOR_LISTEN_WORKER_COUNT",
+            ["connector", "listen_worker_count"],
+            config,
+            isNumber=True,
+            default=DEFAULT_LISTEN_WORKER_COUNT,
+        )
+        if isinstance(self.listen_worker_count, bool) or self.listen_worker_count <= 0:
+            raise ValueError("CONNECTOR_LISTEN_WORKER_COUNT must be > 0")
+        self.listen_prefetch_count = get_config_variable(
+            "CONNECTOR_LISTEN_PREFETCH_COUNT",
+            ["connector", "listen_prefetch_count"],
+            config,
+            isNumber=True,
+            default=self.listen_worker_count,
+        )
+        if (
+            isinstance(self.listen_prefetch_count, bool)
+            or self.listen_prefetch_count <= 0
+        ):
+            raise ValueError("CONNECTOR_LISTEN_PREFETCH_COUNT must be > 0")
         self.connect_type = get_config_variable(
             "CONNECTOR_TYPE", ["connector", "type"], config
         )
@@ -3305,6 +3592,8 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             self.listen_protocol_api_path,
             self.listen_protocol_api_port,
             message_callback,
+            self.listen_worker_count,
+            self.listen_prefetch_count,
         )
         self.listen_queue.start()
         self.listen_queue.join()
