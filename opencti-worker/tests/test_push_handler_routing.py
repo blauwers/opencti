@@ -3,7 +3,10 @@ import json
 from unittest.mock import MagicMock, call
 
 import pytest
-from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
+from pycti.api.opencti_api_batch import (
+    BatchMutationPlanTooLarge,
+    BatchMutationPlanTooManyExecutionGroups,
+)
 from requests import ConnectionError
 
 from src import push_handler
@@ -23,7 +26,7 @@ from src.push_handler import (
     build_batch_expectation_error,
     build_child_delivery_id,
     build_root_delivery_id,
-    is_batch_payload_too_large_error,
+    is_batch_plan_limit_error,
     parse_batch_delivery_envelope,
     should_add_legacy_default_split_expectations,
     should_dead_letter_rejected_item,
@@ -169,12 +172,14 @@ def test_handler_passes_request_timeouts_to_api_client(monkeypatch):
         requests_timeout=321,
         batch_requests_timeout=4200,
         batch_requests_max_payload_size=123456,
+        batch_requests_max_execution_groups=1024,
         custom_headers="x-test:value",
     )
 
     assert client_kwargs["requests_timeout"] == 321
     assert client_kwargs["batch_requests_timeout"] == 4200
     assert client_kwargs["batch_requests_max_payload_size"] == 123456
+    assert client_kwargs["batch_requests_max_execution_groups"] == 1024
     assert client_kwargs["custom_headers"] == "x-test:value"
 
 
@@ -570,20 +575,28 @@ def test_handler_forwards_v2_direct_delivery_context_to_batch_importer():
     }
 
 
-def test_batch_payload_too_large_detection_handles_typed_and_backend_errors():
-    assert is_batch_payload_too_large_error(BatchMutationPlanTooLarge(2, 1)) is True
+def test_batch_plan_limit_detection_handles_typed_and_backend_errors():
+    assert is_batch_plan_limit_error(BatchMutationPlanTooLarge(2, 1)) is True
     assert (
-        is_batch_payload_too_large_error(ValueError("request entity too large")) is True
+        is_batch_plan_limit_error(BatchMutationPlanTooManyExecutionGroups(2, 1)) is True
     )
-    assert is_batch_payload_too_large_error(ValueError("unrelated")) is False
+    assert is_batch_plan_limit_error(ValueError("request entity too large")) is True
+    assert is_batch_plan_limit_error(ValueError("unrelated")) is False
 
 
-def test_handler_requeues_durable_batch_chunks_for_oversized_batch_plan(monkeypatch):
+@pytest.mark.parametrize(
+    "limit_error",
+    [
+        BatchMutationPlanTooLarge(200, 100),
+        BatchMutationPlanTooManyExecutionGroups(3, 2),
+    ],
+)
+def test_handler_requeues_durable_batch_chunks_for_bounded_batch_plan(
+    monkeypatch, limit_error
+):
     handler = build_handler()
     handler.send_queue_message_to_specific_queue = MagicMock()
-    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
-        BatchMutationPlanTooLarge(200, 100)
-    )
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = limit_error
     batch_chunks = [
         (
             {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},

@@ -11,7 +11,11 @@ import pika
 from pika.adapters.blocking_connection import BlockingChannel
 from pika.exceptions import NackError, UnroutableError
 from pycti import OpenCTIApiClient, OpenCTIStix2, OpenCTIStix2Splitter, __version__
-from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
+from pycti.api.opencti_api_batch import (
+    BatchMutationPlanLimitExceeded,
+    BatchMutationPlanTooLarge,
+    BatchMutationPlanTooManyExecutionGroups,
+)
 from requests import RequestException, Timeout
 
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
@@ -350,8 +354,8 @@ def should_replay_intact_bundle(
     )
 
 
-def is_batch_payload_too_large_error(error: Exception) -> bool:
-    if isinstance(error, BatchMutationPlanTooLarge):
+def is_batch_plan_limit_error(error: Exception) -> bool:
+    if isinstance(error, BatchMutationPlanLimitExceeded):
         return True
     error_message = str(error).lower()
     return (
@@ -380,6 +384,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
     requests_timeout: int = 300
     batch_requests_timeout: Optional[int] = None
     batch_requests_max_payload_size: Optional[int] = None
+    batch_requests_max_execution_groups: Optional[int] = None
     custom_headers: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -394,6 +399,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             batch_requests_timeout=self.batch_requests_timeout,
             provider="worker/" + __version__,
             batch_requests_max_payload_size=self.batch_requests_max_payload_size,
+            batch_requests_max_execution_groups=self.batch_requests_max_execution_groups,
         )
 
     def send_bundle_to_specific_queue(
@@ -847,9 +853,12 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 if isinstance(error, BatchMutationPlanTooLarge):
                     log_context["actual_size"] = error.actual_size
                     log_context["max_size"] = error.max_size
+                elif isinstance(error, BatchMutationPlanTooManyExecutionGroups):
+                    log_context["actual_execution_groups"] = error.actual_count
+                    log_context["max_execution_groups"] = error.max_count
                 self.logger.warning(
                     (
-                        "Splitting oversized batch mutation plan into "
+                        "Splitting bounded batch mutation plan into "
                         "durable child batches"
                     ),
                     log_context,
@@ -987,7 +996,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     except Exception as err:
                         if data.get(
                             "split_bundles"
-                        ) is not True and is_batch_payload_too_large_error(err):
+                        ) is not True and is_batch_plan_limit_error(err):
                             if data.get("split_bundles") is False:
                                 durable_batch_split_result = (
                                     self.split_and_requeue_batch_chunks(
@@ -1006,10 +1015,17 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                             if isinstance(err, BatchMutationPlanTooLarge):
                                 log_context["actual_size"] = err.actual_size
                                 log_context["max_size"] = err.max_size
+                            elif isinstance(
+                                err, BatchMutationPlanTooManyExecutionGroups
+                            ):
+                                log_context["actual_execution_groups"] = (
+                                    err.actual_count
+                                )
+                                log_context["max_execution_groups"] = err.max_count
                             self.logger.warning(
                                 (
                                     "Falling back to split bundle transport for "
-                                    "oversized batch mutation request"
+                                    "bounded batch mutation request"
                                 ),
                                 log_context,
                             )

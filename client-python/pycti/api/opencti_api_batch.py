@@ -16,7 +16,11 @@ class BatchMutationPlanUnsupported(Exception):
     pass
 
 
-class BatchMutationPlanTooLarge(Exception):
+class BatchMutationPlanLimitExceeded(Exception):
+    pass
+
+
+class BatchMutationPlanTooLarge(BatchMutationPlanLimitExceeded):
     def __init__(self, actual_size: int, max_size: int):
         self.actual_size = actual_size
         self.max_size = max_size
@@ -26,12 +30,23 @@ class BatchMutationPlanTooLarge(Exception):
         )
 
 
+class BatchMutationPlanTooManyExecutionGroups(BatchMutationPlanLimitExceeded):
+    def __init__(self, actual_count: int, max_count: int):
+        self.actual_count = actual_count
+        self.max_count = max_count
+        super().__init__(
+            f"Batch mutation request execution groups exceed configured limit "
+            f"({actual_count} > {max_count})"
+        )
+
+
 @dataclass
 class BatchMutationPlan:
     operations: List[Dict[str, Any]] = field(default_factory=list)
     max_serialized_operations_size: Optional[int] = None
     serialized_request_overhead_size: int = 0
     max_serialized_request_size: Optional[int] = None
+    max_execution_groups: Optional[int] = None
     _next_execution_group: int = field(default=0, init=False, repr=False)
     _active_execution_group: Optional[int] = field(default=None, init=False, repr=False)
     _active_execution_phase: Optional[int] = field(default=None, init=False, repr=False)
@@ -96,6 +111,16 @@ class BatchMutationPlan:
             raise ValueError("Batch execution object id must be a non-empty string")
         if self._active_execution_group is not None:
             raise ValueError("A batch execution group is already active")
+        next_execution_group_count = self._next_execution_group + 1
+        if (
+            isinstance(self.max_execution_groups, int)
+            and not isinstance(self.max_execution_groups, bool)
+            and self.max_execution_groups > 0
+            and next_execution_group_count > self.max_execution_groups
+        ):
+            raise BatchMutationPlanTooManyExecutionGroups(
+                next_execution_group_count, self.max_execution_groups
+            )
         self._active_execution_group = self._next_execution_group
         self._active_execution_phase = execution_phase
         self._active_object_id = object_id

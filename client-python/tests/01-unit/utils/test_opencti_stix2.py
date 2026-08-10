@@ -8,12 +8,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pycti.api.opencti_api_client import OpenCTIApiClient
 from pycti.api.opencti_api_batch import (
     BatchMutationPlan,
     BatchMutationPlanTooLarge,
+    BatchMutationPlanTooManyExecutionGroups,
     build_batch_result_token,
 )
+from pycti.api.opencti_api_client import OpenCTIApiClient
 from pycti.utils.opencti_file_utils import BASE64_FILE_MEMORY_THRESHOLD
 from pycti.utils.opencti_stix2 import (
     IMPORT_PREFETCH_BATCH_SIZE,
@@ -2249,8 +2250,15 @@ def test_import_item_with_retries_propagates_batch_plan_size_failures() -> None:
         )
 
 
-def test_import_bundle_batch_splits_oversized_plan_into_sequential_chunks(
-    monkeypatch,
+@pytest.mark.parametrize(
+    "limit_error_factory",
+    [
+        lambda: BatchMutationPlanTooLarge(200, 100),
+        lambda: BatchMutationPlanTooManyExecutionGroups(3, 2),
+    ],
+)
+def test_import_bundle_batch_splits_bounded_plan_into_sequential_chunks(
+    monkeypatch, limit_error_factory
 ) -> None:
     opencti = MagicMock()
     opencti_stix2 = OpenCTIStix2(opencti)
@@ -2279,7 +2287,7 @@ def test_import_bundle_batch_splits_oversized_plan_into_sequential_chunks(
         executed_object_ids.append(object_ids)
         executed_backend_plans.append(kwargs.get("backend_batch_plan"))
         if len(object_ids) > 2:
-            raise BatchMutationPlanTooLarge(200, 100)
+            raise limit_error_factory()
         return {"data": {"batchMutationsExecute": {"operation_errors": []}}}
 
     object_ids = [f"indicator--{index}" for index in range(4)]

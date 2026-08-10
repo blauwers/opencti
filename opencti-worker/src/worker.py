@@ -5,7 +5,7 @@ import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import pika
 import yaml
@@ -48,6 +48,16 @@ BATCH_DELIVERY_PROTOCOL_MAX = 2
 
 def is_priority_connector(connector_priority_group: str) -> bool:
     return connector_priority_group == "REALTIME"
+
+
+def normalize_batch_requests_max_execution_groups(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            "batch_requests_max_execution_groups must be a non-negative integer"
+        )
+    return value if value > 0 else None
 
 
 @dataclass(unsafe_hash=True)
@@ -120,6 +130,18 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
             config,
             True,
             default=None,
+        )
+        self.opencti_api_batch_requests_max_execution_groups = get_config_variable(
+            "OPENCTI_BATCH_REQUESTS_MAX_EXECUTION_GROUPS",
+            ["opencti", "batch_requests_max_execution_groups"],
+            config,
+            True,
+            default=1024,
+        )
+        self.opencti_api_batch_requests_max_execution_groups = (
+            normalize_batch_requests_max_execution_groups(
+                self.opencti_api_batch_requests_max_execution_groups
+            )
         )
         self.opencti_api_custom_headers = get_config_variable(
             "OPENCTI_CUSTOM_HEADERS",
@@ -323,6 +345,7 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
                             requests_timeout=self.opencti_api_requests_timeout,
                             batch_requests_timeout=self.opencti_api_batch_requests_timeout,
                             batch_requests_max_payload_size=self.opencti_api_batch_requests_max_payload_size,
+                            batch_requests_max_execution_groups=self.opencti_api_batch_requests_max_execution_groups,
                             custom_headers=self.opencti_api_custom_headers,
                         )
                         is_realtime = is_priority_connector(

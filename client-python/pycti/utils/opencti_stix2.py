@@ -25,7 +25,9 @@ from typing_extensions import deprecated
 from pycti.api.opencti_api_batch import (
     BATCH_RESULT_TOKEN_PREFIX,
     BatchMutationPlan,
+    BatchMutationPlanLimitExceeded,
     BatchMutationPlanTooLarge,
+    BatchMutationPlanTooManyExecutionGroups,
     BatchMutationPlanUnsupported,
 )
 from pycti.entities.opencti_identity import Identity
@@ -1033,7 +1035,7 @@ class OpenCTIStix2:
                 backend_batch_plan,
                 direct_delivery_context,
             )
-        except BatchMutationPlanTooLarge as error:
+        except BatchMutationPlanLimitExceeded as error:
             if (
                 not split_oversized_batch_plan
                 or report_expectations
@@ -1134,7 +1136,7 @@ class OpenCTIStix2:
     def _import_oversized_batch_plan_chunks(
         self,
         json_data: Union[str, bytes],
-        error: BatchMutationPlanTooLarge,
+        error: BatchMutationPlanLimitExceeded,
         update: bool,
         types: List,
         work_id: str,
@@ -1153,17 +1155,22 @@ class OpenCTIStix2:
             raise error
 
         worker_logger = self.opencti.logger_class("worker")
+        log_context = {
+            "bundle_id": data.get("id"),
+            "object_count": len(data.get("objects", [])),
+            "chunk_object_counts": [
+                len(chunk_bundle["objects"]) for chunk_bundle, _ in chunks
+            ],
+        }
+        if isinstance(error, BatchMutationPlanTooLarge):
+            log_context["actual_size"] = error.actual_size
+            log_context["max_size"] = error.max_size
+        elif isinstance(error, BatchMutationPlanTooManyExecutionGroups):
+            log_context["actual_execution_groups"] = error.actual_count
+            log_context["max_execution_groups"] = error.max_count
         worker_logger.warning(
-            "Splitting oversized batch mutation plan into sequential chunks",
-            {
-                "bundle_id": data.get("id"),
-                "object_count": len(data.get("objects", [])),
-                "chunk_object_counts": [
-                    len(chunk_bundle["objects"]) for chunk_bundle, _ in chunks
-                ],
-                "actual_size": error.actual_size,
-                "max_size": error.max_size,
-            },
+            "Splitting bounded batch mutation plan into sequential chunks",
+            log_context,
         )
         imported_items = []
         rejected_items = []
@@ -5743,7 +5750,7 @@ class OpenCTIStix2:
                 sleep_jitter = round(random.uniform(10, 30), 2)
                 time.sleep(sleep_jitter)
                 processing_count += 1
-            except (BatchMutationPlanTooLarge, BatchMutationPlanUnsupported):
+            except (BatchMutationPlanLimitExceeded, BatchMutationPlanUnsupported):
                 raise
             except Exception as ex:  # pylint: disable=broad-except
                 error = str(ex)

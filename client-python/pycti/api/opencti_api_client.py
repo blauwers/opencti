@@ -388,6 +388,8 @@ class OpenCTIApiClient:
     :type provider: string, optional
     :param batch_requests_max_payload_size: maximum serialized backend batch mutation request size in bytes
     :type batch_requests_max_payload_size: int, optional
+    :param batch_requests_max_execution_groups: maximum captured execution groups per backend batch mutation request
+    :type batch_requests_max_execution_groups: int, optional
     :param bundle_submission_max_payload_size: maximum serialized JSON bundle submission request size in bytes
     :type bundle_submission_max_payload_size: int, optional
     """
@@ -408,6 +410,7 @@ class OpenCTIApiClient:
         batch_requests_timeout: Optional[int] = None,
         provider: Optional[str] = None,
         batch_requests_max_payload_size: Optional[int] = None,
+        batch_requests_max_execution_groups: Optional[int] = None,
         bundle_submission_max_payload_size: Optional[int] = None,
     ):
         """Initialize the OpenCTIApiClient instance.
@@ -440,6 +443,8 @@ class OpenCTIApiClient:
         :type provider: str or None
         :param batch_requests_max_payload_size: maximum serialized backend batch mutation request size in bytes (default: 48 MiB)
         :type batch_requests_max_payload_size: int or None
+        :param batch_requests_max_execution_groups: maximum captured execution groups per backend batch mutation request
+        :type batch_requests_max_execution_groups: int or None
         :param bundle_submission_max_payload_size: maximum serialized JSON bundle submission request size in bytes before multipart admission is used (default: 48 MiB)
         :type bundle_submission_max_payload_size: int or None
 
@@ -497,6 +502,9 @@ class OpenCTIApiClient:
             batch_requests_max_payload_size
             if batch_requests_max_payload_size is not None
             else DEFAULT_BATCH_REQUESTS_MAX_PAYLOAD_SIZE
+        )
+        self.session_batch_requests_max_execution_groups = (
+            batch_requests_max_execution_groups
         )
         self.session_bundle_submission_max_payload_size = (
             bundle_submission_max_payload_size
@@ -1261,6 +1269,7 @@ class OpenCTIApiClient:
             max_serialized_operations_size=max_serialized_operations_size,
             serialized_request_overhead_size=serialized_request_overhead_size,
             max_serialized_request_size=self.session_batch_requests_max_payload_size,
+            max_execution_groups=self.session_batch_requests_max_execution_groups,
         )
         self._batch_mutation_plan = plan
         try:

@@ -1,7 +1,13 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from src import worker as worker_module
-from src.worker import BATCH_DELIVERY_PROTOCOL_MAX, Worker
+from src.worker import (
+    BATCH_DELIVERY_PROTOCOL_MAX,
+    Worker,
+    normalize_batch_requests_max_execution_groups,
+)
 
 
 class OneLoopEvent:
@@ -29,6 +35,7 @@ def build_worker():
     worker.opencti_api_requests_timeout = 300
     worker.opencti_api_batch_requests_timeout = None
     worker.opencti_api_batch_requests_max_payload_size = None
+    worker.opencti_api_batch_requests_max_execution_groups = 1024
     worker.opencti_api_custom_headers = None
     worker.objects_max_refs = 0
     worker.worker_id = "worker-1"
@@ -36,6 +43,32 @@ def build_worker():
     worker.consumers = {}
     worker.api = MagicMock()
     return worker
+
+
+@pytest.mark.parametrize(
+    ("configured_value", "expected_value"),
+    [
+        (None, None),
+        (0, None),
+        (1024, 1024),
+    ],
+)
+def test_worker_normalizes_batch_execution_group_limit(
+    configured_value, expected_value
+):
+    assert (
+        normalize_batch_requests_max_execution_groups(configured_value)
+        == expected_value
+    )
+
+
+@pytest.mark.parametrize("configured_value", [True, False, -1])
+def test_worker_rejects_invalid_batch_execution_group_limit(configured_value):
+    with pytest.raises(
+        ValueError,
+        match="batch_requests_max_execution_groups must be a non-negative integer",
+    ):
+        normalize_batch_requests_max_execution_groups(configured_value)
 
 
 def test_worker_advertises_protocol_capability_before_opening_push_consumers(

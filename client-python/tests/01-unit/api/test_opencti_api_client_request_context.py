@@ -10,6 +10,7 @@ def _client():
         "Content-Type": "application/json",
     }
     client.session_batch_requests_max_payload_size = None
+    client.session_batch_requests_max_execution_groups = None
     return client
 
 

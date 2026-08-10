@@ -508,6 +508,7 @@ Can be configured manually using the configuration file `config.yml` or through 
 | opencti:token                  | OPENCTI_TOKEN                  |               | A token of an administrator account with bypass capability |
 | opencti:batch_requests_timeout | OPENCTI_BATCH_REQUESTS_TIMEOUT | 3600          | Timeout for backend batch mutation requests, in seconds    |
 | opencti:batch_requests_max_payload_size | OPENCTI_BATCH_REQUESTS_MAX_PAYLOAD_SIZE | 50331648 | Maximum serialized backend batch mutation request size, in bytes, before the worker falls back to split transport |
+| opencti:batch_requests_max_execution_groups | OPENCTI_BATCH_REQUESTS_MAX_EXECUTION_GROUPS | 1024 | Maximum captured execution groups per backend batch mutation request before the worker falls back to split transport; set to `0` to disable |
 | -                              | -                              | -             | -                                                          |
 | mq:use_ssl                     | /                              | /             | Depending of the API configuration (fetch from API)        |
 | mq:use_ssl_ca                  | MQ_USE_SSL_CA                  |               | Path or ca content                                         |

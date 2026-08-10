@@ -5,6 +5,7 @@ opencti:
   json_logging: true
   batch_requests_timeout: 3600
   batch_requests_max_payload_size: 50331648
+  batch_requests_max_execution_groups: 1024 # Set to 0 to disable the execution-group bound
 
 worker:
   log_level: 'info'

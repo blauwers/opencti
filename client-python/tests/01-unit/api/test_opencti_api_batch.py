@@ -6,6 +6,7 @@ import pytest
 from pycti.api.opencti_api_batch import (
     BatchMutationPlan,
     BatchMutationPlanTooLarge,
+    BatchMutationPlanTooManyExecutionGroups,
     build_batch_result_token,
 )
 from pycti.api.opencti_api_client import (
@@ -144,6 +145,31 @@ def test_batch_mutation_plan_tags_operations_with_execution_group_metadata():
         (0, 2, "indicator--1"),
         (1, 3, "relationship--1"),
     ]
+
+
+def test_batch_mutation_plan_stops_before_execution_group_limit_is_exceeded():
+    plan = BatchMutationPlan(max_execution_groups=2)
+
+    with plan.execution_group(0, "indicator--1"):
+        plan.capture(
+            "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+            {"input": {"stix_id": "indicator--1"}},
+            [],
+        )
+    with plan.execution_group(0, "indicator--2"):
+        plan.capture(
+            "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+            {"input": {"stix_id": "indicator--2"}},
+            [],
+        )
+
+    with pytest.raises(BatchMutationPlanTooManyExecutionGroups) as raised:
+        with plan.execution_group(0, "indicator--3"):
+            pass
+
+    assert raised.value.actual_count == 3
+    assert raised.value.max_count == 2
+    assert len(plan.operations) == 2
 
 
 def test_batch_mutation_plan_uses_batch_specific_request_timeout():
@@ -339,6 +365,26 @@ def test_batch_mutation_plan_reserves_request_envelope_before_capture():
     ) as plan:
         with pytest.raises(BatchMutationPlanTooLarge):
             plan.capture(query, variables, [])
+
+
+def test_batch_mutation_plan_applies_client_execution_group_limit():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        batch_requests_max_execution_groups=1,
+    )
+
+    with client.batch_mutation_plan() as plan:
+        with plan.execution_group(0, "indicator--1"):
+            plan.capture(
+                "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+                {"input": {"stix_id": "indicator--1"}},
+                [],
+            )
+        with pytest.raises(BatchMutationPlanTooManyExecutionGroups):
+            with plan.execution_group(0, "indicator--2"):
+                pass
 
 
 def test_send_bundle_to_api_uses_json_admission_below_payload_threshold():
