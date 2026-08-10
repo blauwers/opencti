@@ -2624,6 +2624,35 @@ def test_prepare_export_simple_paginates_nested_ref_relationships():
     ]
 
 
+def test_prepare_simple_exports_prefetches_nested_ref_relationships_across_roots():
+    helper = _full_helper([])
+    nested_ref_relationships = _CountingNestedRefRelationshipCollection(
+        {
+            "root-1": [_nested_ref_relationship("nested-ref--1", "root-1", "target-1")],
+            "root-2": [_nested_ref_relationship("nested-ref--2", "root-2", "target-2")],
+        }
+    )
+    helper.opencti.stix_nested_ref_relationship = nested_ref_relationships
+
+    results = helper.prepare_simple_exports(_root_entities(2))
+
+    assert nested_ref_relationships.kwargs == [
+        {
+            "filters": {
+                "mode": "and",
+                "filters": [{"key": "fromId", "values": ["root-1", "root-2"]}],
+                "filterGroups": [],
+            },
+            "first": EXPORT_PREFETCH_BATCH_SIZE,
+            "getAll": True,
+        }
+    ]
+    assert [result[-1]["sample_refs"] for result in results] == [
+        ["malware--target-1"],
+        ["malware--target-2"],
+    ]
+
+
 def test_export_selected_simple_prefetches_nested_ref_relationships_across_roots():
     helper = _full_helper([])
     nested_ref_relationships = _CountingNestedRefRelationshipCollection(

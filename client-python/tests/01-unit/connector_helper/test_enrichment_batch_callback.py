@@ -1,10 +1,14 @@
 import json
-from unittest.mock import MagicMock
+from copy import deepcopy
+from unittest.mock import MagicMock, call
 
 from pycti.connector.opencti_connector_helper import ListenQueue, OpenCTIConnectorHelper
 
 
 class _NoopLogger:
+    def debug(self, *_args, **_kwargs):
+        pass
+
     def error(self, *_args, **_kwargs):
         pass
 
@@ -26,21 +30,59 @@ class _FakeWork:
         self.processed_calls.append(args)
 
 
+def _opencti_entity(entity_id, entity_type="Indicator"):
+    return {
+        "id": f"internal--{entity_id}",
+        "standard_id": entity_id,
+        "entity_type": entity_type,
+        "parent_types": [entity_type],
+    }
+
+
 class _FakeApi:
     def __init__(self):
         self.work = _FakeWork()
         self.stix2 = MagicMock()
-        self.stix2.get_reader.return_value = MagicMock(
-            side_effect=lambda id, withFiles: {
-                "standard_id": id,
-                "entity_type": "Indicator",
-            }
-        )
-        self.stix2.generate_export.side_effect = lambda entity: entity
-        self.stix2.prepare_export.side_effect = lambda entity: [
-            {"id": entity["standard_id"], "type": "indicator"}
-        ]
+        self._entities = {
+            ("Indicator", "indicator--1"): _opencti_entity("indicator--1"),
+            ("Indicator", "indicator--2"): _opencti_entity("indicator--2"),
+        }
+        self._readers = {}
+        self._listers = {}
+        self.stix2.get_reader.side_effect = self._get_reader
+        self.stix2.get_lister.side_effect = self._get_lister
+        self.stix2.prepare_id_filters_export.side_effect = lambda entity_ids: {
+            "ids": list(entity_ids)
+        }
+        self.stix2.prepare_simple_exports.side_effect = self._prepare_simple_exports
         self.submitted_results = []
+
+    def _get_reader(self, entity_type):
+        if entity_type not in self._readers:
+            self._readers[entity_type] = MagicMock(
+                side_effect=lambda id, withFiles, resolved_type=entity_type: deepcopy(
+                    self._entities.get((resolved_type, id))
+                )
+            )
+        return self._readers[entity_type]
+
+    def _get_lister(self, entity_type):
+        if entity_type not in self._listers:
+            self._listers[entity_type] = MagicMock(
+                side_effect=lambda filters, first, getAll, withFiles, resolved_type=entity_type: [
+                    deepcopy(self._entities[(resolved_type, entity_id)])
+                    for entity_id in filters["ids"]
+                    if (resolved_type, entity_id) in self._entities
+                ]
+            )
+        return self._listers[entity_type]
+
+    @staticmethod
+    def _prepare_simple_exports(entities):
+        return [
+            [{"id": entity["standard_id"], "type": entity["entity_type"].lower()}]
+            for entity in entities
+        ]
 
     def set_draft_id(self, _draft_id):
         pass
@@ -114,6 +156,22 @@ def _message():
     return {
         "event": {"enrichment_batch": json.dumps(envelope)},
         "internal": {"work_id": None, "draft_id": None, "applicant_id": None},
+    }
+
+
+def _unchanged_result(batch_data):
+    return {
+        "output_bundle": None,
+        "results": [
+            {
+                "item_id": item["item_id"],
+                "work_id": item["work_id"],
+                "status": "UNCHANGED",
+                "message": None,
+                "output_object_ids": [],
+            }
+            for item in batch_data["items"]
+        ],
     }
 
 
@@ -222,4 +280,132 @@ def test_batch_callback_rejects_misrouted_connector_envelope_before_callback():
             "Enrichment batch envelope does not belong to this connector",
             True,
         ),
+    ]
+
+
+def test_batch_callback_prefetches_same_type_entities_and_simple_exports():
+    captured_items = []
+    listen_queue = _listen_queue(
+        lambda batch_data: captured_items.extend(batch_data["items"])
+        or _unchanged_result(batch_data)
+    )
+
+    assert listen_queue._data_handler(_message()) is True
+
+    indicator_lister = listen_queue.helper.api._listers["Indicator"]
+    indicator_lister.assert_called_once_with(
+        filters={"ids": ["indicator--1", "indicator--2"]},
+        first=2,
+        getAll=True,
+        withFiles=True,
+    )
+    assert listen_queue.helper.api._readers == {}
+    listen_queue.helper.api.stix2.prepare_simple_exports.assert_called_once()
+    assert [item["stix_entity"]["id"] for item in captured_items] == [
+        "indicator--1",
+        "indicator--2",
+    ]
+
+
+def test_batch_callback_reuses_duplicate_entity_lookup_without_sharing_items():
+    message = _message()
+    envelope = json.loads(message["event"]["enrichment_batch"])
+    envelope["items"][1]["entity_id"] = "indicator--1"
+    message["event"]["enrichment_batch"] = json.dumps(envelope)
+
+    def callback(batch_data):
+        first_item, second_item = batch_data["items"]
+        first_item["enrichment_entity"]["mutated"] = True
+        first_item["stix_objects"][0]["mutated"] = True
+        assert "mutated" not in second_item["enrichment_entity"]
+        assert "mutated" not in second_item["stix_objects"][0]
+        return _unchanged_result(batch_data)
+
+    listen_queue = _listen_queue(callback)
+
+    assert listen_queue._data_handler(message) is True
+
+    indicator_reader = listen_queue.helper.api._readers["Indicator"]
+    indicator_reader.assert_called_once_with(id="indicator--1", withFiles=True)
+    listen_queue.helper.api.stix2.prepare_simple_exports.assert_called_once()
+    prepared_entities = (
+        listen_queue.helper.api.stix2.prepare_simple_exports.call_args.args[0]
+    )
+    assert [entity["standard_id"] for entity in prepared_entities] == ["indicator--1"]
+
+
+def test_batch_callback_groups_supported_types_and_falls_back_for_unlisted_types():
+    message = _message()
+    envelope = json.loads(message["event"]["enrichment_batch"])
+    envelope["items"].append(
+        {
+            "item_id": "item--3",
+            "work_id": "work--3",
+            "entity_id": "report--1",
+            "entity_type": "Report",
+            "payload_fingerprint": "payload--3",
+            "stix_entity": None,
+            "stix_objects": None,
+        }
+    )
+    envelope["item_count"] = 3
+    message["event"]["enrichment_batch"] = json.dumps(envelope)
+
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.api._entities[("Report", "report--1")] = _opencti_entity(
+        "report--1", "Report"
+    )
+    original_get_lister = listen_queue.helper.api.stix2.get_lister.side_effect
+    listen_queue.helper.api.stix2.get_lister.side_effect = lambda entity_type: (
+        None if entity_type == "Report" else original_get_lister(entity_type)
+    )
+
+    assert listen_queue._data_handler(message) is True
+
+    listen_queue.helper.api._listers["Indicator"].assert_called_once()
+    listen_queue.helper.api._readers["Report"].assert_called_once_with(
+        id="report--1", withFiles=True
+    )
+
+
+def test_batch_callback_falls_back_to_reads_when_group_listing_fails():
+    listen_queue = _listen_queue(_unchanged_result)
+    indicator_lister = listen_queue.helper.api._get_lister("Indicator")
+    indicator_lister.side_effect = RuntimeError("temporary list failure")
+
+    assert listen_queue._data_handler(_message()) is True
+
+    indicator_reader = listen_queue.helper.api._readers["Indicator"]
+    assert indicator_reader.call_args_list == [
+        call(id="indicator--1", withFiles=True),
+        call(id="indicator--2", withFiles=True),
+    ]
+
+
+def test_batch_callback_keeps_provided_stix_payloads_without_exporting():
+    message = _message()
+    envelope = json.loads(message["event"]["enrichment_batch"])
+    for item in envelope["items"]:
+        item["stix_entity"] = json.dumps({"id": item["entity_id"], "type": "indicator"})
+        item["stix_objects"] = json.dumps(
+            {
+                "type": "bundle",
+                "objects": [{"id": item["entity_id"], "type": "indicator"}],
+            }
+        )
+    envelope["group_context"]["resolution"] = "stix_bundle"
+    envelope["object_count"] = 2
+    message["event"]["enrichment_batch"] = json.dumps(envelope)
+
+    captured_items = []
+    listen_queue = _listen_queue(
+        lambda batch_data: captured_items.extend(batch_data["items"])
+        or _unchanged_result(batch_data)
+    )
+
+    assert listen_queue._data_handler(message) is True
+    listen_queue.helper.api.stix2.prepare_simple_exports.assert_not_called()
+    assert [item["stix_entity"]["id"] for item in captured_items] == [
+        "indicator--1",
+        "indicator--2",
     ]

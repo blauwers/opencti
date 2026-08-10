@@ -92,6 +92,9 @@ IN_FLIGHT_WORK_PING_INTERVAL_SECONDS = 60 * 5
 IN_FLIGHT_WORK_PING_POLL_SECONDS = 5
 """How often to check in-flight AMQP work for keepalive pings."""
 
+ENRICHMENT_BATCH_ENTITY_PREFETCH_SIZE = 1000
+"""Maximum number of entity ids resolved through one enrichment batch query."""
+
 app = FastAPI()
 
 
@@ -863,45 +866,170 @@ class ListenQueue(threading.Thread):
             return payload
         return json.loads(payload)
 
-    def _prepare_enrichment_batch_item(self, item: Dict) -> Dict:
-        event_data = {
-            "entity_id": item["entity_id"],
-            "entity_type": item["entity_type"],
-            "stix_entity": self._deserialize_event_payload(item.get("stix_entity")),
-            "stix_objects": self._deserialize_event_payload(item.get("stix_objects")),
-            "enrichment_batch_item_id": item["item_id"],
-            "enrichment_batch_work_id": item["work_id"],
-        }
-        do_read = self.helper.api.stix2.get_reader(
-            event_data["entity_type"]
-            if event_data["entity_type"] is not None
-            else "Stix-Core-Object"
-        )
-        opencti_entity = do_read(id=event_data["entity_id"], withFiles=True)
-        if opencti_entity is None:
-            raise ValueError(
-                "Unable to read/access the entity, please check the connector permissions"
+    @staticmethod
+    def _enrichment_batch_entity_identifiers(entity: Dict) -> set:
+        identifiers = set()
+        for key in ("id", "internal_id", "standard_id", "x_opencti_id"):
+            value = entity.get(key)
+            if isinstance(value, str) and len(value) > 0:
+                identifiers.add(value)
+        stix_ids = entity.get("x_opencti_stix_ids")
+        if isinstance(stix_ids, list):
+            identifiers.update(
+                value for value in stix_ids if isinstance(value, str) and len(value) > 0
             )
-        event_data["enrichment_entity"] = opencti_entity
-        stix_objects = event_data["stix_objects"]
-        stix_entity = event_data["stix_entity"]
-        if stix_objects is None and stix_entity is None:
-            stix_objects = self.helper.api.stix2.prepare_export(
-                entity=self.helper.api.stix2.generate_export(copy.copy(opencti_entity))
+        return identifiers
+
+    def _read_enrichment_batch_entity(
+        self, entity_type: str, entity_id: str
+    ) -> Optional[Dict]:
+        do_read = self.helper.api.stix2.get_reader(entity_type)
+        return do_read(id=entity_id, withFiles=True)
+
+    def _list_enrichment_batch_entities(
+        self, entity_type: str, entity_ids: List[str]
+    ) -> Dict[str, Dict]:
+        if len(entity_ids) <= 1:
+            return {}
+        do_list = self.helper.api.stix2.get_lister(entity_type)
+        if do_list is None:
+            return {}
+
+        entities_by_requested_id = {}
+        try:
+            for start_index in range(
+                0, len(entity_ids), ENRICHMENT_BATCH_ENTITY_PREFETCH_SIZE
+            ):
+                batch_entity_ids = entity_ids[
+                    start_index : start_index + ENRICHMENT_BATCH_ENTITY_PREFETCH_SIZE
+                ]
+                query_filters = self.helper.api.stix2.prepare_id_filters_export(
+                    batch_entity_ids
+                )
+                entities = (
+                    do_list(
+                        filters=query_filters,
+                        first=len(batch_entity_ids),
+                        getAll=True,
+                        withFiles=True,
+                    )
+                    or []
+                )
+                batch_entity_ids_set = set(batch_entity_ids)
+                for entity in entities:
+                    if not isinstance(entity, dict):
+                        continue
+                    for identifier in self._enrichment_batch_entity_identifiers(entity):
+                        if identifier in batch_entity_ids_set:
+                            entities_by_requested_id[identifier] = entity
+        except Exception as err:  # pylint: disable=broad-except
+            self.helper.connector_logger.debug(
+                "Enrichment batch entity prefetch failed, falling back to individual reads",
+                {
+                    "entity_type": entity_type,
+                    "entity_count": len(entity_ids),
+                    "error": str(err),
+                },
             )
-            stix_entity = [
-                entity
-                for entity in stix_objects
-                if entity["id"] == opencti_entity["standard_id"]
-                or entity["id"] == "x-opencti-" + opencti_entity["standard_id"]
-            ][0]
-        elif stix_objects is None:
-            stix_objects = [stix_entity]
-        elif isinstance(stix_objects, dict) and stix_objects.get("type") == "bundle":
-            stix_objects = stix_objects.get("objects", [])
-        event_data["stix_objects"] = stix_objects
-        event_data["stix_entity"] = stix_entity
-        return event_data
+            return {}
+        return entities_by_requested_id
+
+    def _resolve_enrichment_batch_entities(self, items: List[Dict]) -> Dict:
+        entity_ids_by_type = {}
+        for item in items:
+            entity_type = item["entity_type"] or "Stix-Core-Object"
+            entity_ids = entity_ids_by_type.setdefault(entity_type, [])
+            if item["entity_id"] not in entity_ids:
+                entity_ids.append(item["entity_id"])
+
+        entities_by_key = {}
+        for entity_type, entity_ids in entity_ids_by_type.items():
+            prefetched_entities = self._list_enrichment_batch_entities(
+                entity_type, entity_ids
+            )
+            for entity_id in entity_ids:
+                opencti_entity = prefetched_entities.get(entity_id)
+                if opencti_entity is None:
+                    opencti_entity = self._read_enrichment_batch_entity(
+                        entity_type, entity_id
+                    )
+                if opencti_entity is None:
+                    raise ValueError(
+                        "Unable to read/access the entity, please check the connector permissions"
+                    )
+                entities_by_key[(entity_type, entity_id)] = opencti_entity
+        return entities_by_key
+
+    @staticmethod
+    def _find_enrichment_batch_stix_entity(
+        stix_objects: List[Dict], opencti_entity: Dict
+    ) -> Dict:
+        standard_id = opencti_entity["standard_id"]
+        for entity in stix_objects:
+            if (
+                entity.get("id") == standard_id
+                or entity.get("id") == "x-opencti-" + standard_id
+            ):
+                return entity
+        raise ValueError("Unable to resolve the enrichment STIX entity")
+
+    def _prepare_enrichment_batch_items(self, items: List[Dict]) -> List[Dict]:
+        resolved_entities = self._resolve_enrichment_batch_entities(items)
+        prepared_items = []
+        deferred_entities_by_key = {}
+
+        for item in items:
+            entity_type = item["entity_type"] or "Stix-Core-Object"
+            entity_key = (entity_type, item["entity_id"])
+            event_data = {
+                "entity_id": item["entity_id"],
+                "entity_type": item["entity_type"],
+                "stix_entity": self._deserialize_event_payload(item.get("stix_entity")),
+                "stix_objects": self._deserialize_event_payload(
+                    item.get("stix_objects")
+                ),
+                "enrichment_batch_item_id": item["item_id"],
+                "enrichment_batch_work_id": item["work_id"],
+                "enrichment_entity": copy.deepcopy(resolved_entities[entity_key]),
+            }
+            if event_data["stix_objects"] is None and event_data["stix_entity"] is None:
+                deferred_entities_by_key.setdefault(
+                    entity_key, resolved_entities[entity_key]
+                )
+            prepared_items.append((item, entity_key, event_data))
+
+        prepared_exports_by_key = {}
+        if len(deferred_entities_by_key) > 0:
+            deferred_entity_keys = list(deferred_entities_by_key.keys())
+            prepared_exports = self.helper.api.stix2.prepare_simple_exports(
+                [
+                    deferred_entities_by_key[entity_key]
+                    for entity_key in deferred_entity_keys
+                ]
+            )
+            if len(prepared_exports) != len(deferred_entity_keys):
+                raise ValueError("Unable to prepare the enrichment STIX payloads")
+            prepared_exports_by_key = dict(zip(deferred_entity_keys, prepared_exports))
+
+        normalized_items = []
+        for item, entity_key, event_data in prepared_items:
+            stix_objects = event_data["stix_objects"]
+            stix_entity = event_data["stix_entity"]
+            if stix_objects is None and stix_entity is None:
+                stix_objects = copy.deepcopy(prepared_exports_by_key[entity_key])
+                stix_entity = self._find_enrichment_batch_stix_entity(
+                    stix_objects, event_data["enrichment_entity"]
+                )
+            elif stix_objects is None:
+                stix_objects = [stix_entity]
+            elif (
+                isinstance(stix_objects, dict) and stix_objects.get("type") == "bundle"
+            ):
+                stix_objects = stix_objects.get("objects", [])
+            event_data["stix_objects"] = stix_objects
+            event_data["stix_entity"] = stix_entity
+            normalized_items.append({**item, **event_data})
+        return normalized_items
 
     @staticmethod
     def _batch_work_message(result: Dict) -> str:
@@ -959,13 +1087,9 @@ class ListenQueue(threading.Thread):
                     work_id, "Connector ready to process the operation"
                 )
             batch_data = copy.deepcopy(envelope)
-            batch_data["items"] = [
-                {
-                    **item,
-                    **self._prepare_enrichment_batch_item(item),
-                }
-                for item in envelope["items"]
-            ]
+            batch_data["items"] = self._prepare_enrichment_batch_items(
+                envelope["items"]
+            )
             if group_context.get("configuration") is not None:
                 batch_data["configuration"] = group_context["configuration"]
             callback_result = self.enrichment_batch_callback(batch_data)

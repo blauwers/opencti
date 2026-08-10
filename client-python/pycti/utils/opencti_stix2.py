@@ -4092,6 +4092,47 @@ class OpenCTIStix2:
             data_source_cache[data_source_id] = data_source
         return data_source
 
+    @_reuse_export_marking_definition_cache
+    @_reuse_export_created_by_cache
+    @_reuse_export_data_source_cache
+    def prepare_simple_exports(
+        self,
+        entities_list: List[Dict],
+        access_filter: Dict = None,
+        no_custom_attributes: bool = False,
+    ) -> List[List[Dict]]:
+        """Prepare separate simple exports while sharing root-level prefetch work.
+
+        Each returned list corresponds to the entity at the same index in
+        ``entities_list`` while the nested-ref prefetch state is reused across
+        the selected roots.
+        """
+
+        stix_nested_ref_relationships_by_entity_id = (
+            self._prefetch_export_nested_ref_relationships(entities_list, access_filter)
+        )
+        nested_ref_prefetch_kwargs = (
+            {
+                "stix_nested_ref_relationships_by_entity_id": stix_nested_ref_relationships_by_entity_id
+            }
+            if stix_nested_ref_relationships_by_entity_id is not None
+            else {}
+        )
+        return [
+            self.prepare_export(
+                entity=(
+                    self.generate_export(entity.copy(), no_custom_attributes)
+                    if no_custom_attributes
+                    else self.generate_export(entity.copy())
+                ),
+                mode="simple",
+                access_filter=access_filter,
+                no_custom_attributes=no_custom_attributes,
+                **nested_ref_prefetch_kwargs,
+            )
+            for entity in entities_list
+        ]
+
     def prepare_export(
         self,
         entity: Dict,
