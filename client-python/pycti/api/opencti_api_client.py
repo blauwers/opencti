@@ -12,6 +12,7 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import magic
@@ -474,6 +475,12 @@ class OpenCTIApiClient:
         self.request_headers = build_request_headers(
             token, custom_headers, self.app_logger, provider
         )
+        self._request_header_overrides = ContextVar(
+            f"opencti_request_header_overrides_{id(self)}", default=None
+        )
+        self._batch_mutation_plan_context = ContextVar(
+            f"opencti_batch_mutation_plan_{id(self)}", default=None
+        )
         self.session = requests.session()
         self.session_requests_timeout = requests_timeout
         self.session_batch_requests_timeout = (
@@ -491,7 +498,6 @@ class OpenCTIApiClient:
             if bundle_submission_max_payload_size is not None
             else DEFAULT_BUNDLE_SUBMISSION_MAX_PAYLOAD_SIZE
         )
-        self._batch_mutation_plan = None
         # Define the dependencies
         self.work = OpenCTIApiWork(self)
         self.notification = OpenCTIApiNotification(self)
@@ -565,8 +571,6 @@ class OpenCTIApiClient:
         self.user = User(self)
         self.settings = Settings(self)
 
-        # Keep track of draft context
-        self.draft_id = ""
         self._api_features = None
         self._api_features_lock = threading.Lock()
 
@@ -723,7 +727,7 @@ class OpenCTIApiClient:
         :param applicant_id: the ID of the user to impersonate
         :type applicant_id: str
         """
-        self.request_headers["opencti-applicant-id"] = applicant_id
+        self._set_request_header("opencti-applicant-id", applicant_id)
 
     def set_playbook_id_header(self, playbook_id):
         """Set the playbook ID header for tracking playbook execution.
@@ -731,7 +735,7 @@ class OpenCTIApiClient:
         :param playbook_id: the ID of the playbook being executed
         :type playbook_id: str
         """
-        self.request_headers["opencti-playbook-id"] = playbook_id
+        self._set_request_header("opencti-playbook-id", playbook_id)
 
     def set_event_id(self, event_id):
         """Set the event ID header for event tracking.
@@ -739,7 +743,69 @@ class OpenCTIApiClient:
         :param event_id: the ID of the event
         :type event_id: str
         """
-        self.request_headers["opencti-event-id"] = event_id
+        self._set_request_header("opencti-event-id", event_id)
+
+    def _ensure_request_context(self):
+        if not hasattr(self, "_request_header_overrides"):
+            self._request_header_overrides = ContextVar(
+                f"opencti_request_header_overrides_{id(self)}", default=None
+            )
+        if not hasattr(self, "_batch_mutation_plan_context"):
+            self._batch_mutation_plan_context = ContextVar(
+                f"opencti_batch_mutation_plan_{id(self)}", default=None
+            )
+
+    def _get_request_header_overrides(self):
+        self._ensure_request_context()
+        return self._request_header_overrides.get()
+
+    def _get_current_request_headers(self):
+        request_header_overrides = self._get_request_header_overrides()
+        if not request_header_overrides:
+            return self.request_headers
+        request_headers = self.request_headers.copy()
+        request_headers.update(request_header_overrides)
+        return request_headers
+
+    def _set_request_header(self, header_name, value):
+        request_header_overrides = self._get_request_header_overrides()
+        next_request_header_overrides = (
+            {} if request_header_overrides is None else request_header_overrides.copy()
+        )
+        next_request_header_overrides[header_name] = value
+        self._request_header_overrides.set(next_request_header_overrides)
+
+    @contextmanager
+    def request_context(self):
+        """Run one logical request with isolated contextual state."""
+
+        self._ensure_request_context()
+        header_token = self._request_header_overrides.set({})
+        batch_plan_token = self._batch_mutation_plan_context.set(None)
+        try:
+            yield
+        finally:
+            self._batch_mutation_plan_context.reset(batch_plan_token)
+            self._request_header_overrides.reset(header_token)
+
+    @property
+    def _batch_mutation_plan(self):
+        self._ensure_request_context()
+        return self._batch_mutation_plan_context.get()
+
+    @_batch_mutation_plan.setter
+    def _batch_mutation_plan(self, plan):
+        self._ensure_request_context()
+        self._batch_mutation_plan_context.set(plan)
+
+    @property
+    def draft_id(self):
+        draft_id = self._get_current_request_headers().get("opencti-draft-id")
+        return "" if draft_id is None else draft_id
+
+    @draft_id.setter
+    def draft_id(self, draft_id):
+        self._set_request_header("opencti-draft-id", draft_id)
 
     def get_draft_id(self):
         """Get the current draft ID.
@@ -747,8 +813,6 @@ class OpenCTIApiClient:
         :return: the current draft ID or empty string if not set
         :rtype: str
         """
-        if self.draft_id is None:
-            return ""
         return self.draft_id
 
     def set_draft_id(self, draft_id):
@@ -758,7 +822,6 @@ class OpenCTIApiClient:
         :type draft_id: str
         """
         self.draft_id = draft_id
-        self.request_headers["opencti-draft-id"] = draft_id
 
     def set_work_id(self, work_id):
         """Set the work ID header for work validation
@@ -766,7 +829,7 @@ class OpenCTIApiClient:
         :param work_id: the ID of the work
         :type work_id: str
         """
-        self.request_headers["opencti-work-id"] = work_id
+        self._set_request_header("opencti-work-id", work_id)
 
     def set_batch_wait_until(self, wait_until):
         """Set the batch consistency header for mutation execution.
@@ -774,8 +837,8 @@ class OpenCTIApiClient:
         :param wait_until: consistency mode requested by the admitted batch
         :type wait_until: str
         """
-        self.request_headers["opencti-batch-wait-until"] = (
-            "" if wait_until is None else str(wait_until)
+        self._set_request_header(
+            "opencti-batch-wait-until", "" if wait_until is None else str(wait_until)
         )
 
     def set_synchronized_upsert_header(self, synchronized):
@@ -784,8 +847,8 @@ class OpenCTIApiClient:
         :param synchronized: whether upsert should be synchronized
         :type synchronized: bool
         """
-        self.request_headers["synchronized-upsert"] = (
-            "true" if synchronized is True else "false"
+        self._set_request_header(
+            "synchronized-upsert", "true" if synchronized is True else "false"
         )
 
     def set_previous_standard_header(self, previous_standard):
@@ -794,7 +857,7 @@ class OpenCTIApiClient:
         :param previous_standard: the previous standard ID
         :type previous_standard: str
         """
-        self.request_headers["previous-standard"] = previous_standard
+        self._set_request_header("previous-standard", previous_standard)
 
     def get_request_headers(self, hide_token=True):
         """Get a copy of current request headers.
@@ -804,7 +867,7 @@ class OpenCTIApiClient:
         :return: copy of request headers
         :rtype: dict
         """
-        request_headers_copy = self.request_headers.copy()
+        request_headers_copy = self._get_current_request_headers().copy()
         if hide_token and "Authorization" in request_headers_copy:
             request_headers_copy["Authorization"] = "*****"
         return request_headers_copy
@@ -815,8 +878,8 @@ class OpenCTIApiClient:
         :param retry_number: the current retry attempt number, or None to clear
         :type retry_number: int or None
         """
-        self.request_headers["opencti-retry-number"] = (
-            "" if retry_number is None else str(retry_number)
+        self._set_request_header(
+            "opencti-retry-number", "" if retry_number is None else str(retry_number)
         )
 
     def _extract_files(self, obj, path_prefix=""):
@@ -900,7 +963,7 @@ class OpenCTIApiClient:
         ):
             return self._batch_mutation_plan.capture(query, query_var, files_vars)
 
-        query_headers = self.request_headers.copy()
+        query_headers = self._get_current_request_headers().copy()
         effective_request_timeout = (
             request_timeout
             if request_timeout is not None
@@ -1294,7 +1357,7 @@ class OpenCTIApiClient:
         try:
             r = self.session.get(
                 fetch_uri,
-                headers=self.request_headers,
+                headers=self._get_current_request_headers(),
                 verify=self.ssl_verify,
                 cert=self.cert,
                 proxies=self.proxies,
