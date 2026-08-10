@@ -248,6 +248,68 @@ def should_report_batch_expectation(data: Dict[str, Any]) -> bool:
     return data.get("split_bundles") is False
 
 
+def batch_expectation_work_ids(
+    data: Dict[str, Any], work_id: Optional[str]
+) -> List[str]:
+    """Return every logical Work attributed to one physical batch bundle."""
+
+    additional_work_ids = data.get("additional_work_ids", [])
+    if additional_work_ids is None:
+        additional_work_ids = []
+    if not isinstance(additional_work_ids, list) or any(
+        not isinstance(additional_work_id, str) or len(additional_work_id) == 0
+        for additional_work_id in additional_work_ids
+    ):
+        raise ValueError("Invalid additional_work_ids")
+    work_ids = []
+    for current_work_id in [work_id, *additional_work_ids]:
+        if (
+            isinstance(current_work_id, str)
+            and len(current_work_id) > 0
+            and current_work_id not in work_ids
+        ):
+            work_ids.append(current_work_id)
+    return work_ids
+
+
+def enrichment_batch_output_owners(
+    data: Dict[str, Any],
+) -> Optional[Dict[str, List[str]]]:
+    """Return output object ownership from a validated enrichment result envelope."""
+
+    serialized_result = data.get("enrichment_batch_result")
+    if serialized_result is None:
+        return None
+    if not isinstance(serialized_result, str) or len(serialized_result) == 0:
+        raise ValueError("Invalid enrichment_batch_result")
+    try:
+        result_envelope = json.loads(serialized_result)
+    except json.JSONDecodeError as err:
+        raise ValueError("Invalid enrichment_batch_result JSON") from err
+    if not isinstance(result_envelope, dict) or not isinstance(
+        result_envelope.get("results"), list
+    ):
+        raise ValueError("Invalid enrichment_batch_result")
+    output_owners: Dict[str, List[str]] = {}
+    for result in result_envelope["results"]:
+        if not isinstance(result, dict):
+            raise ValueError("Invalid enrichment_batch_result item")
+        work_id = result.get("work_id")
+        output_object_ids = result.get("output_object_ids")
+        if not isinstance(work_id, str) or len(work_id) == 0:
+            raise ValueError("Invalid enrichment_batch_result work_id")
+        if not isinstance(output_object_ids, list) or any(
+            not isinstance(output_object_id, str) or len(output_object_id) == 0
+            for output_object_id in output_object_ids
+        ):
+            raise ValueError("Invalid enrichment_batch_result output_object_ids")
+        for output_object_id in output_object_ids:
+            owners = output_owners.setdefault(output_object_id, [])
+            if work_id not in owners:
+                owners.append(work_id)
+    return output_owners
+
+
 def build_batch_expectation_error(
     content: Dict[str, Any], rejected_items: List[Dict[str, Any]]
 ) -> Optional[Dict[str, str]]:
@@ -631,6 +693,59 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 )
         return branch_kind
 
+    def _report_expectations(
+        self, work_ids: List[str], error: Optional[Dict[str, str]]
+    ) -> None:
+        for work_id in work_ids:
+            self.api.work.report_expectation(work_id, error)
+
+    def _report_bundle_expectations(
+        self,
+        data: Dict[str, Any],
+        work_ids: List[str],
+        content: Dict[str, Any],
+        rejected_items: List[Dict[str, Any]],
+    ) -> None:
+        output_owners = enrichment_batch_output_owners(data)
+        if output_owners is None:
+            self._report_expectations(
+                work_ids, build_batch_expectation_error(content, rejected_items)
+            )
+            return
+        owner_work_ids = {
+            owner_work_id
+            for owners in output_owners.values()
+            for owner_work_id in owners
+        }
+        if not owner_work_ids.issubset(set(work_ids)):
+            raise ValueError("Enrichment batch result references an untracked Work")
+        rejected_items_by_work_id = {work_id: [] for work_id in work_ids}
+        for rejected_item in rejected_items:
+            owner_work_ids = output_owners.get(rejected_item.get("id"))
+            if owner_work_ids is None:
+                raise ValueError(
+                    "Rejected enrichment batch output object has no owning Work"
+                )
+            for owner_work_id in owner_work_ids:
+                if owner_work_id in rejected_items_by_work_id:
+                    rejected_items_by_work_id[owner_work_id].append(rejected_item)
+        for work_id in work_ids:
+            self.api.work.report_expectation(
+                work_id,
+                build_batch_expectation_error(
+                    content, rejected_items_by_work_id[work_id]
+                ),
+            )
+
+    def _add_expectations(self, work_ids: List[str], expectations: int) -> bool:
+        if len(work_ids) == 0:
+            return True
+        has_alive_work = False
+        for work_id in work_ids:
+            if self.api.work.add_expectations(work_id, expectations):
+                has_alive_work = True
+        return has_alive_work
+
     def split_and_requeue_bundle(
         self,
         data: Dict[str, Any],
@@ -640,6 +755,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         add_expectations: bool,
         report_parent_expectation: bool,
     ) -> Literal["ack"]:
+        work_ids = batch_expectation_work_ids(data, work_id)
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
                 self._confirm_delivery(push_channel, data)
@@ -651,8 +767,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
                     True,
                 ):
-                    if work_id is not None and report_parent_expectation:
-                        self.api.work.report_expectation(work_id, None)
+                    if report_parent_expectation:
+                        self._report_bundle_expectations(data, work_ids, content, [])
                     return "ack"
                 event_version = content.get("x_opencti_event_version")
                 stix2_splitter = OpenCTIStix2Splitter()
@@ -664,10 +780,10 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         data.get("cleanup_inconsistent_bundle", False),
                     )
                 )
-                if work_id is not None and add_expectations:
-                    work_alive = self.api.work.add_expectations(work_id, expectations)
-                    if not work_alive:
-                        return "ack"
+                if add_expectations and not self._add_expectations(
+                    work_ids, expectations
+                ):
+                    return "ack"
                 split_queue_messages = []
                 for bundle_ordinal, bundle in enumerate(bundles):
                     split_data = build_child_delivery_queue_message(
@@ -689,8 +805,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     split_queue_messages,
                     True,
                 )
-                if work_id is not None and report_parent_expectation:
-                    self.api.work.report_expectation(work_id, None)
+                if report_parent_expectation:
+                    self._report_bundle_expectations(data, work_ids, content, [])
         return "ack"
 
     def split_and_requeue_batch_chunks(
@@ -700,6 +816,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         work_id: Optional[str],
         error: Exception,
     ) -> Optional[Literal["ack"]]:
+        work_ids = batch_expectation_work_ids(data, work_id)
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
                 self._confirm_delivery(push_channel, data)
@@ -710,8 +827,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     data,
                     BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
                 ):
-                    if work_id is not None:
-                        self.api.work.report_expectation(work_id, None)
+                    self._report_bundle_expectations(data, work_ids, content, [])
                     return "ack"
                 chunks = OpenCTIStix2.build_oversized_batch_plan_chunks(
                     content,
@@ -738,10 +854,8 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     ),
                     log_context,
                 )
-                if work_id is not None:
-                    work_alive = self.api.work.add_expectations(work_id, len(chunks))
-                    if not work_alive:
-                        return "ack"
+                if not self._add_expectations(work_ids, len(chunks)):
+                    return "ack"
                 chunk_queue_messages = []
                 for chunk_ordinal, (
                     chunk_bundle,
@@ -765,8 +879,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                     data,
                     chunk_queue_messages,
                 )
-                if work_id is not None:
-                    self.api.work.report_expectation(work_id, None)
+                self._report_bundle_expectations(data, work_ids, content, [])
         return "ack"
 
     def handle_message(
@@ -799,6 +912,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             replay_count = batch_replay_count(data)
             self.api.set_retry_number(replay_count if replay_count > 0 else None)
             work_id = data.get("work_id")
+            work_ids = batch_expectation_work_ids(data, work_id)
             self.api.set_work_id(work_id)
 
             # Execute the import
@@ -820,23 +934,26 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         self._resume_reserved_unsplit_child_handoff(data)
                     )
                     if resumed_handoff_branch is not None:
-                        if work_id is not None and resumed_handoff_branch in {
+                        if resumed_handoff_branch in {
                             BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
                             BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
                         }:
-                            self.api.work.report_expectation(work_id, None)
+                            self._report_bundle_expectations(
+                                data, work_ids, content, []
+                            )
                         return "ack"
-                    report_batch_expectation = (
-                        work_id is not None and should_report_batch_expectation(data)
+                    report_bundle_expectation = len(work_ids) > 0 and (
+                        should_report_batch_expectation(data)
+                        or (data.get("split_bundles") is True and len(work_ids) > 1)
                     )
-                    if (
-                        work_id is not None
-                        and should_add_legacy_default_split_expectations(data, content)
+                    if len(
+                        work_ids
+                    ) > 0 and should_add_legacy_default_split_expectations(
+                        data, content
                     ):
-                        work_alive = self.api.work.add_expectations(
-                            work_id, len(content["objects"])
-                        )
-                        if not work_alive:
+                        if not self._add_expectations(
+                            work_ids, len(content["objects"])
+                        ):
                             return "ack"
                     update = data.get("update", False)
                     import_bundle = (
@@ -845,7 +962,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                         else self.api.stix2.import_bundle_from_json_batch
                     )
                     import_kwargs = {
-                        "report_expectations": not report_batch_expectation,
+                        "report_expectations": not report_bundle_expectation,
                     }
                     if data.get("split_bundles") is not True:
                         import_kwargs["execution_mode"] = data.get(
@@ -944,12 +1061,12 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                                 )
                         imported_items = []
                         return "ack"
-                    if report_batch_expectation:
-                        self.api.work.report_expectation(
-                            work_id,
-                            build_batch_expectation_error(
-                                content, too_large_items_bundles
-                            ),
+                    if report_bundle_expectation:
+                        self._report_bundle_expectations(
+                            data,
+                            work_ids,
+                            content,
+                            too_large_items_bundles,
                         )
                     dead_letter_items = [
                         item

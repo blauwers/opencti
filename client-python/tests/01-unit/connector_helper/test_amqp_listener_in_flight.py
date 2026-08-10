@@ -257,6 +257,51 @@ def test_amqp_listener_preserves_long_running_work_keepalive_pings():
     assert len(listener.pika_connection.scheduled_callbacks) == 1
 
 
+def test_amqp_listener_pings_every_work_in_enrichment_batch_delivery():
+    listener = _listener(lambda _data: True)
+    batch_envelope = {
+        "protocol_version": 1,
+        "batch_id": "enrichment-batch--1",
+        "item_count": 2,
+        "object_count": 0,
+        "group_context": {"connector_id": "connector--1"},
+        "items": [
+            {
+                "item_id": "item--1",
+                "work_id": "work--1",
+                "entity_id": "indicator--1",
+                "entity_type": "Indicator",
+            },
+            {
+                "item_id": "item--2",
+                "work_id": "work--2",
+                "entity_id": "indicator--2",
+                "entity_type": "Indicator",
+            },
+        ],
+    }
+    body = json.dumps(
+        {
+            "event": {"enrichment_batch": json.dumps(batch_envelope)},
+            "internal": {"work_id": None},
+        }
+    ).encode("utf-8")
+
+    assert listener._extract_message_work_ids(json.loads(body)) == [
+        "work--1",
+        "work--2",
+    ]
+    listener._in_flight_messages[(1, 1)] = {
+        "connection": listener.pika_connection,
+        "work_ids": ["work--1", "work--2"],
+        "last_ping": time.monotonic() - IN_FLIGHT_WORK_PING_INTERVAL_SECONDS - 1,
+    }
+
+    listener._ping_in_flight_work(listener.pika_connection)
+
+    assert listener.helper.pinged_work_ids == ["work--1", "work--2"]
+
+
 def test_amqp_listener_abandons_closed_connection_state_before_late_completion():
     release_callback = threading.Event()
     callback_finished = threading.Event()

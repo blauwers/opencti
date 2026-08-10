@@ -1,6 +1,6 @@
 import base64
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from pycti.api.opencti_api_batch import BatchMutationPlanTooLarge
@@ -18,9 +18,10 @@ from src.push_handler import (
     BATCH_DELIVERY_KIND_ROOT,
     BATCH_DELIVERY_PROTOCOL_V2,
     PushHandler,
+    batch_expectation_work_ids,
     batch_replay_count,
-    build_child_delivery_id,
     build_batch_expectation_error,
+    build_child_delivery_id,
     build_root_delivery_id,
     is_batch_payload_too_large_error,
     parse_batch_delivery_envelope,
@@ -120,6 +121,23 @@ def build_v2_message(**overrides):
 
 def decode_queue_message_content(queue_message):
     return json.loads(base64.b64decode(queue_message["content"]).decode("utf-8"))
+
+
+def build_enrichment_batch_result(**overrides):
+    result = {
+        "results": [
+            {
+                "work_id": "work--1",
+                "output_object_ids": ["indicator--1"],
+            },
+            {
+                "work_id": "work--2",
+                "output_object_ids": ["indicator--2"],
+            },
+        ]
+    }
+    result.update(overrides)
+    return json.dumps(result)
 
 
 def test_handler_passes_request_timeouts_to_api_client(monkeypatch):
@@ -240,6 +258,9 @@ def test_new_unsplit_messages_report_one_batch_expectation():
     assert should_report_batch_expectation({"split_bundles": False}) is True
     assert should_report_batch_expectation({"split_bundles": True}) is False
     assert should_report_batch_expectation({}) is False
+    assert batch_expectation_work_ids(
+        {"additional_work_ids": ["work--2", "work--1"]}, "work--1"
+    ) == ["work--1", "work--2"]
     assert build_batch_expectation_error({"id": "bundle--1"}, []) is None
     assert build_batch_expectation_error(
         {"id": "bundle--1"}, [{"id": "indicator--1"}]
@@ -392,6 +413,143 @@ def test_handler_reports_new_unsplit_bundle_once_at_batch_boundary():
     handler.api.work.report_expectation.assert_called_once_with("work--1", None)
 
 
+def test_handler_reports_enrichment_batch_result_expectation_for_each_work():
+    handler = build_handler()
+
+    result = handler.handle_message(
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            additional_work_ids=["work--2"],
+            enrichment_batch_result=build_enrichment_batch_result(),
+        )
+    )
+
+    assert result == "ack"
+    assert handler.api.work.report_expectation.call_args_list == [
+        call("work--1", None),
+        call("work--2", None),
+    ]
+
+
+def test_handler_reports_enrichment_batch_rejection_only_to_owning_work():
+    handler = build_handler()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [{"id": "indicator--2", "type": "indicator"}],
+        [
+            {
+                "id": "indicator--1",
+                "rejection_info": {
+                    "reject_reason": "MISSING_REFERENCE",
+                    "retryable": True,
+                },
+            }
+        ],
+    )
+
+    result = handler.handle_message(
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            additional_work_ids=["work--2"],
+            enrichment_batch_result=build_enrichment_batch_result(),
+            batch_replay_count=4,
+        )
+    )
+
+    assert result == "ack"
+    assert handler.api.work.report_expectation.call_args_list == [
+        call(
+            "work--1",
+            {
+                "error": "1 element(s) failed during batch import",
+                "source": "Bundle bundle--11111111-1111-4111-8111-111111111111",
+            },
+        ),
+        call("work--2", None),
+    ]
+
+
+def test_handler_reports_shared_enrichment_batch_rejection_to_each_owner():
+    handler = build_handler()
+    handler.api.stix2.import_bundle_from_json_batch.return_value = (
+        [{"id": "indicator--1", "type": "indicator"}],
+        [
+            {
+                "id": "label--shared",
+                "rejection_info": {
+                    "reject_reason": "MISSING_REFERENCE",
+                    "retryable": True,
+                },
+            }
+        ],
+    )
+
+    result = handler.handle_message(
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            additional_work_ids=["work--2"],
+            enrichment_batch_result=build_enrichment_batch_result(
+                results=[
+                    {
+                        "work_id": "work--1",
+                        "output_object_ids": ["indicator--1", "label--shared"],
+                    },
+                    {
+                        "work_id": "work--2",
+                        "output_object_ids": ["indicator--2", "label--shared"],
+                    },
+                ]
+            ),
+            batch_replay_count=4,
+        )
+    )
+
+    expected_error = {
+        "error": "1 element(s) failed during batch import",
+        "source": "Bundle bundle--11111111-1111-4111-8111-111111111111",
+    }
+    assert result == "ack"
+    assert handler.api.work.report_expectation.call_args_list == [
+        call("work--1", expected_error),
+        call("work--2", expected_error),
+    ]
+
+
+def test_handler_reports_fallback_child_expectation_for_each_enrichment_work():
+    handler = build_handler()
+    child_content = {
+        "type": "bundle",
+        "id": "bundle--child",
+        "objects": [{"id": "indicator--1"}],
+    }
+
+    result = handler.handle_message(
+        build_message(
+            content=base64.b64encode(json.dumps(child_content).encode("utf-8")).decode(
+                "utf-8"
+            ),
+            split_bundles=True,
+            work_id="work--1",
+            additional_work_ids=["work--2"],
+            enrichment_batch_result=build_enrichment_batch_result(),
+        )
+    )
+
+    assert result == "ack"
+    assert (
+        handler.api.stix2.import_bundle_from_json.call_args.kwargs[
+            "report_expectations"
+        ]
+        is False
+    )
+    assert handler.api.work.report_expectation.call_args_list == [
+        call("work--1", None),
+        call("work--2", None),
+    ]
+
+
 def test_handler_forwards_v2_direct_delivery_context_to_batch_importer():
     handler = build_handler()
 
@@ -472,6 +630,102 @@ def test_handler_requeues_durable_batch_chunks_for_oversized_batch_plan(monkeypa
     assert first_chunk_data["no_split"] is True
     assert first_chunk_data["batch_plan"] == batch_chunks[0][1]
     assert second_chunk_data["batch_plan"] == batch_chunks[1][1]
+
+
+def test_handler_extends_all_enrichment_work_expectations_for_oversized_chunks(
+    monkeypatch,
+):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooLarge(200, 100)
+    )
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2,
+        "build_oversized_batch_plan_chunks",
+        lambda *args, **kwargs: [
+            (
+                {
+                    "type": "bundle",
+                    "id": "bundle--1",
+                    "objects": [{"id": "indicator--1"}],
+                },
+                {"version": 1, "ordered_object_ids": ["indicator--1"]},
+            ),
+            (
+                {
+                    "type": "bundle",
+                    "id": "bundle--1",
+                    "objects": [{"id": "indicator--2"}],
+                },
+                {"version": 1, "ordered_object_ids": ["indicator--2"]},
+            ),
+        ],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(
+            split_bundles=False,
+            work_id="work--1",
+            additional_work_ids=["work--2"],
+            batch_plan={"version": 1},
+        )
+    )
+
+    assert result == "ack"
+    assert handler.api.work.add_expectations.call_args_list == [
+        call("work--1", 2),
+        call("work--2", 2),
+    ]
+    assert handler.api.work.report_expectation.call_args_list == [
+        call("work--1", None),
+        call("work--2", None),
+    ]
+
+
+def test_handler_requeues_oversized_chunks_without_work_tracking(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooLarge(200, 100)
+    )
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2,
+        "build_oversized_batch_plan_chunks",
+        lambda *args, **kwargs: [
+            (
+                {
+                    "type": "bundle",
+                    "id": "bundle--1",
+                    "objects": [{"id": "indicator--1"}],
+                },
+                {"version": 1, "ordered_object_ids": ["indicator--1"]},
+            )
+        ],
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+
+    result = handler.handle_message(
+        build_message(split_bundles=False, batch_plan={"version": 1})
+    )
+
+    assert result == "ack"
+    handler.send_queue_message_to_specific_queue.assert_called_once()
+    handler.api.work.add_expectations.assert_not_called()
+    handler.api.work.report_expectation.assert_not_called()
 
 
 def test_handler_reserves_v2_oversized_chunks_before_publishing(monkeypatch):

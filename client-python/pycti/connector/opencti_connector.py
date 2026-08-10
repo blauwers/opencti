@@ -61,6 +61,8 @@ class OpenCTIConnector:
     :type enrichment_resolution: str
     :param listen_callback_uri: Optional callback URI for API-based listening
     :type listen_callback_uri: str or None
+    :param enrichment_batch_capability: Optional versioned enrichment batch limits
+    :type enrichment_batch_capability: dict or None
 
     :raises ValueError: If the connector type is not a valid ConnectorType value
 
@@ -91,6 +93,7 @@ class OpenCTIConnector:
         enrichment_resolution: str,
         listen_callback_uri=None,
         xtm_one_intent=None,
+        enrichment_batch_capability=None,
     ):
         """Initialize the OpenCTIConnector instance.
 
@@ -114,6 +117,8 @@ class OpenCTIConnector:
         :type enrichment_resolution: str
         :param listen_callback_uri: Optional callback URI for API listening
         :type listen_callback_uri: str or None
+        :param enrichment_batch_capability: Optional versioned enrichment batch limits
+        :type enrichment_batch_capability: dict or None
 
         :raises ValueError: If connector_type is not a valid ConnectorType
         """
@@ -131,6 +136,7 @@ class OpenCTIConnector:
         self.playbook_compatible = playbook_compatible
         self.listen_callback_uri = listen_callback_uri
         self.xtm_one_intent = xtm_one_intent
+        self.enrichment_batch_capability = enrichment_batch_capability
 
     def to_input(self) -> dict:
         """Convert connector configuration to API input format.
@@ -157,6 +163,11 @@ class OpenCTIConnector:
                 "only_contextual": self.only_contextual,
                 "playbook_compatible": self.playbook_compatible,
                 "listen_callback_uri": self.listen_callback_uri,
+                **(
+                    {"enrichment_batch_capability": self.enrichment_batch_capability}
+                    if self.enrichment_batch_capability is not None
+                    else {}
+                ),
                 **(
                     {"xtm_one_intent": self.xtm_one_intent}
                     if self.xtm_one_intent

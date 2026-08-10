@@ -56,6 +56,14 @@ from pydantic import TypeAdapter
 
 from pycti.api.opencti_api_client import OpenCTIApiClient
 from pycti.connector.opencti_connector import OpenCTIConnector
+from pycti.connector.opencti_enrichment_batch import (
+    EnrichmentBatchResultStatus,
+    build_enrichment_batch_result_envelope,
+    enrichment_batch_work_ids,
+    has_retryable_enrichment_batch_result,
+    parse_enrichment_batch_envelope,
+    serialize_enrichment_batch_result_envelope,
+)
 from pycti.connector.opencti_metric_handler import OpenCTIMetricHandler
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
@@ -191,6 +199,21 @@ def get_config_variable(
         return default
 
     return result
+
+
+def parse_json_object_config(value, variable_name: str):
+    """Normalize an optional JSON-object connector setting."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"{variable_name} must be valid JSON") from err
+    if not isinstance(value, dict):
+        raise ValueError(f"{variable_name} must be a JSON object")
+    return value
 
 
 def normalize_email_prefix(email: str) -> str:
@@ -497,6 +520,8 @@ class ListenQueue(threading.Thread):
     :type listen_worker_count: int
     :param listen_prefetch_count: Maximum unacked AMQP deliveries held in flight
     :type listen_prefetch_count: int or None
+    :param enrichment_batch_callback: Optional callback for enrichment batch envelopes
+    :type enrichment_batch_callback: Callable[[Dict], Dict] or None
     """
 
     def __init__(
@@ -513,6 +538,7 @@ class ListenQueue(threading.Thread):
         callback: Callable[[Dict], str],
         listen_worker_count: int = DEFAULT_LISTEN_WORKER_COUNT,
         listen_prefetch_count: Optional[int] = None,
+        enrichment_batch_callback: Optional[Callable[[Dict], Dict]] = None,
     ) -> None:
         """Initialize the ListenQueue thread.
 
@@ -540,6 +566,8 @@ class ListenQueue(threading.Thread):
         :type listen_worker_count: int
         :param listen_prefetch_count: Maximum unacked AMQP deliveries held in flight
         :type listen_prefetch_count: int or None
+        :param enrichment_batch_callback: Optional callback for enrichment batch envelopes
+        :type enrichment_batch_callback: Callable[[Dict], Dict] or None
         """
         threading.Thread.__init__(self)
         self.pika_credentials = None
@@ -548,6 +576,7 @@ class ListenQueue(threading.Thread):
         self.channel = None
         self.helper = helper
         self.callback = callback
+        self.enrichment_batch_callback = enrichment_batch_callback
         self.config = config
         self.opencti_token = opencti_token
         self.listen_protocol = listen_protocol
@@ -654,14 +683,12 @@ class ListenQueue(threading.Thread):
             for message in self._in_flight_messages.values():
                 if message["connection"] is not connection:
                     continue
-                work_id = message["work_id"]
-                if (
-                    work_id is not None
-                    and now - message["last_ping"]
-                    > IN_FLIGHT_WORK_PING_INTERVAL_SECONDS
-                ):
+                if now - message["last_ping"] > IN_FLIGHT_WORK_PING_INTERVAL_SECONDS:
                     message["last_ping"] = now
-                    work_ids.append(work_id)
+                    work_ids.extend(
+                        message.get("work_ids")
+                        or ([message["work_id"]] if message.get("work_id") else [])
+                    )
         for work_id in work_ids:
             try:
                 self.helper.api.work.ping(work_id)
@@ -766,12 +793,20 @@ class ListenQueue(threading.Thread):
                 {"tag": method.delivery_tag, "reason": str(err)},
             )
             return
-        work_id = json_data.get("internal", {}).get("work_id")
+        try:
+            work_ids = self._extract_message_work_ids(json_data)
+        except ValueError as err:
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            self.helper.connector_logger.error(
+                "Invalid enrichment batch payload, discarding message",
+                {"tag": method.delivery_tag, "reason": str(err)},
+            )
+            return
         message_key = self._message_key(channel, method.delivery_tag)
         with self._in_flight_lock:
             self._in_flight_messages[message_key] = {
                 "connection": self.pika_connection,
-                "work_id": work_id,
+                "work_ids": work_ids,
                 "last_ping": time.monotonic(),
             }
         try:
@@ -795,6 +830,16 @@ class ListenQueue(threading.Thread):
             {"tag": method.delivery_tag},
         )
 
+    @staticmethod
+    def _extract_message_work_ids(json_data: Dict) -> List[str]:
+        enrichment_batch = json_data.get("event", {}).get("enrichment_batch")
+        if enrichment_batch is not None:
+            return enrichment_batch_work_ids(
+                parse_enrichment_batch_envelope(enrichment_batch)
+            )
+        work_id = json_data.get("internal", {}).get("work_id")
+        return [work_id] if work_id else []
+
     def _set_draft_id(self, draft_id):
         """Set the draft ID for the helper and API instances.
 
@@ -804,6 +849,168 @@ class ListenQueue(threading.Thread):
         self.helper.draft_id = draft_id
         self.helper.api.set_draft_id(draft_id)
         self.helper.api_impersonate.set_draft_id(draft_id)
+
+    def _set_applicant_id(self, applicant_id) -> None:
+        self.helper.applicant_id = self.connector_applicant_id
+        self.helper.api_impersonate.set_applicant_id_header(self.connector_applicant_id)
+        if applicant_id is not None:
+            self.helper.applicant_id = applicant_id
+            self.helper.api_impersonate.set_applicant_id_header(applicant_id)
+
+    @staticmethod
+    def _deserialize_event_payload(payload):
+        if payload is None or isinstance(payload, (dict, list)):
+            return payload
+        return json.loads(payload)
+
+    def _prepare_enrichment_batch_item(self, item: Dict) -> Dict:
+        event_data = {
+            "entity_id": item["entity_id"],
+            "entity_type": item["entity_type"],
+            "stix_entity": self._deserialize_event_payload(item.get("stix_entity")),
+            "stix_objects": self._deserialize_event_payload(item.get("stix_objects")),
+            "enrichment_batch_item_id": item["item_id"],
+            "enrichment_batch_work_id": item["work_id"],
+        }
+        do_read = self.helper.api.stix2.get_reader(
+            event_data["entity_type"]
+            if event_data["entity_type"] is not None
+            else "Stix-Core-Object"
+        )
+        opencti_entity = do_read(id=event_data["entity_id"], withFiles=True)
+        if opencti_entity is None:
+            raise ValueError(
+                "Unable to read/access the entity, please check the connector permissions"
+            )
+        event_data["enrichment_entity"] = opencti_entity
+        stix_objects = event_data["stix_objects"]
+        stix_entity = event_data["stix_entity"]
+        if stix_objects is None and stix_entity is None:
+            stix_objects = self.helper.api.stix2.prepare_export(
+                entity=self.helper.api.stix2.generate_export(copy.copy(opencti_entity))
+            )
+            stix_entity = [
+                entity
+                for entity in stix_objects
+                if entity["id"] == opencti_entity["standard_id"]
+                or entity["id"] == "x-opencti-" + opencti_entity["standard_id"]
+            ][0]
+        elif stix_objects is None:
+            stix_objects = [stix_entity]
+        elif isinstance(stix_objects, dict) and stix_objects.get("type") == "bundle":
+            stix_objects = stix_objects.get("objects", [])
+        event_data["stix_objects"] = stix_objects
+        event_data["stix_entity"] = stix_entity
+        return event_data
+
+    @staticmethod
+    def _batch_work_message(result: Dict) -> str:
+        if result["message"]:
+            return result["message"]
+        if result["status"] == EnrichmentBatchResultStatus.UNCHANGED.value:
+            return "No changes produced by connector"
+        return "Connector successfully processed the operation"
+
+    def _report_batch_callback_failure(
+        self, work_ids: List[str], error: Exception
+    ) -> bool:
+        if len(work_ids) == 0:
+            return False
+        durable = True
+        for work_id in work_ids:
+            try:
+                self.helper.api.work.to_processed(work_id, str(error), True)
+            except Exception:  # pylint: disable=broad-except
+                durable = False
+                self.helper.metric.inc("error_count")
+                self.helper.connector_logger.error("Failing reporting the processing")
+        return durable
+
+    def _data_handler_enrichment_batch(self, json_data: Dict) -> bool:
+        serialized_envelope = json_data["event"]["enrichment_batch"]
+        envelope = parse_enrichment_batch_envelope(serialized_envelope)
+        work_ids = enrichment_batch_work_ids(envelope)
+        result_submitted = False
+        try:
+            if self.helper.connect_type != "INTERNAL_ENRICHMENT":
+                raise ValueError(
+                    "Enrichment batch messages require an internal enrichment connector"
+                )
+            if self.enrichment_batch_callback is None:
+                raise ValueError(
+                    "Connector received an enrichment batch without an enrichment_batch_callback"
+                )
+            group_context = envelope["group_context"]
+            if group_context["connector_id"] != self.helper.connector_id:
+                raise ValueError(
+                    "Enrichment batch envelope does not belong to this connector"
+                )
+            self.helper.work_id = None
+            self.helper.validation_mode = "draft"
+            self.helper.force_validation = False
+            self._set_draft_id(group_context.get("draft_id") or "")
+            self.helper.playbook = group_context.get("playbook_context")
+            self.helper.enrichment_shared_organizations = (
+                group_context.get("shared_organization_ids") or None
+            )
+            self._set_applicant_id(group_context.get("applicant_id"))
+            for work_id in work_ids:
+                self.helper.api.work.to_received(
+                    work_id, "Connector ready to process the operation"
+                )
+            batch_data = copy.deepcopy(envelope)
+            batch_data["items"] = [
+                {
+                    **item,
+                    **self._prepare_enrichment_batch_item(item),
+                }
+                for item in envelope["items"]
+            ]
+            if group_context.get("configuration") is not None:
+                batch_data["configuration"] = group_context["configuration"]
+            callback_result = self.enrichment_batch_callback(batch_data)
+            result_envelope = build_enrichment_batch_result_envelope(
+                envelope, callback_result
+            )
+            if has_retryable_enrichment_batch_result(result_envelope):
+                self._set_draft_id("")
+                return False
+            if result_envelope["output_bundle"] is not None:
+                result_envelope["output_bundle"] = (
+                    self.helper._apply_enrichment_shared_organizations(
+                        result_envelope["output_bundle"]
+                    )
+                )
+            serialized_result = serialize_enrichment_batch_result_envelope(
+                result_envelope
+            )
+            result_submitted = (
+                self.helper.api.submit_enrichment_batch_result(
+                    self.helper.connector_id,
+                    serialized_envelope,
+                    serialized_result,
+                )
+                is True
+            )
+            if not result_submitted:
+                raise ValueError("Unable to submit enrichment batch result")
+            for result in result_envelope["results"]:
+                self.helper.api.work.to_processed(
+                    result["work_id"],
+                    self._batch_work_message(result),
+                    result["status"] == EnrichmentBatchResultStatus.FAILED.value,
+                )
+            self._set_draft_id("")
+            return True
+        except Exception as err:  # pylint: disable=broad-except
+            self.helper.metric.inc("error_count")
+            self.helper.connector_logger.error(
+                "Error in enrichment batch processing, reporting error to API"
+            )
+            self._set_draft_id("")
+            if result_submitted:
+                return False
+            return self._report_batch_callback_failure(work_ids, err)
 
     def _data_handler(self, json_data: Dict) -> bool:
         request_context = getattr(self.helper, "request_context", None)
@@ -827,6 +1034,9 @@ class ListenQueue(threading.Thread):
         :return: True when the message reached a durable processed outcome, False otherwise
         :rtype: bool
         """
+        if json_data.get("event", {}).get("enrichment_batch") is not None:
+            return self._data_handler_enrichment_batch(json_data)
+
         work_id = None
         # Execute the callback
         try:
@@ -936,14 +1146,7 @@ class ListenQueue(threading.Thread):
                     )
 
             # Handle applicant_id for impersonation
-            self.helper.applicant_id = self.connector_applicant_id
-            self.helper.api_impersonate.set_applicant_id_header(
-                self.connector_applicant_id
-            )
-            applicant_id = json_data["internal"]["applicant_id"]
-            if applicant_id is not None:
-                self.helper.applicant_id = applicant_id
-                self.helper.api_impersonate.set_applicant_id_header(applicant_id)
+            self._set_applicant_id(json_data["internal"]["applicant_id"])
 
             if work_id:
                 self.helper.api.work.to_received(
@@ -2557,6 +2760,21 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             # rebuilds locally anyway; old platforms still treat this like "none".
             default="deferred",
         )
+        self.connect_enrichment_batch_capability = parse_json_object_config(
+            get_config_variable(
+                "CONNECTOR_ENRICHMENT_BATCH_CAPABILITY",
+                ["connector", "enrichment_batch_capability"],
+                config,
+            ),
+            "CONNECTOR_ENRICHMENT_BATCH_CAPABILITY",
+        )
+        if (
+            self.connect_enrichment_batch_capability is not None
+            and self.connect_type != "INTERNAL_ENRICHMENT"
+        ):
+            raise ValueError(
+                "CONNECTOR_ENRICHMENT_BATCH_CAPABILITY requires INTERNAL_ENRICHMENT"
+            )
         self.bundle_send_to_queue = get_config_variable(
             "CONNECTOR_SEND_TO_QUEUE",
             ["connector", "send_to_queue"],
@@ -2809,6 +3027,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
                 else None
             ),
             xtm_one_intent=self.connect_xtm_one_intent,
+            enrichment_batch_capability=self.connect_enrichment_batch_capability,
         )
         connector_configuration = self.api.connector.register(self.connector)
         self.connector_logger.info(
@@ -3574,6 +3793,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
     def listen(
         self,
         message_callback: Callable[[Dict], str],
+        enrichment_batch_callback: Optional[Callable[[Dict], Dict]] = None,
     ) -> None:
         """Listen for messages from the queue and process them via callback.
 
@@ -3585,7 +3805,18 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         :param message_callback: Function to process incoming messages. Receives
             event data dict and should return a status message string.
         :type message_callback: Callable[[Dict], str]
+        :param enrichment_batch_callback: Optional function for versioned
+            enrichment batch envelopes. Receives one batch dict and returns a
+            result dict with ``results`` and ``output_bundle``.
+        :type enrichment_batch_callback: Callable[[Dict], Dict] or None
         """
+        if (
+            self.connect_enrichment_batch_capability is not None
+            and enrichment_batch_callback is None
+        ):
+            raise ValueError(
+                "CONNECTOR_ENRICHMENT_BATCH_CAPABILITY requires an enrichment_batch_callback"
+            )
         self.listen_queue = ListenQueue(
             self,
             self.opencti_token,
@@ -3599,6 +3830,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             message_callback,
             self.listen_worker_count,
             self.listen_prefetch_count,
+            enrichment_batch_callback,
         )
         self.listen_queue.start()
         self.listen_queue.join()
@@ -3905,6 +4137,44 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             .replace("+00:00", "Z")
         )
 
+    def _apply_enrichment_shared_organizations(self, bundle: str) -> str:
+        if self.enrichment_shared_organizations is None:
+            return bundle
+        bundle_data = json.loads(bundle)
+        for item in bundle_data["objects"]:
+            if (
+                "extensions" in item
+                and "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
+                in item["extensions"]
+            ):
+                octi_extensions = item["extensions"][
+                    "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
+                ]
+                if octi_extensions.get("granted_refs") is not None:
+                    octi_extensions["granted_refs"] = list(
+                        set(
+                            octi_extensions["granted_refs"]
+                            + self.enrichment_shared_organizations
+                        )
+                    )
+                else:
+                    octi_extensions["granted_refs"] = (
+                        self.enrichment_shared_organizations
+                    )
+            else:
+                if item.get("x_opencti_granted_refs") is not None:
+                    item["x_opencti_granted_refs"] = list(
+                        set(
+                            item["x_opencti_granted_refs"]
+                            + self.enrichment_shared_organizations
+                        )
+                    )
+                else:
+                    item["x_opencti_granted_refs"] = (
+                        self.enrichment_shared_organizations
+                    )
+        return json.dumps(bundle_data)
+
     # Push Stix2 helper
     def send_stix2_bundle(self, bundle: str, **kwargs) -> list:
         """Send a STIX2 bundle to the OpenCTI platform.
@@ -3998,43 +4268,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         # workers still use it, while current workers route only on split_bundles.
         no_split = not split_bundles
 
-        # In case of enrichment ingestion, ensure the sharing if needed
-        if self.enrichment_shared_organizations is not None:
-            # Every element of the bundle must be enriched with the same organizations
-            bundle_data = json.loads(bundle)
-            for item in bundle_data["objects"]:
-                if (
-                    "extensions" in item
-                    and "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-                    in item["extensions"]
-                ):
-                    octi_extensions = item["extensions"][
-                        "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-                    ]
-                    if octi_extensions.get("granted_refs") is not None:
-                        octi_extensions["granted_refs"] = list(
-                            set(
-                                octi_extensions["granted_refs"]
-                                + self.enrichment_shared_organizations
-                            )
-                        )
-                    else:
-                        octi_extensions["granted_refs"] = (
-                            self.enrichment_shared_organizations
-                        )
-                else:
-                    if item.get("x_opencti_granted_refs") is not None:
-                        item["x_opencti_granted_refs"] = list(
-                            set(
-                                item["x_opencti_granted_refs"]
-                                + self.enrichment_shared_organizations
-                            )
-                        )
-                    else:
-                        item["x_opencti_granted_refs"] = (
-                            self.enrichment_shared_organizations
-                        )
-            bundle = json.dumps(bundle_data)
+        bundle = self._apply_enrichment_shared_organizations(bundle)
 
         # If execution in playbook, callback the api
         if self.playbook is not None:

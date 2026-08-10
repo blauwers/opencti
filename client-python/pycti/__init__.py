@@ -9,6 +9,7 @@ from .connector.opencti_connector_helper import (
     OpenCTIConnectorHelper,
     get_config_variable,
 )
+from .connector.opencti_enrichment_batch import EnrichmentBatchResultStatus
 from .connector.opencti_metric_handler import OpenCTIMetricHandler
 from .entities.opencti_attack_pattern import AttackPattern
 from .entities.opencti_audit import Audit
@@ -116,6 +117,7 @@ __all__ = [
     "Channel",
     "Task",
     "ConnectorType",
+    "EnrichmentBatchResultStatus",
     "CourseOfAction",
     "DataComponent",
     "DataSource",

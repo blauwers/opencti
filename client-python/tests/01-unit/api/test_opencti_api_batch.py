@@ -458,3 +458,27 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
         "parentDeliveryId": "batch-delivery--parent",
         "childDeliveryIds": ["batch-delivery--child"],
     }
+
+
+def test_enrichment_batch_result_submit_forwards_graphql_variables_and_result():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+    )
+    client.query = MagicMock(
+        return_value={"data": {"enrichmentBatchResultSubmit": True}}
+    )
+
+    result = client.submit_enrichment_batch_result(
+        "connector--1",
+        '{"batch_id":"enrichment-batch--1"}',
+        '{"result_count":1}',
+    )
+
+    assert result is True
+    assert client.query.call_args.args[1] == {
+        "connectorId": "connector--1",
+        "envelope": '{"batch_id":"enrichment-batch--1"}',
+        "result": '{"result_count":1}',
+    }

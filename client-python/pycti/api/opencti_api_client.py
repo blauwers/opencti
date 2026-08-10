@@ -176,6 +176,11 @@ BATCH_DELIVERY_MARK_CHILDREN_PUBLISHED_MUTATION = """
                 }
             }
         """
+ENRICHMENT_BATCH_RESULT_SUBMIT_MUTATION = """
+            mutation EnrichmentBatchResultSubmit($connectorId: String!, $envelope: String!, $result: String!) {
+                enrichmentBatchResultSubmit(connectorId: $connectorId, envelope: $envelope, result: $result)
+            }
+        """
 
 # Global singleton variables for proxy certificate management
 _PROXY_CERT_BUNDLE = None
@@ -1341,6 +1346,24 @@ class OpenCTIApiClient:
             },
         )
         return result["data"]["batchDeliveryMarkChildrenPublished"]
+
+    def submit_enrichment_batch_result(
+        self,
+        connector_id: str,
+        envelope: str,
+        result: str,
+    ) -> bool:
+        """Submit one logical enrichment batch result envelope."""
+
+        query_result = self.query(
+            ENRICHMENT_BATCH_RESULT_SUBMIT_MUTATION,
+            {
+                "connectorId": connector_id,
+                "envelope": envelope,
+                "result": result,
+            },
+        )
+        return query_result["data"]["enrichmentBatchResultSubmit"]
 
     def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
         """Get file from the OpenCTI API.
