@@ -11,6 +11,7 @@ from requests import ConnectionError
 
 from src import push_handler
 from src.push_handler import (
+    BATCH_DELIVERY_CANDIDATE_ID_KEY,
     BATCH_DELIVERY_BRANCH_INTACT_REPLAY,
     BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
     BATCH_DELIVERY_BRANCH_OVERSIZED_CHUNK,
@@ -117,6 +118,14 @@ def build_v2_message(**overrides):
         "delivery_branch_kind": "ROOT",
         "delivery_branch_sequence": 0,
         "delivery_branch_ordinal": 0,
+    }
+    message.update(overrides)
+    return build_message(**message)
+
+
+def build_candidate_message(**overrides):
+    message = {
+        BATCH_DELIVERY_CANDIDATE_ID_KEY: "batch-delivery-candidate--1",
     }
     message.update(overrides)
     return build_message(**message)
@@ -806,6 +815,93 @@ def test_handler_reserves_v2_oversized_chunks_before_publishing(monkeypatch):
             ),
         ],
     )
+    handler.api.work.add_expectations.assert_not_called()
+    handler.api.work.report_expectation.assert_not_called()
+
+
+def test_handler_promotes_candidate_before_reserving_oversized_chunks(monkeypatch):
+    handler = build_handler()
+    handler.send_queue_message_to_specific_queue = MagicMock()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooLarge(200, 100)
+    )
+    batch_chunks = [
+        (
+            {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--1"}]},
+            {"version": 1, "ordered_object_ids": ["indicator--1"]},
+        ),
+        (
+            {"type": "bundle", "id": "bundle--1", "objects": [{"id": "indicator--2"}]},
+            {"version": 1, "ordered_object_ids": ["indicator--2"]},
+        ),
+    ]
+    monkeypatch.setattr(
+        push_handler.OpenCTIStix2,
+        "build_oversized_batch_plan_chunks",
+        lambda *args, **kwargs: batch_chunks,
+    )
+    channel = MagicMock()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.channel.return_value.__enter__.return_value = channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: connection
+    )
+    promoted_data = json.loads(
+        build_v2_message(
+            submission_id="batch-delivery-candidate--1",
+            delivery_id=build_root_delivery_id("batch-delivery-candidate--1"),
+            batch_delivery_candidate_id="batch-delivery-candidate--1",
+            split_bundles=False,
+            work_id="work--1",
+            batch_plan={"version": 1},
+        )
+    )
+    handler.api.promote_batch_delivery_root.return_value = {
+        "delivery_id": promoted_data["delivery_id"],
+        "queue_payload": json.dumps(promoted_data),
+    }
+
+    result = handler.handle_message(
+        build_candidate_message(
+            split_bundles=False,
+            work_id="work--1",
+            batch_plan={"version": 1},
+        )
+    )
+
+    assert result == "ack"
+    handler.api.promote_batch_delivery_root.assert_called_once()
+    candidate_id, queue_payload = handler.api.promote_batch_delivery_root.call_args.args
+    assert candidate_id == "batch-delivery-candidate--1"
+    assert json.loads(queue_payload)[BATCH_DELIVERY_CANDIDATE_ID_KEY] == candidate_id
+    reserve_call = handler.api.reserve_batch_delivery_children.call_args.args
+    assert reserve_call[0] == build_root_delivery_id(candidate_id)
+    handler.api.work.add_expectations.assert_not_called()
+    handler.api.work.report_expectation.assert_not_called()
+
+
+def test_handler_requeues_candidate_promotion_connection_failures(monkeypatch):
+    handler = build_handler()
+    handler.api.stix2.import_bundle_from_json_batch.side_effect = (
+        BatchMutationPlanTooLarge(200, 100)
+    )
+    handler.api.promote_batch_delivery_root.side_effect = ConnectionError(
+        "promotion unavailable"
+    )
+    monkeypatch.setattr(push_handler.time, "sleep", MagicMock())
+    monkeypatch.setattr(push_handler.random, "uniform", lambda *_: 0)
+
+    result = handler.handle_message(
+        build_candidate_message(
+            split_bundles=False,
+            work_id="work--1",
+            batch_plan={"version": 1},
+        )
+    )
+
+    assert result == "requeue"
+    handler.api.reserve_batch_delivery_children.assert_not_called()
     handler.api.work.add_expectations.assert_not_called()
     handler.api.work.report_expectation.assert_not_called()
 

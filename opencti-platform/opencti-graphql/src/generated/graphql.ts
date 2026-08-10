@@ -2171,6 +2171,12 @@ export enum BatchDeliveryKind {
   Root = 'ROOT'
 }
 
+export type BatchDeliveryRootPromotion = {
+  __typename?: 'BatchDeliveryRootPromotion';
+  delivery_id: Scalars['ID']['output'];
+  queue_payload: Scalars['String']['output'];
+};
+
 export enum BatchDeliveryState {
   Published = 'PUBLISHED',
   Ready = 'READY'
@@ -17434,6 +17440,7 @@ export type Mutation = {
   attackPatternEdit?: Maybe<AttackPatternEditMutations>;
   autoRegisterOpenCTI: Success;
   batchDeliveryMarkChildrenPublished: BatchDeliveryHandoff;
+  batchDeliveryPromoteRoot: BatchDeliveryRootPromotion;
   batchDeliveryReserveChildren: BatchDeliveryHandoff;
   batchMutationsExecute: BatchMutationExecution;
   bookmarkAdd?: Maybe<StixDomainObject>;
@@ -18089,6 +18096,12 @@ export type MutationAutoRegisterOpenCtiArgs = {
 export type MutationBatchDeliveryMarkChildrenPublishedArgs = {
   child_delivery_ids: Array<Scalars['ID']['input']>;
   parent_delivery_id: Scalars['ID']['input'];
+};
+
+
+export type MutationBatchDeliveryPromoteRootArgs = {
+  candidate_id: Scalars['ID']['input'];
+  queue_payload: Scalars['String']['input'];
 };
 
 
@@ -40138,6 +40151,7 @@ export type ResolversTypes = ResolversObject<{
   BatchDeliveryHandoff: ResolverTypeWrapper<BatchDeliveryHandoff>;
   BatchDeliveryHandoffEvidence: BatchDeliveryHandoffEvidence;
   BatchDeliveryKind: BatchDeliveryKind;
+  BatchDeliveryRootPromotion: ResolverTypeWrapper<BatchDeliveryRootPromotion>;
   BatchDeliveryState: BatchDeliveryState;
   BatchDirectDeliveryContextInput: BatchDirectDeliveryContextInput;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
@@ -41317,6 +41331,7 @@ export type ResolversParentTypes = ResolversObject<{
   BatchDeliveryChild: BatchDeliveryChild;
   BatchDeliveryChildReservationInput: BatchDeliveryChildReservationInput;
   BatchDeliveryHandoff: BatchDeliveryHandoff;
+  BatchDeliveryRootPromotion: BatchDeliveryRootPromotion;
   BatchDirectDeliveryContextInput: BatchDirectDeliveryContextInput;
   BatchExecuteOptionsInput: BatchExecuteOptionsInput;
   BatchExecutionReceipt: BatchExecutionReceipt;
@@ -43015,6 +43030,11 @@ export type BatchDeliveryHandoffResolvers<ContextType = any, ParentType extends 
   handoff_evidence?: Resolver<ResolversTypes['BatchDeliveryHandoffEvidence'], ParentType, ContextType>;
   parent_delivery_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
   pending_children?: Resolver<Array<ResolversTypes['BatchDeliveryChild']>, ParentType, ContextType>;
+}>;
+
+export type BatchDeliveryRootPromotionResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchDeliveryRootPromotion'] = ResolversParentTypes['BatchDeliveryRootPromotion']> = ResolversObject<{
+  delivery_id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  queue_payload?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
 }>;
 
 export type BatchExecutionReceiptResolvers<ContextType = any, ParentType extends ResolversParentTypes['BatchExecutionReceipt'] = ResolversParentTypes['BatchExecutionReceipt']> = ResolversObject<{
@@ -48254,6 +48274,7 @@ export type MutationResolvers<ContextType = any, ParentType extends ResolversPar
   attackPatternEdit?: Resolver<Maybe<ResolversTypes['AttackPatternEditMutations']>, ParentType, ContextType, RequireFields<MutationAttackPatternEditArgs, 'id'>>;
   autoRegisterOpenCTI?: Resolver<ResolversTypes['Success'], ParentType, ContextType, RequireFields<MutationAutoRegisterOpenCtiArgs, 'input'>>;
   batchDeliveryMarkChildrenPublished?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<MutationBatchDeliveryMarkChildrenPublishedArgs, 'child_delivery_ids' | 'parent_delivery_id'>>;
+  batchDeliveryPromoteRoot?: Resolver<ResolversTypes['BatchDeliveryRootPromotion'], ParentType, ContextType, RequireFields<MutationBatchDeliveryPromoteRootArgs, 'candidate_id' | 'queue_payload'>>;
   batchDeliveryReserveChildren?: Resolver<ResolversTypes['BatchDeliveryHandoff'], ParentType, ContextType, RequireFields<MutationBatchDeliveryReserveChildrenArgs, 'children' | 'parent_delivery_id'>>;
   batchMutationsExecute?: Resolver<ResolversTypes['BatchMutationExecution'], ParentType, ContextType, RequireFields<MutationBatchMutationsExecuteArgs, 'operations'>>;
   bookmarkAdd?: Resolver<Maybe<ResolversTypes['StixDomainObject']>, ParentType, ContextType, RequireFields<MutationBookmarkAddArgs, 'id' | 'type'>>;
@@ -54201,6 +54222,7 @@ export type Resolvers<ContextType = any> = ResolversObject<{
   BatchAdmission?: BatchAdmissionResolvers<ContextType>;
   BatchDeliveryChild?: BatchDeliveryChildResolvers<ContextType>;
   BatchDeliveryHandoff?: BatchDeliveryHandoffResolvers<ContextType>;
+  BatchDeliveryRootPromotion?: BatchDeliveryRootPromotionResolvers<ContextType>;
   BatchExecutionReceipt?: BatchExecutionReceiptResolvers<ContextType>;
   BatchExecutionReconciliation?: BatchExecutionReconciliationResolvers<ContextType>;
   BatchMutationExecution?: BatchMutationExecutionResolvers<ContextType>;

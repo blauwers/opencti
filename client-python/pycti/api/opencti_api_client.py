@@ -156,6 +156,14 @@ BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION = """
                 }
             }
         """
+BATCH_DELIVERY_PROMOTE_ROOT_MUTATION = """
+            mutation BatchDeliveryPromoteRoot($candidateId: ID!, $queuePayload: String!) {
+                batchDeliveryPromoteRoot(candidate_id: $candidateId, queue_payload: $queuePayload) {
+                    delivery_id
+                    queue_payload
+                }
+            }
+        """
 BATCH_DELIVERY_MARK_CHILDREN_PUBLISHED_MUTATION = """
             mutation BatchDeliveryMarkChildrenPublished($parentDeliveryId: ID!, $childDeliveryIds: [ID!]!) {
                 batchDeliveryMarkChildrenPublished(parent_delivery_id: $parentDeliveryId, child_delivery_ids: $childDeliveryIds) {
@@ -1340,6 +1348,21 @@ class OpenCTIApiClient:
             },
         )
         return result["data"]["batchDeliveryReserveChildren"]
+
+    def promote_batch_delivery_root(
+        self,
+        candidate_id: str,
+        queue_payload: str,
+    ) -> Dict[str, Any]:
+        """Promote one candidate-bearing legacy root into durable V2 delivery state."""
+        result = self.query(
+            BATCH_DELIVERY_PROMOTE_ROOT_MUTATION,
+            {
+                "candidateId": candidate_id,
+                "queuePayload": queue_payload,
+            },
+        )
+        return result["data"]["batchDeliveryPromoteRoot"]
 
     def mark_batch_delivery_children_published(
         self,

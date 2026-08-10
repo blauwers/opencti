@@ -20,6 +20,7 @@ from requests import RequestException, Timeout
 
 BATCH_REPLAY_COUNT_KEY = "batch_replay_count"
 BATCH_REPLAY_LIMIT = 4
+BATCH_DELIVERY_CANDIDATE_ID_KEY = "batch_delivery_candidate_id"
 BATCH_DELIVERY_PROTOCOL_V2 = 2
 BATCH_DELIVERY_PREFIX = "batch-delivery--"
 BATCH_DELIVERY_KIND_ROOT = "ROOT"
@@ -703,6 +704,34 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
                 )
         return branch_kind
 
+    def _promote_batch_delivery_candidate(
+        self,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if parse_batch_delivery_envelope(data) is not None:
+            return data
+        candidate_id = data.get(BATCH_DELIVERY_CANDIDATE_ID_KEY)
+        if candidate_id is None:
+            return data
+        if not isinstance(candidate_id, str) or len(candidate_id) == 0:
+            raise ValueError("Invalid batch delivery candidate")
+        promotion = self.api.promote_batch_delivery_root(
+            candidate_id,
+            json.dumps(data),
+        )
+        queue_payload = promotion.get("queue_payload")
+        if not isinstance(queue_payload, str) or len(queue_payload) == 0:
+            raise ValueError("Invalid promoted batch delivery payload")
+        promoted_data = json.loads(queue_payload)
+        envelope = parse_batch_delivery_envelope(promoted_data)
+        if (
+            envelope is None
+            or envelope.delivery_kind != BATCH_DELIVERY_KIND_ROOT
+            or promoted_data.get(BATCH_DELIVERY_CANDIDATE_ID_KEY) != candidate_id
+        ):
+            raise ValueError("Invalid promoted batch delivery payload")
+        return promoted_data
+
     def _report_expectations(
         self, work_ids: List[str], error: Optional[Dict[str, str]]
     ) -> None:
@@ -765,6 +794,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         add_expectations: bool,
         report_parent_expectation: bool,
     ) -> Literal["ack"]:
+        data = self._promote_batch_delivery_candidate(data)
         work_ids = batch_expectation_work_ids(data, work_id)
         platform_accounts_split_expectations = (
             uses_platform_split_expectation_accounting(data)
@@ -837,6 +867,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         work_id: Optional[str],
         error: Exception,
     ) -> Optional[Literal["ack"]]:
+        data = self._promote_batch_delivery_candidate(data)
         work_ids = batch_expectation_work_ids(data, work_id)
         platform_accounts_split_expectations = (
             uses_platform_split_expectation_accounting(data)

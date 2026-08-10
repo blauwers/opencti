@@ -475,6 +475,40 @@ describe('submitStixBundle', () => {
     expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-created', 1);
   });
 
+  it('marks ordinary v2-capable admissions for lazy split promotion without reserving durable state', async () => {
+    vi.mocked(resolveRequiredBatchDeliveryProtocol).mockResolvedValue(BatchDeliveryProtocol.V2);
+
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-1');
+
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.objectContaining({
+        batch_delivery_candidate_id: expect.stringMatching(/^batch-delivery-candidate--/),
+        split_bundles: false,
+      }),
+    );
+    expect(reserveBatchSubmission).not.toHaveBeenCalled();
+    expect(reserveBatchDelivery).not.toHaveBeenCalled();
+    expect(updateExpectationsNumber).toHaveBeenCalledWith(testContext, ADMIN_USER, 'work-1', 1);
+  });
+
+  it('keeps ordinary explicit legacy split admissions on the v1 worker-owned path', async () => {
+    vi.mocked(resolveRequiredBatchDeliveryProtocol).mockResolvedValue(BatchDeliveryProtocol.V2);
+
+    await submitStixBundle(testContext, ADMIN_USER, 'connector-1', bundle, 'work-1', {
+      splitBundles: true,
+    });
+
+    expect(resolveRequiredBatchDeliveryProtocol).not.toHaveBeenCalled();
+    expect(pushToWorkerForConnector).toHaveBeenCalledWith(
+      'connector-1',
+      expect.not.objectContaining({
+        batch_delivery_candidate_id: expect.any(String),
+      }),
+    );
+    expect(updateExpectationsNumber).not.toHaveBeenCalled();
+  });
+
   it('reuses one durable submission identity, generated work, and publication for an explicit-key replay', async () => {
     const options = { idempotencyKey: 'feed-run-2026-08-08' };
 

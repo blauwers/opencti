@@ -264,6 +264,7 @@ export const buildBatchQueueMessage = (
     batch_idempotency_key: admission.idempotencyKey,
     ...(admission.enrichmentBatchResult ? { enrichment_batch_result: admission.enrichmentBatchResult } : {}),
     ...(admission.additionalWorkIds ? { additional_work_ids: [...admission.additionalWorkIds] } : {}),
+    ...(admission.deliveryCandidateId ? { batch_delivery_candidate_id: admission.deliveryCandidateId } : {}),
     ...(admission.submissionId ? { submission_id: admission.submissionId } : {}),
     ...(deliveryEnvelope ?? {}),
     batch_plan: {

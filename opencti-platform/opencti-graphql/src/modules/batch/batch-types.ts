@@ -198,6 +198,7 @@ export interface BatchAdmission {
   submissionId?: string;
   rootDeliveryId?: string;
   requiredDeliveryProtocol?: BatchDeliveryProtocol;
+  deliveryCandidateId?: string;
   enrichmentBatchResult?: string;
   additionalWorkIds?: string[];
 }
@@ -233,6 +234,7 @@ export interface BatchQueueMessage {
   batch_idempotency_key: string;
   enrichment_batch_result?: string;
   additional_work_ids?: string[];
+  batch_delivery_candidate_id?: string;
   submission_id?: string;
   delivery_id?: string;
   parent_delivery_id?: string | null;

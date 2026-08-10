@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   assertBatchDeliveryReservation,
+  buildBatchDeliveryCandidateId,
   buildBatchDeliveryPayloadFingerprint,
   buildChildBatchDeliveryEnvelope,
   buildChildBatchDeliveryId,
@@ -8,6 +9,7 @@ import {
   buildRootBatchDeliveryId,
   loadBatchDeliveryHandoff,
   markBatchDeliveryChildrenPublished,
+  promoteBatchDeliveryCandidateRoot,
   reserveBatchDelivery,
   reserveBatchDeliveryChildren,
 } from '../../../../src/modules/batch/batch-delivery-domain';
@@ -146,6 +148,67 @@ describe('batch delivery domain', () => {
       delivery_branch_sequence: 0,
       delivery_branch_ordinal: 1,
     });
+  });
+
+  it('promotes one candidate-bearing root payload into durable v2 state and replays idempotently', async () => {
+    const candidateId = buildBatchDeliveryCandidateId();
+    const candidateQueueMessage = {
+      ...queueMessage,
+      submission_id: undefined,
+      batch_delivery_candidate_id: candidateId,
+    } as unknown as BatchQueueMessage;
+
+    const first = await promoteBatchDeliveryCandidateRoot(testContext, candidateId, candidateQueueMessage);
+    const replay = await promoteBatchDeliveryCandidateRoot(testContext, candidateId, candidateQueueMessage);
+
+    expect(first).toMatchObject({
+      internal_id: buildRootBatchDeliveryId(candidateId),
+      submission_id: candidateId,
+      delivery_kind: BatchDeliveryKind.Root,
+      branch_kind: BatchDeliveryBranchKind.Root,
+      required_worker_protocol: BatchDeliveryProtocol.V2,
+    });
+    expect(JSON.parse(first.queue_payload)).toMatchObject({
+      batch_delivery_candidate_id: candidateId,
+      submission_id: candidateId,
+      delivery_id: buildRootBatchDeliveryId(candidateId),
+      parent_delivery_id: null,
+      delivery_kind: BatchDeliveryKind.Root,
+      delivery_protocol_version: BatchDeliveryProtocol.V2,
+      delivery_branch_kind: BatchDeliveryBranchKind.Root,
+    });
+    expect(replay).toBe(first);
+    expect(elIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects candidate promotion when the candidate or payload identity is invalid', async () => {
+    const candidateId = buildBatchDeliveryCandidateId();
+    const candidateQueueMessage = {
+      ...queueMessage,
+      submission_id: undefined,
+      batch_delivery_candidate_id: candidateId,
+    } as unknown as BatchQueueMessage;
+
+    await expect(promoteBatchDeliveryCandidateRoot(testContext, 'batch-delivery-candidate--other', candidateQueueMessage))
+      .rejects.toThrowError(expect.objectContaining({
+        extensions: expect.objectContaining({
+          data: expect.objectContaining({
+            batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+          }),
+        }),
+      }));
+    await expect(promoteBatchDeliveryCandidateRoot(testContext, candidateId, {
+      ...candidateQueueMessage,
+      submission_id: candidateId,
+    }))
+      .rejects.toThrowError(expect.objectContaining({
+        extensions: expect.objectContaining({
+          data: expect.objectContaining({
+            batch_error_code: BatchAdmissionErrorCode.DeliveryIdentityConflict,
+          }),
+        }),
+      }));
+    expect(elIndex).not.toHaveBeenCalled();
   });
 
   it('reserves one durable root delivery and returns it on an identical retry', async () => {

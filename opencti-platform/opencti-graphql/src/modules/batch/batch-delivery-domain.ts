@@ -1,4 +1,5 @@
 import jsonCanonicalize from 'canonicalize';
+import { v4 as uuidv4 } from 'uuid';
 import { FunctionalError } from '../../config/errors';
 import { elFindByIds, elIndex, elLoadById, elUpdate } from '../../database/engine';
 import { INDEX_INTERNAL_OBJECTS, READ_INDEX_INTERNAL_OBJECTS } from '../../database/utils';
@@ -26,6 +27,7 @@ import {
 } from './batch-types';
 
 const BATCH_DELIVERY_PREFIX = 'batch-delivery--';
+const BATCH_DELIVERY_CANDIDATE_PREFIX = 'batch-delivery-candidate--';
 const BATCH_DELIVERY_QUEUE_PAYLOAD_VERSION = 1;
 const BATCH_DELIVERY_HANDOFF_LOCK_PREFIX = 'batch-delivery-handoff:';
 const BATCH_DELIVERY_STATE_ORDER = {
@@ -55,6 +57,10 @@ export interface ReserveBatchDeliveryInput {
   queueMessage: BatchQueueMessage;
   requiredWorkerProtocol: BatchDeliveryProtocol;
 }
+
+const isBatchDeliveryCandidateId = (candidateId: unknown): candidateId is string => {
+  return typeof candidateId === 'string' && candidateId.startsWith(BATCH_DELIVERY_CANDIDATE_PREFIX) && candidateId.length > BATCH_DELIVERY_CANDIDATE_PREFIX.length;
+};
 
 type BatchDeliveryStatePatch = Partial<Pick<BatchDelivery, 'published_at' | 'last_error'>>;
 type BatchDeliveryHandoffPatch = Partial<Pick<
@@ -239,6 +245,10 @@ export const buildBatchDeliveryPayloadFingerprint = (payload: unknown): string =
   return hashSHA256(canonicalPayload);
 };
 
+export const buildBatchDeliveryCandidateId = (): string => {
+  return `${BATCH_DELIVERY_CANDIDATE_PREFIX}${uuidv4()}`;
+};
+
 export const buildRootBatchDeliveryId = (submissionId: string): string => {
   return `${BATCH_DELIVERY_PREFIX}${hashSHA256(JSON.stringify([
     submissionId,
@@ -279,6 +289,51 @@ export const buildRootBatchDeliveryEnvelope = (submissionId: string): BatchDeliv
     delivery_branch_sequence: 0,
     delivery_branch_ordinal: 0,
   };
+};
+
+export const promoteBatchDeliveryCandidateRoot = async (
+  context: AuthContext,
+  candidateId: string,
+  queueMessage: BatchQueueMessage,
+): Promise<BatchDelivery> => {
+  if (!isBatchDeliveryCandidateId(candidateId) || queueMessage.batch_delivery_candidate_id !== candidateId) {
+    throw batchDeliveryConflict('Invalid batch delivery promotion candidate', {
+      candidate_id: candidateId,
+      queue_candidate_id: queueMessage.batch_delivery_candidate_id,
+    });
+  }
+  if (
+    queueMessage.submission_id !== undefined
+    || queueMessage.delivery_id !== undefined
+    || queueMessage.delivery_protocol_version !== undefined
+    || queueMessage.parent_delivery_id !== undefined
+    || queueMessage.delivery_kind !== undefined
+    || queueMessage.delivery_branch_kind !== undefined
+    || queueMessage.delivery_branch_sequence !== undefined
+    || queueMessage.delivery_branch_ordinal !== undefined
+  ) {
+    throw batchDeliveryConflict('Batch delivery promotion payload already has delivery identity', {
+      candidate_id: candidateId,
+    });
+  }
+  const rootEnvelope = buildRootBatchDeliveryEnvelope(candidateId);
+  const promotedQueueMessage = {
+    ...queueMessage,
+    submission_id: candidateId,
+    ...rootEnvelope,
+  };
+  return reserveBatchDelivery(context, {
+    deliveryId: rootEnvelope.delivery_id,
+    submissionId: candidateId,
+    parentDeliveryId: null,
+    deliveryKind: BatchDeliveryKind.Root,
+    branchKind: BatchDeliveryBranchKind.Root,
+    branchSequence: 0,
+    branchOrdinal: 0,
+    payloadFingerprint: buildBatchDeliveryContentFingerprint(promotedQueueMessage),
+    queueMessage: promotedQueueMessage,
+    requiredWorkerProtocol: BatchDeliveryProtocol.V2,
+  });
 };
 
 export const buildChildBatchDeliveryEnvelope = (

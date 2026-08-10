@@ -1,7 +1,7 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import { submitStixBundle } from '../../domain/stix';
 import { submitEnrichmentBatchResult } from '../enrichment/enrichment-batch-domain';
-import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, reserveBatchDeliveryChildren } from './batch-delivery-domain';
+import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, promoteBatchDeliveryCandidateRoot, reserveBatchDeliveryChildren } from './batch-delivery-domain';
 import { loadBatchExecutionReconciliation } from './batch-execution-reconciliation-domain';
 import { loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';
 import { executeBatchGraphqlOperations } from './batch-operation-executor';
@@ -169,6 +169,14 @@ const batchResolvers = {
         } satisfies BatchDirectDeliveryContext
         : undefined,
     }),
+    batchDeliveryPromoteRoot: (
+      _: unknown,
+      {
+        candidate_id,
+        queue_payload,
+      }: { candidate_id: string; queue_payload: string },
+      context: any,
+    ) => promoteBatchDeliveryCandidateRoot(context, candidate_id, parseBatchDeliveryQueuePayload(queue_payload)),
     batchDeliveryReserveChildren: (
       _: unknown,
       {
@@ -226,6 +234,10 @@ const batchResolvers = {
   BatchDeliveryChild: {
     delivery_id: (delivery: any) => delivery.internal_id,
     state: (delivery: any) => delivery.state,
+    queue_payload: (delivery: any) => delivery.queue_payload,
+  },
+  BatchDeliveryRootPromotion: {
+    delivery_id: (delivery: any) => delivery.internal_id,
     queue_payload: (delivery: any) => delivery.queue_payload,
   },
   BatchExecutionReceipt: {

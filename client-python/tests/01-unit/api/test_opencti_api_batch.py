@@ -459,6 +459,14 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
             {"data": {"batchDeliveryHandoff": {"handoff_evidence": "NONE"}}},
             {
                 "data": {
+                    "batchDeliveryPromoteRoot": {
+                        "delivery_id": "batch-delivery--root",
+                        "queue_payload": "{}",
+                    }
+                }
+            },
+            {
+                "data": {
                     "batchDeliveryReserveChildren": {
                         "handoff_evidence": "CHILDREN_RESERVED"
                     }
@@ -483,6 +491,10 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
     ]
 
     handoff = client.batch_delivery_handoff("batch-delivery--parent")
+    promoted = client.promote_batch_delivery_root(
+        "batch-delivery-candidate--1",
+        '{"batch_delivery_candidate_id":"batch-delivery-candidate--1"}',
+    )
     reserved = client.reserve_batch_delivery_children(
         "batch-delivery--parent", children
     )
@@ -491,16 +503,24 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
     )
 
     assert handoff == {"handoff_evidence": "NONE"}
+    assert promoted == {
+        "delivery_id": "batch-delivery--root",
+        "queue_payload": "{}",
+    }
     assert reserved == {"handoff_evidence": "CHILDREN_RESERVED"}
     assert published == {"handoff_evidence": "CHILDREN_PUBLISHED"}
     assert client.query.call_args_list[0].args[1] == {
         "parentDeliveryId": "batch-delivery--parent"
     }
     assert client.query.call_args_list[1].args[1] == {
+        "candidateId": "batch-delivery-candidate--1",
+        "queuePayload": '{"batch_delivery_candidate_id":"batch-delivery-candidate--1"}',
+    }
+    assert client.query.call_args_list[2].args[1] == {
         "parentDeliveryId": "batch-delivery--parent",
         "children": children,
     }
-    assert client.query.call_args_list[2].args[1] == {
+    assert client.query.call_args_list[3].args[1] == {
         "parentDeliveryId": "batch-delivery--parent",
         "childDeliveryIds": ["batch-delivery--child"],
     }

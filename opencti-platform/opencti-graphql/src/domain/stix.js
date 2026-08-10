@@ -39,6 +39,7 @@ import {
 } from '../modules/batch/batch-domain';
 import {
   advanceBatchDeliveryState,
+  buildBatchDeliveryCandidateId,
   buildRootBatchDeliveryEnvelope,
   buildRootBatchDeliveryId,
   isBatchDeliveryStateAtLeast,
@@ -279,6 +280,12 @@ const submitUntrackedBatch = async (context, user, connector, connectorId, workI
     targetWorkId = work.id;
   }
   const admission = buildBatchAdmission(connectorId, targetWorkId, preparedBundle);
+  if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
+    const requiredDeliveryProtocol = await resolveRequiredBatchDeliveryProtocol();
+    if (requiredDeliveryProtocol === BatchDeliveryProtocol.V2) {
+      admission.deliveryCandidateId = buildBatchDeliveryCandidateId();
+    }
+  }
   if (admission.executionMode !== BatchExecutionMode.LegacySplit) {
     await updateExpectationsNumber(context, user, targetWorkId, 1);
   }
