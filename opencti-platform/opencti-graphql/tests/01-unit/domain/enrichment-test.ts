@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildAutoEnrichmentSideEffect, createEntityAutoEnrichment } from '../../../src/domain/enrichment';
-import { createWork } from '../../../src/domain/work';
+import { createWork, createWorks } from '../../../src/domain/work';
 import { pushToConnector } from '../../../src/database/rabbitmq';
 import { getEntitiesListFromCache } from '../../../src/database/cache';
 import { isUserCanAccessStoreElement } from '../../../src/utils/access';
@@ -15,6 +15,7 @@ import {
 
 vi.mock('../../../src/domain/work', () => ({
   createWork: vi.fn(),
+  createWorks: vi.fn(),
 }));
 
 vi.mock('../../../src/database/rabbitmq', () => ({
@@ -84,6 +85,7 @@ describe('createEntityAutoEnrichment', () => {
     vi.mocked(createWork)
       .mockResolvedValueOnce({ id: 'work-1' } as never)
       .mockResolvedValueOnce({ id: 'work-2' } as never);
+    vi.mocked(createWorks).mockResolvedValue([{ id: 'work-1' }, { id: 'work-2' }] as never);
     vi.mocked(pushToConnector).mockResolvedValue(undefined as never);
   });
 
@@ -189,10 +191,9 @@ describe('createEntityAutoEnrichment', () => {
       ...connectors[0],
       enrichment_batch_capability: DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
     }] as never);
-    vi.mocked(createWork)
+    vi.mocked(createWorks)
       .mockReset()
-      .mockResolvedValueOnce({ id: 'work-1' } as never)
-      .mockResolvedValueOnce({ id: 'work-2' } as never);
+      .mockResolvedValueOnce([{ id: 'work-1' }, { id: 'work-2' }] as never);
     const firstElement = { ...element, standard_id: 'indicator--1', internal_id: 'indicator-internal-1' };
     const secondElement = { ...element, standard_id: 'indicator--2', internal_id: 'indicator-internal-2' };
 
@@ -215,6 +216,7 @@ describe('createEntityAutoEnrichment', () => {
       },
     ]);
 
+    expect(createWorks).toHaveBeenCalledTimes(1);
     expect(pushToConnector).toHaveBeenCalledTimes(1);
     const message = vi.mocked(pushToConnector).mock.calls[0][1];
     expect(message.internal).toMatchObject({
@@ -230,20 +232,15 @@ describe('createEntityAutoEnrichment', () => {
     expect(envelope.items.map((item) => item.entity_id).sort()).toEqual(['indicator--1', 'indicator--2']);
   });
 
-  it('keeps legacy connector requests on independent bounded dispatches inside a batch', async () => {
+  it('creates one bulk work set for legacy connector requests inside a batch', async () => {
     vi.mocked(getEntitiesListFromCache).mockResolvedValue([connectors[0]] as never);
-    let resolveFirstWork!: (work: { id: string }) => void;
-    const firstWork = new Promise<{ id: string }>((resolve) => {
-      resolveFirstWork = resolve;
-    });
-    vi.mocked(createWork)
+    vi.mocked(createWorks)
       .mockReset()
-      .mockImplementationOnce(() => firstWork as never)
-      .mockResolvedValueOnce({ id: 'work-2' } as never);
+      .mockResolvedValueOnce([{ id: 'work-1' }, { id: 'work-2' }] as never);
     const firstElement = { ...element, standard_id: 'indicator--1', internal_id: 'indicator-internal-1' };
     const secondElement = { ...element, standard_id: 'indicator--2', internal_id: 'indicator-internal-2' };
 
-    const execution = executeBatchMutations([
+    await executeBatchMutations([
       {
         kind: BatchMutationKind.CreateEntity,
         executeWrite: async () => firstElement,
@@ -262,10 +259,8 @@ describe('createEntityAutoEnrichment', () => {
       },
     ]);
 
-    await vi.waitFor(() => expect(createWork).toHaveBeenCalledTimes(2));
-    resolveFirstWork({ id: 'work-1' });
-    await execution;
-
+    expect(createWorks).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(createWorks).mock.calls[0][2]).toHaveLength(2);
     expect(pushToConnector).toHaveBeenCalledTimes(2);
     expect(vi.mocked(pushToConnector).mock.calls.map(([, message]) => message.event.entity_id).sort()).toEqual([
       'indicator--1',
@@ -279,9 +274,9 @@ describe('createEntityAutoEnrichment', () => {
       auto_update: true,
       enrichment_batch_capability: DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
     }] as never);
-    vi.mocked(createWork)
+    vi.mocked(createWorks)
       .mockReset()
-      .mockResolvedValueOnce({ id: 'work-1' } as never);
+      .mockResolvedValueOnce([{ id: 'work-1' }] as never);
     const firstElement = { ...element, name: 'first-snapshot' };
     const secondElement = { ...element, name: 'second-snapshot' };
 
@@ -304,7 +299,7 @@ describe('createEntityAutoEnrichment', () => {
       },
     ]);
 
-    expect(createWork).toHaveBeenCalledTimes(1);
+    expect(createWorks).toHaveBeenCalledTimes(1);
     expect(pushToConnector).toHaveBeenCalledTimes(1);
     expect(vi.mocked(pushToConnector).mock.calls[0][1].event).toMatchObject({
       stix_entity: '{"id":"indicator--test","snapshot":2}',
@@ -323,12 +318,9 @@ describe('createEntityAutoEnrichment', () => {
       .mockReturnValueOnce('draft--1')
       .mockReturnValueOnce('draft--2')
       .mockReturnValueOnce('draft--2');
-    vi.mocked(createWork)
+    vi.mocked(createWorks)
       .mockReset()
-      .mockResolvedValueOnce({ id: 'work-1' } as never)
-      .mockResolvedValueOnce({ id: 'work-2' } as never)
-      .mockResolvedValueOnce({ id: 'work-3' } as never)
-      .mockResolvedValueOnce({ id: 'work-4' } as never);
+      .mockResolvedValueOnce([{ id: 'work-1' }, { id: 'work-2' }, { id: 'work-3' }, { id: 'work-4' }] as never);
     const elements = [1, 2, 3, 4].map((suffix) => ({
       ...element,
       standard_id: `indicator--${suffix}`,
@@ -361,10 +353,9 @@ describe('createEntityAutoEnrichment', () => {
       ...connectors[0],
       enrichment_batch_capability: DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
     }] as never);
-    vi.mocked(createWork)
+    vi.mocked(createWorks)
       .mockReset()
-      .mockResolvedValueOnce({ id: 'work-1' } as never)
-      .mockResolvedValueOnce({ id: 'work-2' } as never);
+      .mockResolvedValueOnce([{ id: 'work-1' }, { id: 'work-2' }] as never);
     const enabledElements = [1, 2].map((suffix) => ({
       ...element,
       standard_id: `indicator--${suffix}`,
@@ -386,7 +377,7 @@ describe('createEntityAutoEnrichment', () => {
       })],
     })));
 
-    expect(createWork).toHaveBeenCalledTimes(2);
+    expect(createWorks).toHaveBeenCalledTimes(1);
     expect(pushToConnector).toHaveBeenCalledTimes(1);
     const envelope = parseEnrichmentBatchEnvelope(
       vi.mocked(pushToConnector).mock.calls[0][1].event.enrichment_batch,

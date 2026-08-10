@@ -743,6 +743,19 @@ export const redisInitializeWork = async (workId: string, isMultiPartWork: boole
     });
   });
 };
+export const redisInitializeWorks = async (works: Array<{ workId: string; isMultiPartWork: boolean }>) => {
+  if (works.length === 0) {
+    return;
+  }
+  await redisTx(getClientBase(), async (tx) => {
+    for (const work of works) {
+      await updateObjectRaw(tx, work.workId, {
+        is_initialized: true,
+        is_multipart: work.isMultiPartWork,
+      });
+    }
+  });
+};
 // Atomic first-completion marker for a work: SET NX guarantees that exactly
 // one caller wins, whichever completion path (reportExpectation vs
 // updateProcessedTime) and whichever node observes the completion first.

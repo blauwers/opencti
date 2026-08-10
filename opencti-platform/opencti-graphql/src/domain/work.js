@@ -3,15 +3,28 @@ import * as R from 'ramda';
 import { logApp } from '../config/conf';
 import { AlreadyDeletedError, DatabaseError } from '../config/errors';
 import { IMPORT_CSV_CONNECTOR, IMPORT_CSV_CONNECTOR_ID } from '../connector/importCsv/importCsv';
-import { elDeleteInstances, elIndex, elLoadById, elPaginate, elRawDeleteByQuery, elUpdateWithBufferedApply, ES_MINIMUM_FIXED_PAGINATION } from '../database/engine';
+import {
+  BULK_TIMEOUT,
+  elBulk,
+  elDeleteInstances,
+  elFindByIds,
+  elIndex,
+  elLoadById,
+  elPaginate,
+  elRawDeleteByQuery,
+  elUpdateWithBufferedApply,
+  ES_MINIMUM_FIXED_PAGINATION,
+  MAX_BULK_OPERATIONS,
+} from '../database/engine';
 import { internalLoadById } from '../database/middleware-loader';
 import {
   redisAcquireWorkCompletionFlag,
   redisDeleteWorks,
   redisGetWork,
   redisGetWorkCompletionState,
-  redisInitializeWork,
   redisApplyBatchExpectation,
+  redisInitializeWork,
+  redisInitializeWorks,
   redisMarkWorkAsProcessed,
   redisUpdateActionExpectation,
   redisUpdateWorkFigures,
@@ -27,7 +40,7 @@ import { RELATION_OBJECT_MARKING } from '../schema/stixRefRelationship';
 import { addFilter } from '../utils/filtering/filtering-utils';
 import { now, sinceNowInMinutes } from '../utils/format';
 import { addIngestionObjectsProcessedCount } from '../manager/telemetryManager';
-import { BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind, registerBatchSideEffect } from '../modules/batch/batch-executor';
+import { BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS, BatchSideEffectKind, isBatchWriteBoundaryOpen, registerBatchSideEffect } from '../modules/batch/batch-executor';
 
 export const workToExportFile = (work) => {
   const lastModifiedSinceMin = sinceNowInMinutes(work.updated_at);
@@ -217,8 +230,7 @@ export const deleteWorkForSource = async (sourceId) => {
   });
 };
 
-export const createWork = async (context, user, connector, friendlyName, sourceId, args = {}) => {
-  // Create the new work
+const buildWorkDocument = (user, connector, friendlyName, sourceId, args = {}) => {
   const {
     receivedTime = null,
     background_task_id,
@@ -227,7 +239,6 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
     preallocatedWork,
   } = args;
   const isMultiPartWork = args.isMultiPartWork === true;
-  // Create the work and an initial job
   const { id: workId, timestamp } = preallocatedWork ?? generateWorkId(connector.internal_id);
   const work = {
     internal_id: workId,
@@ -257,22 +268,93 @@ export const createWork = async (context, user, connector, friendlyName, sourceI
   if (draftContext) {
     work.draft_context = draftContext;
   }
-  await elIndex(INDEX_HISTORY, work, { context });
-  const createdWork = await loadWorkById(context, user, workId);
-  // If work was created, initialize work on redis
-  if (createdWork) {
-    await registerBatchSideEffect({
-      kind: BatchSideEffectKind.WorkLifecycle,
-      sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
-      execute: () => redisInitializeWork(createdWork.id, isMultiPartWork),
-    });
-  }
+  return { isMultiPartWork, work };
+};
+
+const logWorkInitiated = (connector, workId) => {
   logApp.info('Work initiated', {
     workId,
     connector_id: connector.internal_id,
     connector_name: connector.connector_name,
     connector_type: connector.connector_type,
   });
+};
+
+const registerWorksInitialization = async (works) => {
+  if (works.length === 0) {
+    return;
+  }
+  await registerBatchSideEffect({
+    kind: BatchSideEffectKind.WorkLifecycle,
+    sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.workLifecycleRedisInitialize,
+    execute: () => {
+      if (works.length === 1) {
+        return redisInitializeWork(works[0].workId, works[0].isMultiPartWork);
+      }
+      return redisInitializeWorks(works);
+    },
+  });
+};
+
+const indexWorks = async (context, works) => {
+  if (isBatchWriteBoundaryOpen()) {
+    await Promise.all(works.map((work) => elIndex(INDEX_HISTORY, work, { context })));
+    return;
+  }
+  const workGroups = R.splitEvery(MAX_BULK_OPERATIONS, works);
+  for (const workGroup of workGroups) {
+    const body = workGroup.flatMap((work) => [
+      { index: { _index: INDEX_HISTORY, _id: work.internal_id } },
+      R.dissoc('_index', work),
+    ]);
+    await elBulk(context, { refresh: true, timeout: BULK_TIMEOUT, body });
+  }
+};
+
+const loadCreatedWorks = async (context, user, works) => {
+  const loadedWorks = await elFindByIds(context, user, works.map((work) => work.internal_id), {
+    indices: READ_INDEX_HISTORY,
+    type: ENTITY_TYPE_WORK,
+    withoutRels: false,
+  });
+  const loadedWorksById = new Map(loadedWorks.map((work) => [work.internal_id, work]));
+  return works.map((work) => {
+    const loadedWork = loadedWorksById.get(work.internal_id);
+    return loadedWork ? R.assoc('id', work.internal_id, loadedWork) : undefined;
+  });
+};
+
+export const createWorks = async (context, user, workInputs) => {
+  if (!Array.isArray(workInputs) || workInputs.length === 0) {
+    return [];
+  }
+  if (workInputs.length === 1) {
+    const [{ connector, friendlyName, sourceId, args = {} }] = workInputs;
+    return [await createWork(context, user, connector, friendlyName, sourceId, args)];
+  }
+  const preparedWorks = workInputs.map(({ connector, friendlyName, sourceId, args = {} }) => ({
+    connector,
+    ...buildWorkDocument(user, connector, friendlyName, sourceId, args),
+  }));
+  const works = preparedWorks.map(({ work }) => work);
+  await indexWorks(context, works);
+  const createdWorks = await loadCreatedWorks(context, user, works);
+  await registerWorksInitialization(createdWorks.flatMap((createdWork, index) => {
+    return createdWork ? [{ workId: createdWork.id, isMultiPartWork: preparedWorks[index].isMultiPartWork }] : [];
+  }));
+  preparedWorks.forEach(({ connector, work }) => logWorkInitiated(connector, work.internal_id));
+  return createdWorks;
+};
+
+export const createWork = async (context, user, connector, friendlyName, sourceId, args = {}) => {
+  const { isMultiPartWork, work } = buildWorkDocument(user, connector, friendlyName, sourceId, args);
+  await elIndex(INDEX_HISTORY, work, { context });
+  const createdWork = await loadWorkById(context, user, work.internal_id);
+  // If work was created, initialize work on redis
+  if (createdWork) {
+    await registerWorksInitialization([{ workId: createdWork.id, isMultiPartWork }]);
+  }
+  logWorkInitiated(connector, work.internal_id);
   return createdWork;
 };
 

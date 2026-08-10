@@ -1,6 +1,6 @@
 import { Promise } from 'bluebird';
 import { map } from 'ramda';
-import { createWork } from './work';
+import { createWork, createWorks } from './work';
 import { pushToConnector } from '../database/rabbitmq';
 import { ENTITY_TYPE_CONNECTOR } from '../schema/internalObject';
 import { isStixObject } from '../schema/stixCoreObject';
@@ -205,7 +205,7 @@ const publishEventToConnectors = async (context, user, element, targetConnectors
 };
 
 const publishBatchAutoEnrichmentRequests = async (requests) => {
-  const legacyRequests = [];
+  const legacyItems = [];
   const selectedItemsByKey = new Map();
   for (const request of requests) {
     if (!isStixObject(request.element.entity_type) || request.element.auto_enrichment_disable) {
@@ -229,34 +229,46 @@ const publishBatchAutoEnrichmentRequests = async (requests) => {
       selectedItemsByKey.set(dedupeKey, { request, connector, capability });
     }
     if (legacyConnectors.length > 0) {
-      legacyRequests.push({ request, connectors: legacyConnectors });
+      legacyConnectors.forEach((connector) => legacyItems.push({ request, connector }));
     }
   }
 
+  const selectedItems = Array.from(selectedItemsByKey.values());
+  const workItems = [...legacyItems, ...selectedItems];
+  if (workItems.length === 0) {
+    return;
+  }
+  const createdWorks = await createWorks(
+    workItems[0].request.contextOutOfDraft,
+    workItems[0].request.user,
+    workItems.map(({ request, connector }) => ({
+      connector,
+      friendlyName: request.draftContext
+        ? `Enrichment (${request.element.standard_id}) in draft ${request.draftContext}`
+        : `Enrichment (${request.element.standard_id})`,
+      sourceId: request.element.standard_id,
+      args: { draftContext: request.draftContext },
+    })),
+  );
+
   await promiseMap(
-    legacyRequests,
-    ({ request, connectors }) => publishLegacyEnrichmentRequest(request, connectors),
+    legacyItems,
+    async ({ request, connector }, index) => {
+      await pushLegacyEnrichmentItem(await buildPreparedEnrichmentItem(request, connector, createdWorks[index]));
+    },
     BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS,
   );
 
-  const preparedItems = [];
-  for (const { request, connector, capability } of selectedItemsByKey.values()) {
-    const workMessage = request.draftContext
-      ? `Enrichment (${request.element.standard_id}) in draft ${request.draftContext}`
-      : `Enrichment (${request.element.standard_id})`;
-    const work = await createWork(
-      request.contextOutOfDraft,
-      request.user,
-      connector,
-      workMessage,
-      request.element.standard_id,
-      { draftContext: request.draftContext },
-    );
-    preparedItems.push({
-      ...(await buildPreparedEnrichmentItem(request, connector, work)),
-      capability,
-    });
-  }
+  const preparedItems = await promiseMap(
+    selectedItems,
+    async ({ request, connector, capability }, index) => {
+      return {
+        ...(await buildPreparedEnrichmentItem(request, connector, createdWorks[legacyItems.length + index])),
+        capability,
+      };
+    },
+    BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS,
+  );
 
   const batchGroups = new Map();
   for (const item of preparedItems) {
