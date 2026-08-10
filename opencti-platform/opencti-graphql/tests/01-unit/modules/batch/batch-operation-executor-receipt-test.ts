@@ -103,17 +103,34 @@ const buildDirectDeliveryContext = (candidate: BatchDelivery): BatchDirectDelive
   delivery_branch_sequence: candidate.branch_sequence,
   delivery_branch_ordinal: candidate.branch_ordinal,
 });
-const buildOversizedDelivery = (deliveryId: string, branchOrdinal: number): BatchDelivery => ({
+const buildChildDelivery = (
+  deliveryId: string,
+  branchKind: BatchDeliveryBranchKind,
+  branchOrdinal: number,
+): BatchDelivery => ({
   ...delivery,
   id: deliveryId,
   internal_id: deliveryId,
   standard_id: deliveryId,
-  parent_delivery_id: 'batch-delivery--oversized-parent',
+  parent_delivery_id: 'batch-delivery--child-parent',
   delivery_kind: BatchDeliveryKind.Child,
-  branch_kind: BatchDeliveryBranchKind.OversizedChunk,
+  branch_kind: branchKind,
+  branch_sequence: branchKind === BatchDeliveryBranchKind.IntactReplay ? 1 : 0,
   branch_ordinal: branchOrdinal,
-  payload_fingerprint: `payload-fingerprint-oversized-${branchOrdinal}`,
+  payload_fingerprint: `payload-fingerprint-child-${branchKind}-${branchOrdinal}`,
 });
+const buildDeferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+};
+const serializedChildBranchKinds = [
+  BatchDeliveryBranchKind.LegacySplit,
+  BatchDeliveryBranchKind.OversizedChunk,
+  BatchDeliveryBranchKind.IntactReplay,
+] as const;
 const operation = {
   query,
   variables: JSON.stringify({ value: 'one' }),
@@ -280,32 +297,14 @@ describe('batch GraphQL execution receipt boundary', () => {
     expect(calls).toEqual(['observation:start', 'write:one', 'observation:stop']);
   });
 
-  it('serializes oversized descendants from one submission before batch admission', async () => {
-    const firstDelivery = buildOversizedDelivery('batch-delivery--oversized-one', 0);
-    const secondDelivery = buildOversizedDelivery('batch-delivery--oversized-two', 1);
+  it.each(serializedChildBranchKinds)('serializes %s descendants from one submission before execution', async (branchKind) => {
+    const firstDelivery = buildChildDelivery(`batch-delivery--${branchKind}-one`, branchKind, 0);
+    const secondDelivery = buildChildDelivery(`batch-delivery--${branchKind}-two`, branchKind, 1);
     deliveries.set(firstDelivery.internal_id, firstDelivery);
     deliveries.set(secondDelivery.internal_id, secondDelivery);
-    const firstWriteStarted = (() => {
-      let resolve!: () => void;
-      const promise = new Promise<void>((promiseResolve) => {
-        resolve = promiseResolve;
-      });
-      return { promise, resolve };
-    })();
-    const releaseFirstWrite = (() => {
-      let resolve!: () => void;
-      const promise = new Promise<void>((promiseResolve) => {
-        resolve = promiseResolve;
-      });
-      return { promise, resolve };
-    })();
-    const secondSerializationAttempted = (() => {
-      let resolve!: () => void;
-      const promise = new Promise<void>((promiseResolve) => {
-        resolve = promiseResolve;
-      });
-      return { promise, resolve };
-    })();
+    const firstWriteStarted = buildDeferred();
+    const releaseFirstWrite = buildDeferred();
+    const secondSerializationAttempted = buildDeferred();
     const serializationLockId = buildBatchDirectDeliveryExecutionLockId(firstDelivery.submission_id);
     let serializationLockHeld = false;
     let releaseSerializationWaiter: (() => void) | undefined;

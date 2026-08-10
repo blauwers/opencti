@@ -8,7 +8,9 @@ type BatchDirectDeliveryExecutionLock = {
 
 const BATCH_DIRECT_DELIVERY_EXECUTION_LOCK_PREFIX = 'batch-direct-delivery-execution:';
 const BATCH_DIRECT_DELIVERY_SERIALIZED_BRANCH_KINDS = new Set([
+  BatchDeliveryBranchKind.LegacySplit,
   BatchDeliveryBranchKind.OversizedChunk,
+  BatchDeliveryBranchKind.IntactReplay,
 ]);
 
 export const buildBatchDirectDeliveryExecutionLockId = (submissionId: string): string => {
@@ -21,9 +23,9 @@ export const acquireBatchDirectDeliveryExecutionLock = async (
   if (!BATCH_DIRECT_DELIVERY_SERIALIZED_BRANCH_KINDS.has(delivery.branch_kind)) {
     return undefined;
   }
-  // Oversized chunks are descendants of a sequential client-side plan. Keep
-  // descendants from one submission from retaining overlapping entity locks
-  // concurrently while still allowing unrelated submissions to run in parallel.
+  // Child descendants from one submission can overlap on retained entity locks,
+  // especially after split or replay handoffs. Keep one child execution active
+  // per submission while still allowing unrelated submissions to run in parallel.
   const lock = await lockResources(
     [buildBatchDirectDeliveryExecutionLockId(delivery.submission_id)],
     getBatchLongWaitLockOptions(),
