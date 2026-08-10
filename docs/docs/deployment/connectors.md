@@ -163,11 +163,11 @@ Once this is set, you have a few more parameters to be able to customize the HTT
 | connector:listen_protocol_api_ssl_cert        | LISTEN_PROTOCOL_API_SSL_CERT        |                        | SSL Cert for TLS mode                                                          |
 | connector:listen_protocol_api_ssl_passphrase  | LISTEN_PROTOCOL_API_SSL_PASSPHRASE  |                        | Optional passphrase for the SSL key                                            |
 
-For AMQP listeners, callback execution stays serial by default. Connectors that can safely process independent jobs in parallel can raise the bounded in-flight limits below.
+Listener callback execution stays serial by default. Connectors that can safely process independent jobs in parallel can raise the bounded worker limit below; the prefetch limit applies only to AMQP deliveries.
 
 | Parameter (yml)                  | Environment variable              | Default value | Description                                               |
 |:---------------------------------|:----------------------------------|:--------------|:----------------------------------------------------------|
-| connector:listen_worker_count    | CONNECTOR_LISTEN_WORKER_COUNT     | 1             | Maximum number of concurrent AMQP callback workers        |
+| connector:listen_worker_count    | CONNECTOR_LISTEN_WORKER_COUNT     | 1             | Maximum number of concurrent listener callback workers    |
 | connector:listen_prefetch_count  | CONNECTOR_LISTEN_PREFETCH_COUNT   | worker count  | Maximum number of unacked AMQP deliveries held in flight  |
 
 In this mode, the platform will use the workers to send the HTTP queries to the connectors declared in this mode, we have added a few worker configuration parameters to help with those queries. **The following configuration is for the workers and is generally not needed**.

@@ -76,7 +76,7 @@ _CONNECTOR_REQUEST_CONTEXT_FIELDS = (
 )
 
 DEFAULT_LISTEN_WORKER_COUNT = 1
-"""Default number of concurrent AMQP callback workers."""
+"""Default number of concurrent listener callback workers."""
 
 IN_FLIGHT_WORK_PING_INTERVAL_SECONDS = 60 * 5
 """How often to ping long-running in-flight AMQP work."""
@@ -493,7 +493,7 @@ class ListenQueue(threading.Thread):
     :type listen_protocol_api_port: int
     :param callback: Function to call when processing messages
     :type callback: Callable[[Dict], str]
-    :param listen_worker_count: Maximum concurrent AMQP callback workers
+    :param listen_worker_count: Maximum concurrent listener callback workers
     :type listen_worker_count: int
     :param listen_prefetch_count: Maximum unacked AMQP deliveries held in flight
     :type listen_prefetch_count: int or None
@@ -536,7 +536,7 @@ class ListenQueue(threading.Thread):
         :type listen_protocol_api_port: int
         :param callback: Function to process received messages
         :type callback: Callable[[Dict], str]
-        :param listen_worker_count: Maximum concurrent AMQP callback workers
+        :param listen_worker_count: Maximum concurrent listener callback workers
         :type listen_worker_count: int
         :param listen_prefetch_count: Maximum unacked AMQP deliveries held in flight
         :type listen_prefetch_count: int or None
@@ -1044,7 +1044,11 @@ class ListenQueue(threading.Thread):
                 content={"error": "Invalid JSON payload"},
             )
         try:
-            if self._data_handler(data) is False:
+            loop = asyncio.get_running_loop()
+            processed = await loop.run_in_executor(
+                self._ensure_worker_pool(), self._data_handler, data
+            )
+            if processed is False:
                 return JSONResponse(
                     status_code=500,
                     content={"error": "Error processing message"},
@@ -1204,6 +1208,7 @@ class ListenQueue(threading.Thread):
         self.exit_event.set()
         connection = self.pika_connection
         if not self._is_connection_open(connection):
+            self._shutdown_worker_pool()
             return
         try:
             connection.add_callback_threadsafe(self._stop_consuming)
