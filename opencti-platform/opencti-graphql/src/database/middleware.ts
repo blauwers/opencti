@@ -302,7 +302,7 @@ import type { BasicStoreSettings } from '../types/settings';
 import type * as S from '../types/stix-2-1-common';
 import type { StixId } from '../types/stix-2-1-common';
 import type * as S2 from '../types/stix-2-0-common';
-import type { CreateEventOpts, EventOpts, UpdateEvent, UpdateEventOpts } from '../types/event';
+import type { CreateEventOpts, EventOpts, StreamDataEvent, UpdateEventOpts } from '../types/event';
 
 // region global variables
 const MAX_BATCH_SIZE = nconf.get('elasticsearch:batch_loader_max_size') ?? 300;
@@ -2558,13 +2558,38 @@ type UpdateAttributeMetaResolvedOpts = {
   forceRefresh?: boolean;
   waitUntil?: BatchWaitUntil;
 };
+
+export enum MutationOutcome {
+  Created = 'created',
+  Updated = 'updated',
+  Unchanged = 'unchanged',
+}
+
+export type MutationResult<T> = {
+  element: T;
+  event: StreamDataEvent | null | undefined;
+  isCreation: boolean;
+  outcome: MutationOutcome;
+};
+
+const buildMutationResult = <T>(
+  element: T,
+  event: StreamDataEvent | null | undefined,
+  outcome: MutationOutcome,
+): MutationResult<T> => ({
+  element,
+  event,
+  isCreation: outcome === MutationOutcome.Created,
+  outcome,
+});
+
 export const updateAttributeMetaResolved = async <T extends StoreObject>(
   context: AuthContext,
   user: AuthUser,
   initial: T,
   inputs: EditInput[],
   opts: UpdateAttributeMetaResolvedOpts = {},
-): Promise<{ element: T; event?: UpdateEvent | null; isCreation?: boolean }> => {
+): Promise<MutationResult<T>> => {
   const { locks = [], impactStandardId = true } = opts;
   const updates = Array.isArray(inputs) ? inputs : [inputs];
   const settings = await getEntityFromCache<BasicStoreSettings>(context, SYSTEM_USER, ENTITY_TYPE_SETTINGS);
@@ -2585,7 +2610,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
     }
   }
   if (updates.length === 0) {
-    return { element: initial };
+    return buildMutationResult(initial, null, MutationOutcome.Unchanged);
   }
   // Check user access update
   let accessOperation = AccessOperation.EDIT;
@@ -3018,10 +3043,10 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
         });
       }
       // endregion
-      return { element: updatedInstance as T, event, isCreation: false };
+      return buildMutationResult(updatedInstance as T, event, MutationOutcome.Updated);
     }
     // Return updated element after waiting for it.
-    return { element: updatedInstance as T, event: null, isCreation: false };
+    return buildMutationResult(updatedInstance as T, null, MutationOutcome.Unchanged);
   } catch (err: any) {
     if (err.name === TYPE_LOCK_ERROR) {
       throw LockTimeoutError({ participantIds });
@@ -3095,7 +3120,7 @@ const executeUpdateAttributeMutation = async <T extends StoreObject>(
       // Continue update
       return updateAttributeFromLoadedWithRefs<T>(context, user, initial, inputs, opts);
     },
-    sideEffects: (data) => (!opts.noEnrich && data.event ? [{
+    sideEffects: (data) => (!opts.noEnrich && data.outcome === MutationOutcome.Updated && data.event ? [{
       kind: BatchSideEffectKind.AutoEnrichment,
       sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
       execute: () => triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase),
@@ -3272,13 +3297,13 @@ const upsertEntityRule = async (
   instance: Record<string, any>,
   input: Record<string, any>,
   opts: UpsertEntityRuleOpts,
-) => {
+): Promise<MutationResult<any>> => {
   const { fromRule } = opts;
   // 01. If relation already have max explanation, don't do anything
   // Strict equals to clean existing element with too many explanations
   const ruleExplanationsSize = getRuleExplanationsSize(fromRule, instance);
   if (ruleExplanationsSize === MAX_EXPLANATIONS_PER_RULE) {
-    return instance;
+    return buildMutationResult(instance, null, MutationOutcome.Unchanged);
   }
   logApp.debug('Upsert inferred entity', { input });
   const patch = await createUpsertRulePatch(instance, input, opts);
@@ -3291,13 +3316,13 @@ const upsertRelationRule = async (
   instance: Record<string, any>,
   input: Record<string, any>,
   opts: { fromRule: string; fromRuleDeletion?: boolean } & PatchAttributeOpts,
-) => {
+): Promise<MutationResult<any>> => {
   const { fromRule, fromRuleDeletion = false } = opts;
   // 01. If relation already have max explanation, don't do anything
   // Strict equals to clean existing element with too many explanations
   const ruleExplanationsSize = getRuleExplanationsSize(fromRule, instance);
   if (!fromRuleDeletion && ruleExplanationsSize === MAX_EXPLANATIONS_PER_RULE) {
-    return instance;
+    return buildMutationResult(instance, null, MutationOutcome.Unchanged);
   }
   logApp.debug('Upsert inferred relation', { input });
   // 02 - Update the rule
@@ -3406,7 +3431,7 @@ const upsertElement = async (
   type: string,
   basePatch: Record<string, any>,
   opts: { elementAlreadyResolved?: boolean } & UpdateAttributeMetaResolvedOpts = {},
-) => {
+): Promise<MutationResult<any>> => {
   // -- Independent update
   let resolvedElement = element as StoreObject;
   if (!opts.elementAlreadyResolved) {
@@ -3459,7 +3484,7 @@ const upsertElement = async (
     return await updateAttributeMetaResolved(context, user, resolvedElement, inputs, updateOpts);
   }
   // -- No modification applied
-  return { element: resolvedElement, event: null, isCreation: false };
+  return buildMutationResult(resolvedElement, null, MutationOutcome.Unchanged);
 };
 
 export const getExistingRelations = async (
@@ -3550,7 +3575,7 @@ export const createRelationRaw = async (
   user: AuthUser,
   rawInput: Record<string, any>,
   opts: CreateRelationRawOpts = {},
-) => {
+): Promise<MutationResult<any>> => {
   let lock;
   let isBatchCoordinatedLock: boolean;
   let isBatchRetainedLock = false;
@@ -3763,7 +3788,7 @@ export const createRelationRaw = async (
       }
     }
     // endregion
-    return { element: { ...resolvedInput, ...dataRel.element }, event, isCreation: true };
+    return buildMutationResult({ ...resolvedInput, ...dataRel.element }, event, MutationOutcome.Created);
   } catch (err: any) {
     if (err.name === TYPE_LOCK_ERROR) {
       throw LockTimeoutError({ participantIds });
@@ -3916,7 +3941,7 @@ const internalCreateEntityRaw = async (
   rawInput: Record<string, any>,
   type: string,
   opts: CreateEntityRawOpts = {},
-) => {
+): Promise<MutationResult<any>> => {
   // region confidence control
   const input = { ...rawInput };
   const { confidenceLevelToApply } = controlCreateInputWithUserConfidence(user, input as ObjectWithConfidence, type);
@@ -4237,7 +4262,7 @@ const internalCreateEntityRaw = async (
 
     const event = await storeCreateEntityEvent(context, user, createdElement as StoreObject, dataMessage, opts);
     // Return created element after waiting for it.
-    return { element: createdElement, event, isCreation: true };
+    return buildMutationResult(createdElement, event, MutationOutcome.Created);
   } catch (err: any) {
     if (err.name === TYPE_LOCK_ERROR) {
       throw LockTimeoutError({ participantIds });
@@ -4254,7 +4279,7 @@ const createEntityRaw = async (
   rawInput: Record<string, any>,
   type: string,
   opts: CreateEntityRawOpts = {},
-) => {
+): Promise<MutationResult<any>> => {
   try {
     // Await is mandatory here to correctly catch the promise exception.
     return await internalCreateEntityRaw(context, user, rawInput, type, opts);
@@ -4272,13 +4297,28 @@ const createEntityRaw = async (
   }
 };
 
-export const createEntity = async (
+type CreateEntityOpts = { complete?: boolean } & CreateEntityRawOpts;
+export function createEntity(
   context: AuthContext,
   user: AuthUser,
   input: Record<string, any>,
   type: string,
-  opts: { complete?: boolean } & CreateEntityRawOpts = {},
-) => {
+  opts: CreateEntityOpts & { complete: true },
+): Promise<MutationResult<any>>;
+export function createEntity(
+  context: AuthContext,
+  user: AuthUser,
+  input: Record<string, any>,
+  type: string,
+  opts?: CreateEntityOpts,
+): Promise<any>;
+export async function createEntity(
+  context: AuthContext,
+  user: AuthUser,
+  input: Record<string, any>,
+  type: string,
+  opts: CreateEntityOpts = {},
+): Promise<any> {
   const isCompleteResult = opts.complete === true;
   const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
   // volumes of objects relationships must be controlled
@@ -4286,14 +4326,14 @@ export const createEntity = async (
     kind: BatchMutationKind.CreateEntity,
     executeWrite: () => createEntityRaw(context, user, input, type, opts),
     sideEffects: (result) => {
-      if (result.isCreation) {
+      if (result.outcome === MutationOutcome.Created) {
         return [{
           kind: BatchSideEffectKind.AutoEnrichment,
           sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentCreateEntity,
           execute: () => triggerCreateEntityAutoEnrichment(context, user, result.element),
         }];
       }
-      if (result.event !== null) {
+      if (result.outcome === MutationOutcome.Updated) {
         return [{
           kind: BatchSideEffectKind.AutoEnrichment,
           sealDescriptor: BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity,
@@ -4304,7 +4344,7 @@ export const createEntity = async (
     },
   }, { waitUntil }));
   return isCompleteResult ? data : data.element;
-};
+}
 
 export const createInferredEntity = async (
   context: AuthContext,
