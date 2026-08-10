@@ -1,5 +1,13 @@
 import { v5 as uuidv5 } from 'uuid';
-import { createEntity, deleteElementById, internalDeleteElementById, patchAttribute, patchAttributeFromLoadedWithRefsInBatch, updateAttribute } from '../database/middleware';
+import {
+  createEntity,
+  deleteElementById,
+  internalDeleteElementById,
+  MutationIntent,
+  patchAttribute,
+  patchAttributeFromLoadedWithRefsInBatch,
+  updateAttribute,
+} from '../database/middleware';
 import { type GetHttpClient, getHttpClient } from '../utils/http-client';
 import { completeConnector, connector, connectors, connectorsFor } from '../database/repository';
 import { ensureConnectorQueues, getConnectorQueueDetails, purgeConnectorQueues, registerConnectorQueues, unregisterConnector, unregisterExchanges } from '../database/rabbitmq';
@@ -251,7 +259,7 @@ export const updateConnectorWithConnectorInfo = async (
     user,
     connectorEntity,
     connectorPatch,
-    { forceRefresh: false },
+    { forceRefresh: false, mutationIntent: MutationIntent.Touch },
   );
 };
 

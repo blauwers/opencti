@@ -11,7 +11,7 @@ import { ATTR_ENDUSER_ID } from '../telemetry/semantic-conventions';
 import type { AuthContext, AuthUser } from '../types/user';
 import { ENABLED_METRICS, ENABLED_TRACING } from './conf';
 
-class MeterManager {
+export class MeterManager {
   meterProvider: MeterProvider;
 
   private requests: Counter | null = null;
@@ -19,6 +19,10 @@ class MeterManager {
   private sentEmails: Counter | null = null;
 
   private errors: Counter | null = null;
+
+  private mutationOutcomes: Counter | null = null;
+
+  private mutationSuppressions: Counter | null = null;
 
   private latencyHistogram: Histogram | null = null;
 
@@ -40,6 +44,14 @@ class MeterManager {
 
   error(attributes: any) {
     this.errors?.add(1, attributes);
+  }
+
+  mutationOutcome(attributes: { mutation_kind: string; outcome: string }) {
+    this.mutationOutcomes?.add(1, attributes);
+  }
+
+  mutationSuppression(attributes: { mutation_kind: string; suppression: string }) {
+    this.mutationSuppressions?.add(1, attributes);
   }
 
   latency(val: number, attributes: any) {
@@ -68,6 +80,14 @@ class MeterManager {
     this.errors = meter.createCounter('opencti_api_errors', {
       valueType: ValueType.INT,
       description: 'Counts total number of errors',
+    });
+    this.mutationOutcomes = meter.createCounter('opencti_api_mutation_outcomes', {
+      valueType: ValueType.INT,
+      description: 'Counts mutation outcomes by mutation kind',
+    });
+    this.mutationSuppressions = meter.createCounter('opencti_api_mutation_suppressions', {
+      valueType: ValueType.INT,
+      description: 'Counts suppressed mutation work by mutation kind',
     });
     // - Histograms
     this.latencyHistogram = meter.createHistogram('opencti_api_latency', {

@@ -132,7 +132,7 @@ import {
   STIX_REF_RELATIONSHIP_TYPES,
 } from '../schema/stixRefRelationship';
 import { ENTITY_TYPE_HISTORY, ENTITY_TYPE_SETTINGS, ENTITY_TYPE_STATUS, ENTITY_TYPE_USER } from '../schema/internalObject';
-import { isStixCoreObject } from '../schema/stixCoreObject';
+import { isStixCoreObject, isStixExportableInStreamData } from '../schema/stixCoreObject';
 import { isBasicRelationship } from '../schema/stixRelationship';
 import {
   dateForEndAttributes,
@@ -226,7 +226,7 @@ import { depsKeysRegister, isDateAttribute, isMultipleAttribute, isNumericAttrib
 import { fillDefaultValues, getAttributesConfiguration, getEntitySettingFromCache } from '../modules/entitySetting/entitySetting-utils';
 import { schemaRelationsRefDefinition } from '../schema/schema-relationsRef';
 import { validateInputCreation, validateInputUpdate } from '../schema/schema-validator';
-import { telemetry } from '../config/tracing';
+import { meterManager, telemetry } from '../config/tracing';
 import { cleanMarkings, handleMarkingOperations } from '../utils/markingDefinition-utils';
 import { buildUpdatePatchForUpsert, generateInputsForUpsert } from '../utils/upsert-utils';
 import { buildChanges, generateCreateMessage, generateRestoreMessage } from './data-changes';
@@ -2253,7 +2253,11 @@ const updateDateRangeValidation = (instance: Record<string, any>, inputs: EditIn
     throw DatabaseError(`You cant update an element with ${to} less than ${from}`, data);
   }
 };
-type UpdateAttribueRawOpts = {
+type MutationIntentOpts = {
+  mutationIntent?: MutationIntent;
+};
+
+type UpdateAttribueRawOpts = MutationIntentOpts & {
   impactStandardId?: boolean;
   upsert?: boolean;
 };
@@ -2548,7 +2552,7 @@ const resolveRefsForInputs = async (
   return revolvedInputs;
 };
 
-type UpdateAttributeMetaResolvedOpts = {
+type UpdateAttributeMetaResolvedOpts = MutationIntentOpts & {
   locks?: string[];
   impactStandardId?: boolean;
   references?: string[];
@@ -2562,7 +2566,19 @@ type UpdateAttributeMetaResolvedOpts = {
 export enum MutationOutcome {
   Created = 'created',
   Updated = 'updated',
+  Touched = 'touched',
   Unchanged = 'unchanged',
+}
+
+export enum MutationIntent {
+  Semantic = 'semantic',
+  Touch = 'touch',
+}
+
+export enum MutationSuppressionClass {
+  ElasticWrite = 'elastic_write',
+  StreamEvent = 'stream_event',
+  AutoEnrichment = 'auto_enrichment',
 }
 
 export type MutationResult<T> = {
@@ -2583,6 +2599,36 @@ const buildMutationResult = <T>(
   outcome,
 });
 
+const FRESHNESS_ATTRIBUTE_KEYS = new Set(['updated_at', 'modified', 'refreshed_at']);
+
+const hasOnlyFreshnessInputs = (inputs: EditInput[]) => (
+  inputs.length > 0 && inputs.every((input) => FRESHNESS_ATTRIBUTE_KEYS.has(input.key))
+);
+
+const isSuppressedMutationOutcome = (outcome: MutationOutcome) => (
+  outcome === MutationOutcome.Unchanged || outcome === MutationOutcome.Touched
+);
+
+const recordMutationResultMetrics = (
+  kind: BatchMutationKind,
+  result: MutationResult<any>,
+  opts: { streamEventEligible?: boolean; autoEnrichmentEligible?: boolean } = {},
+) => {
+  meterManager?.mutationOutcome?.({ mutation_kind: kind, outcome: result.outcome });
+  if (result.outcome === MutationOutcome.Unchanged) {
+    meterManager?.mutationSuppression?.({ mutation_kind: kind, suppression: MutationSuppressionClass.ElasticWrite });
+  }
+  if (!isSuppressedMutationOutcome(result.outcome)) {
+    return;
+  }
+  if (opts.streamEventEligible) {
+    meterManager?.mutationSuppression?.({ mutation_kind: kind, suppression: MutationSuppressionClass.StreamEvent });
+  }
+  if (opts.autoEnrichmentEligible) {
+    meterManager?.mutationSuppression?.({ mutation_kind: kind, suppression: MutationSuppressionClass.AutoEnrichment });
+  }
+};
+
 export const updateAttributeMetaResolved = async <T extends StoreObject>(
   context: AuthContext,
   user: AuthUser,
@@ -2591,6 +2637,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
   opts: UpdateAttributeMetaResolvedOpts = {},
 ): Promise<MutationResult<T>> => {
   const { locks = [], impactStandardId = true } = opts;
+  const mutationIntent = opts.mutationIntent ?? MutationIntent.Semantic;
   const updates = Array.isArray(inputs) ? inputs : [inputs];
   const settings = await getEntityFromCache<BasicStoreSettings>(context, SYSTEM_USER, ENTITY_TYPE_SETTINGS);
   // Region - Pre-Check
@@ -2763,7 +2810,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
     }
     // noinspection UnnecessaryLocalVariableJS
     const data = await updateAttributeRaw(context, user, initial, attributes, opts);
-    const { updatedInstance, impactedInputs, updatedInputs } = data;
+    let { updatedInstance, impactedInputs, updatedInputs } = data;
     // Check the consistency of the observable.
     if (isStixCyberObservable(updatedInstance.entity_type)) {
       const observableSyntaxResult = checkObservableSyntax(updatedInstance.entity_type, updatedInstance);
@@ -2885,6 +2932,15 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
     }
     // endregion
     // region build attributes inner information
+    const freshnessOnlyImpact = relationsToCreate.length === 0
+      && relationsToDelete.length === 0
+      && hasOnlyFreshnessInputs(impactedInputs);
+    const touchOnlyMutation = mutationIntent === MutationIntent.Touch && freshnessOnlyImpact;
+    if (mutationIntent !== MutationIntent.Touch && freshnessOnlyImpact) {
+      impactedInputs = [];
+      updatedInputs = [];
+      updatedInstance = initial;
+    }
     lock.signal.throwIfAborted();
     const impactedKeys: string[] = impactedInputs.map((input) => input.key);
     pushAll(impactedKeys, [...relationsToCreate, ...relationsToDelete].map((rel: any) => {
@@ -2893,7 +2949,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       }
       return schemaRelationsRefDefinition.convertDatabaseNameToInputName(updatedInstance.entity_type, rel.relationship_type);
     }) as string[]);
-    const preventAttributeFollow = [updatedAt.name, modified.name, iAliasedIds.name];
+    const preventAttributeFollow = [updatedAt.name, modified.name, 'refreshed_at', iAliasedIds.name];
     const uniqImpactKeys = R.uniq(impactedKeys.filter((key) => !preventAttributeFollow.includes(key)));
     if (uniqImpactKeys.length > 0) {
       // Impact the updated_at only if stix data is impacted
@@ -2972,7 +3028,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       });
     }
     // Post-operation to update the individual linked to a user
-    if (updatedInstance.entity_type === ENTITY_TYPE_USER && !getDraftContext(context, user)) {
+    if (updatedInputs.length > 0 && !touchOnlyMutation && updatedInstance.entity_type === ENTITY_TYPE_USER && !getDraftContext(context, user)) {
       await registerBatchSideEffect({
         kind: BatchSideEffectKind.CompatibilityProjection,
         execute: async () => {
@@ -2999,7 +3055,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       });
     }
     // Only push event in stream if modifications really happens
-    if (updatedInputs.length > 0) {
+    if (updatedInputs.length > 0 && !touchOnlyMutation) {
       const changes = await buildChanges(context, user, updatedInstance.entity_type, updatedInputs);
       const isContainCommitReferences = opts.references && opts.references.length > 0;
       const commit = isContainCommitReferences ? {
@@ -3036,7 +3092,7 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
               securityCoverageId,
               ENTITY_TYPE_SECURITY_COVERAGE,
               [{ key: 'modified', value: [now()] }],
-              { noEnrich: true },
+              { noEnrich: true, mutationIntent: MutationIntent.Touch },
             );
             await triggerEntityUpdateAutoEnrichment(context, user, securityCoverage as BasicStoreBase);
           },
@@ -3044,6 +3100,9 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
       }
       // endregion
       return buildMutationResult(updatedInstance as T, event, MutationOutcome.Updated);
+    }
+    if (touchOnlyMutation) {
+      return buildMutationResult(updatedInstance as T, null, MutationOutcome.Touched);
     }
     // Return updated element after waiting for it.
     return buildMutationResult(updatedInstance as T, null, MutationOutcome.Unchanged);
@@ -3107,7 +3166,7 @@ const executeUpdateAttributeMutation = async <T extends StoreObject>(
   opts: UpdateAttributeExecutionOpts = {},
 ) => {
   const waitUntil = opts.waitUntil ?? context?.batchWaitUntil;
-  return executeSingleBatchMutation({
+  const data = await executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
     executeWrite: async () => {
       const initial = await loadInitial();
@@ -3126,6 +3185,12 @@ const executeUpdateAttributeMutation = async <T extends StoreObject>(
       execute: () => triggerEntityUpdateAutoEnrichment(context, user, data.element as BasicStoreBase),
     }] : []),
   }, { waitUntil });
+  const streamEventEligible = isStixExportableInStreamData(data.element as StoreObject);
+  recordMutationResultMetrics(BatchMutationKind.UpdateAttribute, data, {
+    streamEventEligible,
+    autoEnrichmentEligible: !opts.noEnrich && streamEventEligible,
+  });
+  return data;
 };
 export const updateAttributeFromLoadedWithRefsInBatch = async <T extends StoreObject>(
   context: AuthContext,
@@ -3561,7 +3626,7 @@ export const getExistingRelations = async (
   }
   return R.uniqBy((relation) => relation.internal_id, existingRelationships);
 };
-type CreateRelationRawOpts = UpdateEventOpts & {
+type CreateRelationRawOpts = MutationIntentOpts & UpdateEventOpts & {
   fromRule?: string;
   locks?: string[];
   bypassValidation?: boolean;
@@ -3780,7 +3845,7 @@ export const createRelationRaw = async (
               securityCoverageId,
               ENTITY_TYPE_SECURITY_COVERAGE,
               [{ key: 'modified', value: [now()] }],
-              { noEnrich: true },
+              { noEnrich: true, mutationIntent: MutationIntent.Touch },
             );
             await triggerEntityUpdateAutoEnrichment(context, user, securityCoverage as BasicStoreBase);
           },
@@ -3809,6 +3874,9 @@ export const createRelation = async (
     kind: BatchMutationKind.CreateRelation,
     executeWrite: () => createRelationRaw(context, user, input, opts),
   }, { waitUntil });
+  recordMutationResultMetrics(BatchMutationKind.CreateRelation, data, {
+    streamEventEligible: isStixExportableInStreamData(data.element as StoreObject),
+  });
   return data.element;
 };
 type RuleContent = {
@@ -4343,6 +4411,10 @@ export async function createEntity(
       return [];
     },
   }, { waitUntil }));
+  recordMutationResultMetrics(BatchMutationKind.CreateEntity, data, {
+    streamEventEligible: isStixExportableInStreamData(data.element as StoreObject),
+    autoEnrichmentEligible: true,
+  });
   return isCompleteResult ? data : data.element;
 }
 
