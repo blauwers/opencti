@@ -48,6 +48,7 @@ const descriptorNames = (registrations: Registration[], kind: string) => registr
 describe('batch side effect seal registration descriptors', () => {
   const streamRegistrations = readRegistrations('database/stream/stream-handler.ts');
   const workRegistrations = readRegistrations('domain/work.js');
+  const enrichmentRegistrations = readRegistrations('domain/enrichment.js');
   const rabbitmqRegistrations = readRegistrations('database/rabbitmq.js');
   const middlewareRegistrations = readRegistrations('database/middleware.ts');
   const engineRegistrations = readRegistrations('database/engine.ts');
@@ -75,11 +76,11 @@ describe('batch side effect seal registration descriptors', () => {
       'BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleMarkRestored',
       'BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.fileLifecycleDeleteAllObjectFiles',
     ]);
-    expect(descriptorNames(middlewareRegistrations, 'BatchSideEffectKind.AutoEnrichment')).toEqual([
-      'BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity',
-      'BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentCreateEntity',
-      'BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity',
-    ]);
+    expect(descriptorNames(middlewareRegistrations, 'BatchSideEffectKind.AutoEnrichment')).toEqual([]);
+    const autoEnrichmentDescriptors = descriptorNames(enrichmentRegistrations, 'BatchSideEffectKind.AutoEnrichment');
+    expect(autoEnrichmentDescriptors).toHaveLength(1);
+    expect(autoEnrichmentDescriptors[0]).toContain('BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentCreateEntity');
+    expect(autoEnrichmentDescriptors[0]).toContain('BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS.autoEnrichmentUpdateEntity');
   });
 
   it('keeps compatibility projections unclassified until they are split', () => {

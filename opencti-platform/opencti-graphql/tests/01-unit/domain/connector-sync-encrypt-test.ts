@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 vi.mock('../../../src/database/middleware', () => ({
+  MutationIntent: {
+    Semantic: 'semantic',
+    Touch: 'touch',
+  },
   updateAttribute: vi.fn(),
   createEntity: vi.fn(),
   patchAttribute: vi.fn(),
@@ -74,7 +78,7 @@ vi.mock('../../../src/config/conf', async () => {
 
 import { encryptSynchronizerCredential } from '../../../src/domain/connector-sync-crypto';
 import { testSync } from '../../../src/domain/connector-utils';
-import { updateAttribute, createEntity, patchAttribute, patchAttributeFromLoadedWithRefsInBatch } from '../../../src/database/middleware';
+import { MutationIntent, updateAttribute, createEntity, patchAttribute, patchAttributeFromLoadedWithRefsInBatch } from '../../../src/database/middleware';
 import { internalFindByIds, storeLoadById } from '../../../src/database/middleware-loader';
 import { notify } from '../../../src/database/redis';
 import { ensureConnectorQueues } from '../../../src/database/rabbitmq';
@@ -380,7 +384,7 @@ describe('connector ping refresh behavior', () => {
       fakeUser,
       expect.objectContaining({ id: 'connector--1' }),
       expect.objectContaining({ connector_state: '{"last_run":1}' }),
-      { forceRefresh: false },
+      { forceRefresh: false, mutationIntent: MutationIntent.Touch },
     );
     expect(getEntitiesMapFromCache).toHaveBeenCalledWith(fakeContext, fakeUser, 'Connector');
     expect(internalFindByIds).not.toHaveBeenCalled();
@@ -475,7 +479,7 @@ describe('connector ping refresh behavior', () => {
       fakeUser,
       expect.objectContaining({ connector_state: '{"last_run":1}' }),
       expect.objectContaining({ connector_state: '{"last_run":0}' }),
-      { forceRefresh: false },
+      { forceRefresh: false, mutationIntent: MutationIntent.Touch },
     );
   });
 
@@ -528,7 +532,7 @@ describe('connector ping refresh behavior', () => {
       fakeUser,
       expect.objectContaining({ connector_state_reset: true }),
       expect.objectContaining({ connector_state_reset: false }),
-      { forceRefresh: false },
+      { forceRefresh: false, mutationIntent: MutationIntent.Touch },
     );
     expect(notify).toHaveBeenCalledWith(expect.stringContaining('CONNECTOR_EDIT_TOPIC'), expect.objectContaining({ id: 'connector--reset' }), fakeUser);
   });
