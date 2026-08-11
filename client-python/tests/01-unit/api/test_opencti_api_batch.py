@@ -550,6 +550,9 @@ def test_batch_delivery_handoff_methods_forward_graphql_variables_and_results():
         "parentDeliveryId": "batch-delivery--parent",
         "childDeliveryIds": ["batch-delivery--child"],
     }
+    assert all(
+        call.kwargs["fresh_session"] is True for call in client.query.call_args_list
+    )
 
 
 def test_batch_delivery_reserve_children_uses_multipart_for_oversized_manifest():
@@ -588,6 +591,7 @@ def test_batch_delivery_reserve_children_uses_multipart_for_oversized_manifest()
     assert isinstance(variables["children"], File)
     assert variables["children"].name == "batch-delivery-children.json"
     assert json.loads(variables["children"].data) == children
+    assert client.query.call_args.kwargs["fresh_session"] is True
 
 
 def test_enrichment_batch_result_submit_forwards_graphql_variables_and_result():

@@ -1364,9 +1364,17 @@ class OpenCTIApiClient:
             # server timeout. Clear it before follow-up work/report mutations.
             self.session.close()
 
+    def _query_batch_delivery_control(
+        self,
+        query: str,
+        variables: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Send replay-safe delivery control operations outside the shared pool."""
+        return self.query(query, variables, fresh_session=True)
+
     def batch_delivery_handoff(self, parent_delivery_id: str) -> Dict[str, Any]:
         """Read durable child handoff state for one logical parent delivery."""
-        result = self.query(
+        result = self._query_batch_delivery_control(
             BATCH_DELIVERY_HANDOFF_QUERY,
             {"parentDeliveryId": parent_delivery_id},
         )
@@ -1405,7 +1413,7 @@ class OpenCTIApiClient:
                     "max_json_payload_size": self.session_bundle_submission_max_payload_size,
                 },
             )
-            result = self.query(
+            result = self._query_batch_delivery_control(
                 BATCH_DELIVERY_RESERVE_CHILDREN_UPLOAD_MUTATION,
                 {
                     "parentDeliveryId": parent_delivery_id,
@@ -1417,7 +1425,7 @@ class OpenCTIApiClient:
                 },
             )
             return result["data"]["batchDeliveryReserveChildrenUpload"]
-        result = self.query(
+        result = self._query_batch_delivery_control(
             BATCH_DELIVERY_RESERVE_CHILDREN_MUTATION,
             variables,
         )
@@ -1431,7 +1439,7 @@ class OpenCTIApiClient:
         additional_work_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Promote one candidate-bearing root into compact durable V2 handoff state."""
-        result = self.query(
+        result = self._query_batch_delivery_control(
             BATCH_DELIVERY_PROMOTE_ROOT_MUTATION,
             {
                 "candidateId": candidate_id,
@@ -1448,7 +1456,7 @@ class OpenCTIApiClient:
         child_delivery_ids: List[str],
     ) -> Dict[str, Any]:
         """Record broker-confirmed child publication for a reserved parent handoff."""
-        result = self.query(
+        result = self._query_batch_delivery_control(
             BATCH_DELIVERY_MARK_CHILDREN_PUBLISHED_MUTATION,
             {
                 "parentDeliveryId": parent_delivery_id,
