@@ -1,5 +1,5 @@
 import { lockResources } from '../../lock/master-lock';
-import { getBatchLongWaitLockOptions } from './batch-lock-retention';
+import { getBatchDirectDeliveryExecutionLockOptions } from './batch-lock-retention';
 import { type BatchDelivery, BatchDeliveryBranchKind } from './batch-types';
 
 type BatchDirectDeliveryExecutionLock = {
@@ -28,7 +28,7 @@ export const acquireBatchDirectDeliveryExecutionLock = async (
   // per submission while still allowing unrelated submissions to run in parallel.
   const lock = await lockResources(
     [buildBatchDirectDeliveryExecutionLockId(delivery.submission_id)],
-    getBatchLongWaitLockOptions(),
+    getBatchDirectDeliveryExecutionLockOptions(),
   );
   return lock as BatchDirectDeliveryExecutionLock;
 };

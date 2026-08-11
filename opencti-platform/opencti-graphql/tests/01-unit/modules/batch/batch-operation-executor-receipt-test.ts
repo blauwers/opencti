@@ -6,6 +6,7 @@ import { loadBatchDelivery, readBatchDeliveryQueueMessage } from '../../../../sr
 import { startBatchBackendAttemptObservationRefreshLoop } from '../../../../src/modules/batch/batch-backend-attempt-observation-domain';
 import { buildBatchDirectDeliveryExecutionLockId } from '../../../../src/modules/batch/batch-direct-delivery-execution-lock';
 import { buildBatchExecutionReconciliationId, openBatchExecutionReconciliation } from '../../../../src/modules/batch/batch-execution-reconciliation-domain';
+import { getBatchDirectDeliveryExecutionLockOptions } from '../../../../src/modules/batch/batch-lock-retention';
 import {
   buildBatchExecutionReceiptId,
   buildBatchExecutionReceiptRequestMetadata,
@@ -371,10 +372,10 @@ describe('batch GraphQL execution receipt boundary', () => {
     await secondSerializationAttempted.promise;
 
     expect(calls).toEqual(['write:one']);
-    expect(lockResources).toHaveBeenCalledWith([serializationLockId], expect.objectContaining({
-      retryCount: expect.any(Number),
-      releaseRetryCount: 0,
-    }));
+    expect(lockResources).toHaveBeenCalledWith(
+      [serializationLockId],
+      expect.objectContaining(getBatchDirectDeliveryExecutionLockOptions()),
+    );
 
     releaseFirstWrite.resolve();
     await Promise.all([firstExecution, secondExecution]);

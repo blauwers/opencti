@@ -28,11 +28,11 @@ import { buildRateLimiterOptions } from './httpUtils';
 import { checkDraftInContext } from './httpServer-draft';
 import ipWhitelistMiddleware from './ipWhitelistMiddleware';
 import { buildBatchRequestTimeoutMiddleware } from './httpServer-timeout';
+import { resolveBatchRequestTimeout } from '../config/conf-utils';
 
 const MIN_20 = 20 * 60 * 1000;
-const HOUR = 60 * 60 * 1000;
 const REQ_TIMEOUT = conf.get('app:request_timeout');
-const BATCH_REQ_TIMEOUT = Math.max(REQ_TIMEOUT || MIN_20, conf.get('app:batch_request_timeout') || HOUR);
+const BATCH_REQ_TIMEOUT = resolveBatchRequestTimeout(REQ_TIMEOUT, conf.get('app:batch_request_timeout'));
 const CERT_KEY_PATH = conf.get('app:https_cert:key');
 const CERT_KEY_CERT = conf.get('app:https_cert:crt');
 const CA_CERTS = conf.get('app:https_cert:ca');
