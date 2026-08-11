@@ -115,6 +115,7 @@ def _helper():
     helper.enrichment_shared_organizations = None
     helper.applicant_id = "connector-applicant"
     helper.connect_type = "INTERNAL_ENRICHMENT"
+    helper.connect_enrichment_entity_with_files = True
     helper.connector_id = "connector--1"
     helper.api = _FakeApi()
     helper.api_impersonate = _FakeApi()
@@ -353,6 +354,20 @@ def test_batch_callback_prefetches_same_type_entities_and_simple_exports():
         "indicator--1",
         "indicator--2",
     ]
+
+
+def test_batch_callback_omits_file_projection_when_connector_opts_out():
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.connect_enrichment_entity_with_files = False
+
+    assert listen_queue._data_handler(_message()) is True
+
+    listen_queue.helper.api._listers["Indicator"].assert_called_once_with(
+        filters={"ids": ["indicator--1", "indicator--2"]},
+        first=2,
+        getAll=True,
+        withFiles=False,
+    )
 
 
 def test_batch_callback_reuses_duplicate_entity_lookup_without_sharing_items():

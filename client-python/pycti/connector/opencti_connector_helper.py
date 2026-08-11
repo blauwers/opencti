@@ -879,11 +879,17 @@ class ListenQueue(threading.Thread):
             )
         return identifiers
 
+    def _enrichment_entity_with_files(self) -> bool:
+        return getattr(self.helper, "connect_enrichment_entity_with_files", True)
+
     def _read_enrichment_batch_entity(
         self, entity_type: str, entity_id: str
     ) -> Optional[Dict]:
         do_read = self.helper.api.stix2.get_reader(entity_type)
-        return do_read(id=entity_id, withFiles=True)
+        return do_read(
+            id=entity_id,
+            withFiles=self._enrichment_entity_with_files(),
+        )
 
     def _list_enrichment_batch_entities(
         self, entity_type: str, entity_ids: List[str]
@@ -910,7 +916,7 @@ class ListenQueue(threading.Thread):
                         filters=query_filters,
                         first=len(batch_entity_ids),
                         getAll=True,
-                        withFiles=True,
+                        withFiles=self._enrichment_entity_with_files(),
                     )
                     or []
                 )
@@ -1225,7 +1231,10 @@ class ListenQueue(threading.Thread):
                 do_read = self.helper.api.stix2.get_reader(
                     entity_type if entity_type is not None else "Stix-Core-Object"
                 )
-                opencti_entity = do_read(id=entity_id, withFiles=True)
+                opencti_entity = do_read(
+                    id=entity_id,
+                    withFiles=self._enrichment_entity_with_files(),
+                )
                 if opencti_entity is None:
                     raise ValueError(
                         "Unable to read/access the entity, please check the connector permissions"
@@ -2907,6 +2916,14 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             # New platforms can skip server-side STIX serialization that pycti
             # rebuilds locally anyway; old platforms still treat this like "none".
             default="deferred",
+        )
+        self.connect_enrichment_entity_with_files = get_config_variable(
+            "CONNECTOR_ENRICHMENT_ENTITY_WITH_FILES",
+            ["connector", "enrichment_entity_with_files"],
+            config,
+            # Preserve current connector behavior unless the connector explicitly
+            # opts out of attachment expansion for enrichment entity reads.
+            default=True,
         )
         self.connect_enrichment_batch_capability = parse_json_object_config(
             get_config_variable(
