@@ -15,6 +15,8 @@ from .stix_cyber_observable.opencti_stix_cyber_observable_deprecated import (
 from .stix_cyber_observable.opencti_stix_cyber_observable_properties import (
     SCO_PROPERTIES,
     SCO_PROPERTIES_WITH_FILES,
+    SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS,
+    SCO_PROPERTIES_WITHOUT_INDICATORS,
 )
 
 
@@ -37,6 +39,21 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         self.opencti = opencti
         self.properties = SCO_PROPERTIES
         self.properties_with_files = SCO_PROPERTIES_WITH_FILES
+        self.properties_without_indicators = SCO_PROPERTIES_WITHOUT_INDICATORS
+        self.properties_with_files_without_indicators = (
+            SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS
+        )
+
+    def _properties_for_query(self, with_files: bool, with_indicators: bool) -> str:
+        if with_files:
+            return (
+                self.properties_with_files
+                if with_indicators
+                else self.properties_with_files_without_indicators
+            )
+        return (
+            self.properties if with_indicators else self.properties_without_indicators
+        )
 
     def list(self, **kwargs):
         """List StixCyberObservable objects.
@@ -63,6 +80,8 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         :type withPagination: bool
         :param withFiles: whether to include files
         :type withFiles: bool
+        :param withIndicators: whether to include related indicators
+        :type withIndicators: bool
         :return: List of StixCyberObservable objects
         :rtype: list
         """
@@ -77,6 +96,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         get_all = kwargs.get("getAll", False)
         with_pagination = kwargs.get("withPagination", False)
         with_files = kwargs.get("withFiles", False)
+        with_indicators = kwargs.get("withIndicators", True)
 
         self.opencti.app_logger.info(
             "Listing StixCyberObservables with filters",
@@ -92,7 +112,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
             + (
                 custom_attributes
                 if custom_attributes is not None
-                else (self.properties_with_files if with_files else self.properties)
+                else self._properties_for_query(with_files, with_indicators)
             )
             + """
                         }
@@ -163,6 +183,8 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         :type customAttributes: str
         :param withFiles: whether to include files
         :type withFiles: bool
+        :param withIndicators: whether to include related indicators
+        :type withIndicators: bool
         :return: StixCyberObservable object
         :rtype: dict or None
         """
@@ -170,6 +192,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         filters = kwargs.get("filters", None)
         custom_attributes = kwargs.get("customAttributes", None)
         with_files = kwargs.get("withFiles", False)
+        with_indicators = kwargs.get("withIndicators", True)
         if id is not None:
             self.opencti.app_logger.info("Reading StixCyberObservable", {"id": id})
             query = (
@@ -180,7 +203,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
                 + (
                     custom_attributes
                     if custom_attributes is not None
-                    else (self.properties_with_files if with_files else self.properties)
+                    else self._properties_for_query(with_files, with_indicators)
                 )
                 + """
                     }
@@ -192,7 +215,12 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
                 result["data"]["stixCyberObservable"]
             )
         elif filters is not None:
-            result = self.list(filters=filters, customAttributes=custom_attributes)
+            result = self.list(
+                filters=filters,
+                customAttributes=custom_attributes,
+                withFiles=with_files,
+                withIndicators=with_indicators,
+            )
             if len(result) > 0:
                 return result[0]
             else:

@@ -332,6 +332,7 @@ SCO_PROPERTIES = """
         value
     }
 """
+
 SCO_PROPERTIES_WITH_FILES = """
     id
     standard_id
@@ -703,3 +704,20 @@ SCO_PROPERTIES_WITH_FILES = """
         }
     }
 """
+
+_SCO_INDICATORS_FRAGMENT = """
+    indicators {
+        edges {
+            node {
+                id
+                pattern
+                pattern_type
+            }
+        }
+    }
+"""
+
+SCO_PROPERTIES_WITHOUT_INDICATORS = SCO_PROPERTIES.replace(_SCO_INDICATORS_FRAGMENT, "")
+SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS = SCO_PROPERTIES_WITH_FILES.replace(
+    _SCO_INDICATORS_FRAGMENT, ""
+)

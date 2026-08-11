@@ -46,6 +46,12 @@ class _FakeApi:
         self._entities = {
             ("Indicator", "indicator--1"): _opencti_entity("indicator--1"),
             ("Indicator", "indicator--2"): _opencti_entity("indicator--2"),
+            ("Domain-Name", "domain-name--1"): _opencti_entity(
+                "domain-name--1", "Domain-Name"
+            ),
+            ("Domain-Name", "domain-name--2"): _opencti_entity(
+                "domain-name--2", "Domain-Name"
+            ),
         }
         self._readers = {}
         self._listers = {}
@@ -62,7 +68,7 @@ class _FakeApi:
     def _get_reader(self, entity_type):
         if entity_type not in self._readers:
             self._readers[entity_type] = MagicMock(
-                side_effect=lambda id, withFiles, resolved_type=entity_type: deepcopy(
+                side_effect=lambda id, resolved_type=entity_type, **_kwargs: deepcopy(
                     self._entities.get((resolved_type, id))
                 )
             )
@@ -71,7 +77,7 @@ class _FakeApi:
     def _get_lister(self, entity_type):
         if entity_type not in self._listers:
             self._listers[entity_type] = MagicMock(
-                side_effect=lambda filters, first, getAll, withFiles, resolved_type=entity_type: [
+                side_effect=lambda filters, first, getAll, resolved_type=entity_type, **_kwargs: [
                     deepcopy(self._entities[(resolved_type, entity_id)])
                     for entity_id in filters["ids"]
                     if (resolved_type, entity_id) in self._entities
@@ -116,6 +122,7 @@ def _helper():
     helper.applicant_id = "connector-applicant"
     helper.connect_type = "INTERNAL_ENRICHMENT"
     helper.connect_enrichment_entity_with_files = True
+    helper.connect_enrichment_entity_with_indicators = True
     helper.connector_id = "connector--1"
     helper.api = _FakeApi()
     helper.api_impersonate = _FakeApi()
@@ -359,6 +366,7 @@ def test_batch_callback_prefetches_same_type_entities_and_simple_exports():
 def test_batch_callback_omits_file_projection_when_connector_opts_out():
     listen_queue = _listen_queue(_unchanged_result)
     listen_queue.helper.connect_enrichment_entity_with_files = False
+    listen_queue.helper.connect_enrichment_entity_with_indicators = False
 
     assert listen_queue._data_handler(_message()) is True
 
@@ -367,6 +375,45 @@ def test_batch_callback_omits_file_projection_when_connector_opts_out():
         first=2,
         getAll=True,
         withFiles=False,
+    )
+
+
+def test_batch_callback_omits_indicator_projection_for_observables_when_connector_opts_out():
+    message = _message()
+    envelope = json.loads(message["event"]["enrichment_batch"])
+    envelope["items"] = [
+        {
+            "item_id": "item--1",
+            "work_id": "work--1",
+            "entity_id": "domain-name--1",
+            "entity_type": "Domain-Name",
+            "payload_fingerprint": "payload--1",
+            "stix_entity": None,
+            "stix_objects": None,
+        },
+        {
+            "item_id": "item--2",
+            "work_id": "work--2",
+            "entity_id": "domain-name--2",
+            "entity_type": "Domain-Name",
+            "payload_fingerprint": "payload--2",
+            "stix_entity": None,
+            "stix_objects": None,
+        },
+    ]
+    envelope["item_count"] = 2
+    message["event"]["enrichment_batch"] = json.dumps(envelope)
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.connect_enrichment_entity_with_indicators = False
+
+    assert listen_queue._data_handler(message) is True
+
+    listen_queue.helper.api._listers["Domain-Name"].assert_called_once_with(
+        filters={"ids": ["domain-name--1", "domain-name--2"]},
+        first=2,
+        getAll=True,
+        withFiles=True,
+        withIndicators=False,
     )
 
 

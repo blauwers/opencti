@@ -64,6 +64,7 @@ from pycti.connector.opencti_enrichment_batch import (
     serialize_enrichment_batch_result_envelope,
 )
 from pycti.connector.opencti_metric_handler import OpenCTIMetricHandler
+from pycti.utils.constants import StixCyberObservableTypes
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
 TRUTHY: List[str] = ["yes", "true", "True"]
@@ -882,14 +883,29 @@ class ListenQueue(threading.Thread):
     def _enrichment_entity_with_files(self) -> bool:
         return getattr(self.helper, "connect_enrichment_entity_with_files", True)
 
+    def _enrichment_entity_with_indicators(self) -> bool:
+        return getattr(self.helper, "connect_enrichment_entity_with_indicators", True)
+
+    @staticmethod
+    def _is_stix_cyber_observable_entity_type(entity_type: str) -> bool:
+        if not isinstance(entity_type, str):
+            return False
+        normalized_type = "File" if entity_type.lower() == "stixfile" else entity_type
+        return normalized_type == "Stix-Cyber-Observable" or (
+            StixCyberObservableTypes.has_value(normalized_type)
+        )
+
+    def _enrichment_entity_read_kwargs(self, entity_type: str) -> Dict:
+        read_kwargs = {"withFiles": self._enrichment_entity_with_files()}
+        if self._is_stix_cyber_observable_entity_type(entity_type):
+            read_kwargs["withIndicators"] = self._enrichment_entity_with_indicators()
+        return read_kwargs
+
     def _read_enrichment_batch_entity(
         self, entity_type: str, entity_id: str
     ) -> Optional[Dict]:
         do_read = self.helper.api.stix2.get_reader(entity_type)
-        return do_read(
-            id=entity_id,
-            withFiles=self._enrichment_entity_with_files(),
-        )
+        return do_read(id=entity_id, **self._enrichment_entity_read_kwargs(entity_type))
 
     def _list_enrichment_batch_entities(
         self, entity_type: str, entity_ids: List[str]
@@ -916,7 +932,7 @@ class ListenQueue(threading.Thread):
                         filters=query_filters,
                         first=len(batch_entity_ids),
                         getAll=True,
-                        withFiles=self._enrichment_entity_with_files(),
+                        **self._enrichment_entity_read_kwargs(entity_type),
                     )
                     or []
                 )
@@ -1233,7 +1249,9 @@ class ListenQueue(threading.Thread):
                 )
                 opencti_entity = do_read(
                     id=entity_id,
-                    withFiles=self._enrichment_entity_with_files(),
+                    **self._enrichment_entity_read_kwargs(
+                        entity_type if entity_type is not None else "Stix-Core-Object"
+                    ),
                 )
                 if opencti_entity is None:
                     raise ValueError(
@@ -2923,6 +2941,14 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             config,
             # Preserve current connector behavior unless the connector explicitly
             # opts out of attachment expansion for enrichment entity reads.
+            default=True,
+        )
+        self.connect_enrichment_entity_with_indicators = get_config_variable(
+            "CONNECTOR_ENRICHMENT_ENTITY_WITH_INDICATORS",
+            ["connector", "enrichment_entity_with_indicators"],
+            config,
+            # Preserve current connector behavior unless the connector explicitly
+            # opts out of based-on indicator expansion for observable reads.
             default=True,
         )
         self.connect_enrichment_batch_capability = parse_json_object_config(

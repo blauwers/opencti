@@ -90,6 +90,7 @@ class TestEnrichmentResolutionDefaults(TestCase):
     def test_data_handler_omits_file_projection_when_connector_opts_out(self):
         helper = DummyEnrichmentHelper()
         helper.connect_enrichment_entity_with_files = False
+        helper.connect_enrichment_entity_with_indicators = False
         reader = MagicMock(return_value={"standard_id": "indicator--test"})
         helper.api.stix2.get_reader.return_value = reader
         helper.api.stix2.prepare_export.return_value = [
@@ -118,3 +119,41 @@ class TestEnrichmentResolutionDefaults(TestCase):
             listen_queue._data_handler(json_data)
 
         reader.assert_called_once_with(id="indicator--test", withFiles=False)
+
+    def test_data_handler_omits_indicator_projection_for_observables_when_connector_opts_out(
+        self,
+    ):
+        helper = DummyEnrichmentHelper()
+        helper.connect_enrichment_entity_with_indicators = False
+        reader = MagicMock(return_value={"standard_id": "domain-name--test"})
+        helper.api.stix2.get_reader.return_value = reader
+        helper.api.stix2.prepare_export.return_value = [
+            {"id": "domain-name--test", "type": "domain-name"}
+        ]
+        listen_queue = ListenQueue.__new__(ListenQueue)
+        listen_queue.helper = helper
+        listen_queue.pika_connection = MagicMock()
+        listen_queue.callback = helper.callback
+        listen_queue.connector_applicant_id = "test-connector-applicant"
+        json_data = {
+            "event": {
+                "entity_id": "domain-name--test",
+                "entity_type": "Domain-Name",
+                "stix_entity": None,
+                "stix_objects": None,
+            },
+            "internal": {
+                "work_id": "work-123",
+                "draft_id": "",
+                "applicant_id": None,
+            },
+        }
+
+        with patch.object(listen_queue, "_set_draft_id"):
+            listen_queue._data_handler(json_data)
+
+        reader.assert_called_once_with(
+            id="domain-name--test",
+            withFiles=True,
+            withIndicators=False,
+        )
