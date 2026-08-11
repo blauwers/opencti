@@ -355,6 +355,7 @@ def test_batch_callback_prefetches_same_type_entities_and_simple_exports():
         first=2,
         getAll=True,
         withFiles=True,
+        withExternalReferences=True,
     )
     assert listen_queue.helper.api._readers == {}
     listen_queue.helper.api.stix2.prepare_simple_exports.assert_called_once()
@@ -376,6 +377,22 @@ def test_batch_callback_omits_file_projection_when_connector_opts_out():
         first=2,
         getAll=True,
         withFiles=False,
+        withExternalReferences=True,
+    )
+
+
+def test_batch_callback_omits_external_reference_projection_for_indicators_when_connector_opts_out():
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.connect_enrichment_entity_with_external_references = False
+
+    assert listen_queue._data_handler(_message()) is True
+
+    listen_queue.helper.api._listers["Indicator"].assert_called_once_with(
+        filters={"ids": ["indicator--1", "indicator--2"]},
+        first=2,
+        getAll=True,
+        withFiles=True,
+        withExternalReferences=False,
     )
 
 
@@ -478,7 +495,9 @@ def test_batch_callback_reuses_duplicate_entity_lookup_without_sharing_items():
     assert listen_queue._data_handler(message) is True
 
     indicator_reader = listen_queue.helper.api._readers["Indicator"]
-    indicator_reader.assert_called_once_with(id="indicator--1", withFiles=True)
+    indicator_reader.assert_called_once_with(
+        id="indicator--1", withFiles=True, withExternalReferences=True
+    )
     listen_queue.helper.api.stix2.prepare_simple_exports.assert_called_once()
     prepared_entities = (
         listen_queue.helper.api.stix2.prepare_simple_exports.call_args.args[0]
@@ -529,8 +548,8 @@ def test_batch_callback_falls_back_to_reads_when_group_listing_fails():
 
     indicator_reader = listen_queue.helper.api._readers["Indicator"]
     assert indicator_reader.call_args_list == [
-        call(id="indicator--1", withFiles=True),
-        call(id="indicator--2", withFiles=True),
+        call(id="indicator--1", withFiles=True, withExternalReferences=True),
+        call(id="indicator--2", withFiles=True, withExternalReferences=True),
     ]
 
 

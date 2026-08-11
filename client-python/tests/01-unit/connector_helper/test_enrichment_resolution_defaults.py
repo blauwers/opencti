@@ -87,7 +87,7 @@ class TestEnrichmentResolutionDefaults(TestCase):
             {"id": "indicator--test", "type": "indicator"}
         ]
 
-    def test_data_handler_omits_file_projection_when_connector_opts_out(self):
+    def test_data_handler_omits_indicator_projection_fields_when_connector_opts_out(self):
         helper = DummyEnrichmentHelper()
         helper.connect_enrichment_entity_with_files = False
         helper.connect_enrichment_entity_with_indicators = False
@@ -119,7 +119,11 @@ class TestEnrichmentResolutionDefaults(TestCase):
         with patch.object(listen_queue, "_set_draft_id"):
             listen_queue._data_handler(json_data)
 
-        reader.assert_called_once_with(id="indicator--test", withFiles=False)
+        reader.assert_called_once_with(
+            id="indicator--test",
+            withFiles=False,
+            withExternalReferences=False,
+        )
 
     def test_data_handler_omits_indicator_projection_for_observables_when_connector_opts_out(
         self,

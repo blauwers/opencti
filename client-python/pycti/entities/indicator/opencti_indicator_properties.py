@@ -281,3 +281,63 @@ INDICATOR_PROPERTIES_WITH_FILES = """
         }
     }
 """
+
+_INDICATOR_EXTERNAL_REFERENCES_FRAGMENT = """
+    externalReferences {
+        edges {
+            node {
+                id
+                standard_id
+                entity_type
+                source_name
+                description
+                url
+                hash
+                external_id
+                created
+                modified
+            }
+        }
+    }
+"""
+
+_INDICATOR_EXTERNAL_REFERENCES_WITH_FILES_FRAGMENT = """
+    externalReferences {
+        edges {
+            node {
+                id
+                standard_id
+                entity_type
+                source_name
+                description
+                url
+                hash
+                external_id
+                created
+                modified
+                importFiles {
+                    edges {
+                        node {
+                            id
+                            name
+                            size
+                            metaData {
+                                mimetype
+                                version
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+"""
+
+INDICATOR_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES = INDICATOR_PROPERTIES.replace(
+    _INDICATOR_EXTERNAL_REFERENCES_FRAGMENT, ""
+)
+INDICATOR_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES = (
+    INDICATOR_PROPERTIES_WITH_FILES.replace(
+        _INDICATOR_EXTERNAL_REFERENCES_WITH_FILES_FRAGMENT, ""
+    )
+)

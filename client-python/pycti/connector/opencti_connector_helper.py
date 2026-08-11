@@ -902,7 +902,11 @@ class ListenQueue(threading.Thread):
 
     def _enrichment_entity_read_kwargs(self, entity_type: str) -> Dict:
         read_kwargs = {"withFiles": self._enrichment_entity_with_files()}
-        if self._is_stix_cyber_observable_entity_type(entity_type):
+        if entity_type == "Indicator":
+            read_kwargs["withExternalReferences"] = (
+                self._enrichment_entity_with_external_references()
+            )
+        elif self._is_stix_cyber_observable_entity_type(entity_type):
             read_kwargs["withIndicators"] = self._enrichment_entity_with_indicators()
             read_kwargs["withExternalReferences"] = (
                 self._enrichment_entity_with_external_references()
@@ -2964,7 +2968,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             ["connector", "enrichment_entity_with_external_references"],
             config,
             # Preserve current connector behavior unless the connector explicitly
-            # opts out of external-reference expansion for observable reads.
+            # opts out of external-reference expansion for enrichment reads.
             default=True,
         )
         self.connect_enrichment_batch_capability = parse_json_object_config(

@@ -7,7 +7,9 @@ from stix2.canonicalization.Canonicalize import canonicalize
 
 from .indicator.opencti_indicator_properties import (
     INDICATOR_PROPERTIES,
+    INDICATOR_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES,
     INDICATOR_PROPERTIES_WITH_FILES,
+    INDICATOR_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES,
 )
 
 
@@ -29,6 +31,27 @@ class Indicator:
         self.opencti = opencti
         self.properties = INDICATOR_PROPERTIES
         self.properties_with_files = INDICATOR_PROPERTIES_WITH_FILES
+        self.properties_without_external_references = (
+            INDICATOR_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES
+        )
+        self.properties_with_files_without_external_references = (
+            INDICATOR_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES
+        )
+
+    def _properties_for_query(
+        self, with_files: bool, with_external_references: bool
+    ) -> str:
+        if with_files:
+            return (
+                self.properties_with_files
+                if with_external_references
+                else self.properties_with_files_without_external_references
+            )
+        return (
+            self.properties
+            if with_external_references
+            else self.properties_without_external_references
+        )
 
     @staticmethod
     def generate_id(pattern):
@@ -78,6 +101,8 @@ class Indicator:
         :type withPagination: bool
         :param withFiles: (optional) include files in response
         :type withFiles: bool
+        :param withExternalReferences: (optional) include external references in response
+        :type withExternalReferences: bool
         :param toStix: (optional) get in STIX format
         :type toStix: bool
         :return: List of Indicators
@@ -94,6 +119,7 @@ class Indicator:
         get_all = kwargs.get("getAll", False)
         with_pagination = kwargs.get("withPagination", False)
         with_files = kwargs.get("withFiles", False)
+        with_external_references = kwargs.get("withExternalReferences", True)
         to_stix = kwargs.get("toStix", False)
 
         self.opencti.app_logger.info(
@@ -112,7 +138,9 @@ class Indicator:
                 else (
                     custom_attributes
                     if custom_attributes is not None
-                    else (self.properties_with_files if with_files else self.properties)
+                    else self._properties_for_query(
+                        with_files, with_external_references
+                    )
                 )
             )
             + """
@@ -184,6 +212,8 @@ class Indicator:
         :type customAttributes: str
         :param withFiles: whether to include files
         :type withFiles: bool
+        :param withExternalReferences: whether to include external references
+        :type withExternalReferences: bool
         :return: Indicator object
         :rtype: dict or None
         """
@@ -192,6 +222,7 @@ class Indicator:
         filters = kwargs.get("filters", None)
         custom_attributes = kwargs.get("customAttributes", None)
         with_files = kwargs.get("withFiles", False)
+        with_external_references = kwargs.get("withExternalReferences", True)
         if id is not None:
             self.opencti.app_logger.info("Reading Indicator", {"id": id})
             query = (
@@ -202,7 +233,9 @@ class Indicator:
                 + (
                     custom_attributes
                     if custom_attributes is not None
-                    else (self.properties_with_files if with_files else self.properties)
+                    else self._properties_for_query(
+                        with_files, with_external_references
+                    )
                 )
                 + """
                     }
@@ -212,7 +245,12 @@ class Indicator:
             result = self.opencti.query(query, {"id": id})
             return self.opencti.process_multiple_fields(result["data"]["indicator"])
         elif filters is not None:
-            result = self.list(filters=filters, customAttributes=custom_attributes)
+            result = self.list(
+                filters=filters,
+                customAttributes=custom_attributes,
+                withFiles=with_files,
+                withExternalReferences=with_external_references,
+            )
             if len(result) > 0:
                 return result[0]
             else:
