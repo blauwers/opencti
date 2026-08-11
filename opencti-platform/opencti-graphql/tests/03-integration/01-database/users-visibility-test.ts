@@ -559,6 +559,23 @@ describe('Users visibility according to their direct organizations', () => {
       expect(noteqQueryResult.data?.users.edges[0].node.name).toEqual('userO');
     });
 
+    it('preserves manual and inferred edge metadata for concrete regardingOf filters run as a bypass user', async () => {
+      const users = await pageEntitiesConnection(
+        testContext,
+        ADMIN_USER,
+        [ENTITY_TYPE_USER],
+        {
+          filters: generateRegardingOfFilters('eq', RELATION_PARTICIPATE_TO, undefined, [orgaABInternalId]) as FilterGroupWithNested,
+        },
+      );
+      const typesByUser = new Map(users.edges.map((edge) => [edge.node.name, Array.from(edge.types ?? []).sort()]));
+      expect(users.edges.length).toEqual(4);
+      expect(typesByUser.get('userAB')).toEqual(['manual']);
+      expect(typesByUser.get('userA')).toEqual(['inferred']);
+      expect(typesByUser.get('userA2')).toEqual(['inferred']);
+      expect(typesByUser.get('userB')).toEqual(['inferred']);
+    });
+
     it('regardingOf filter with inferred subfilter set to false should fetch entities directly related to provided ids with provided relationship type', async () => {
       let queryResult = await queryAsAdmin({ query: LIST_USERS_QUERY, variables: { filters: generateRegardingOfFilters('eq', RELATION_PARTICIPATE_TO, 'false') } });
       expect(queryResult.data?.users.edges.length).toEqual(5); // the users participating directly in an organization

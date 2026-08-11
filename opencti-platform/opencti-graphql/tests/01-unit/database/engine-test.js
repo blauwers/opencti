@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildBufferedConnectionProjectionActions, buildLocalMustFilter, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, shouldRefreshBufferedEngineCommit, splitBufferedEngineBulkActions } from '../../../src/database/engine';
+import { buildBufferedConnectionProjectionActions, buildLocalMustFilter, canSkipRegardingOfPostFiltering, classifyBufferedEngineBulkResponseItems, coalesceBufferedEngineBulkActions, executeBufferedEngineBulkActionGroup, executeWithBufferedEngineDocumentLanes, extractBulkOperationErrors, getRegardingOfMetadataDocvalueFields, isTransitoryError, materializeBufferedEngineBulkActions, prepareElementForIndexing, resolveRegardingOfTypesFromHit, shouldRefreshBufferedEngineCommit, splitBufferedEngineBulkActions } from '../../../src/database/engine';
 import * as engineConfig from '../../../src/database/engine-config';
 import { INDEX_STIX_CORE_RELATIONSHIPS } from '../../../src/database/utils';
+import { BYPASS } from '../../../src/utils/access';
+import { INSTANCE_DYNAMIC_REGARDING_OF, INSTANCE_REGARDING_OF, INSTANCE_REGARDING_OF_DIRECTION_FORCED, RELATION_INFERRED_SUBFILTER } from '../../../src/utils/filtering/filtering-constants';
 
 describe('prepareElementForIndexing testing', () => {
   it('should base trim applied', async () => {
@@ -112,6 +114,109 @@ describe('buildLocalMustFilter testing', () => {
         ],
       },
     });
+  });
+});
+
+describe('canSkipRegardingOfPostFiltering testing', () => {
+  const bypassUser = { capabilities: [{ name: BYPASS }] };
+  const restrictedUser = { capabilities: [] };
+  const simpleRegardingOfFilter = {
+    key: [INSTANCE_REGARDING_OF],
+    values: [
+      { key: 'id', values: ['malware--1'] },
+      { key: 'relationship_type', values: ['indicates'] },
+    ],
+  };
+  const simpleRefRegardingOfFilter = {
+    key: [INSTANCE_REGARDING_OF],
+    values: [
+      { key: 'id', values: ['malware--1'] },
+      { key: 'relationship_type', values: ['object'] },
+    ],
+  };
+
+  it('skips the redundant post-filter for bypass users when the caller does not need edge types', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, simpleRegardingOfFilter, false)).toBe(true);
+  });
+
+  it('keeps core relationship filters on the post-filter path when edge types are required', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, simpleRegardingOfFilter)).toBe(false);
+  });
+
+  it('skips STIX ref relationship filters when edge types can be reconstructed', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, simpleRefRegardingOfFilter)).toBe(true);
+  });
+
+  it('keeps restricted users on the relationship visibility post-filter path', () => {
+    expect(canSkipRegardingOfPostFiltering(restrictedUser, simpleRegardingOfFilter, false)).toBe(false);
+  });
+
+  it('keeps inferred-only regardingOf filters on the post-filter path for bypass users', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, {
+      ...simpleRegardingOfFilter,
+      values: [
+        ...simpleRegardingOfFilter.values,
+        { key: RELATION_INFERRED_SUBFILTER, values: ['true'] },
+      ],
+    })).toBe(false);
+  });
+
+  it('keeps direction-constrained regardingOf filters on the post-filter path for bypass users', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, {
+      ...simpleRegardingOfFilter,
+      values: [
+        ...simpleRegardingOfFilter.values,
+        { key: INSTANCE_REGARDING_OF_DIRECTION_FORCED, values: [true] },
+      ],
+    })).toBe(false);
+  });
+
+  it('keeps dynamic regardingOf filters on the post-filter path for bypass users', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, {
+      ...simpleRegardingOfFilter,
+      key: [INSTANCE_DYNAMIC_REGARDING_OF],
+    })).toBe(false);
+  });
+
+  it('keeps wildcard regardingOf filters on the post-filter path for bypass users', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, {
+      ...simpleRegardingOfFilter,
+      values: [{ key: 'relationship_type', values: ['indicates'] }],
+    })).toBe(false);
+  });
+
+  it('keeps multi-type regardingOf filters on the post-filter path for bypass users', () => {
+    expect(canSkipRegardingOfPostFiltering(bypassUser, {
+      ...simpleRegardingOfFilter,
+      values: [
+        { key: 'id', values: ['malware--1'] },
+        { key: 'relationship_type', values: ['indicates', 'uses'] },
+      ],
+    })).toBe(false);
+  });
+
+  it('requests only the concrete relation id fields needed to reconstruct edge types', () => {
+    expect(getRegardingOfMetadataDocvalueFields(simpleRefRegardingOfFilter)).toEqual([
+      'rel_object.internal_id.keyword',
+      'rel_object.inferred_id.keyword',
+    ]);
+  });
+
+  it('does not attempt to reconstruct edge types when denormalized fields collapse inferred ids', () => {
+    expect(resolveRegardingOfTypesFromHit({
+      fields: {
+        'rel_indicates.internal_id.keyword': ['malware--1'],
+      },
+    }, simpleRegardingOfFilter)).toBeUndefined();
+  });
+
+  it('reconstructs manual and inferred edge types from denormalized hit fields', () => {
+    expect(Array.from(resolveRegardingOfTypesFromHit({
+      fields: {
+        'rel_object.internal_id.keyword': ['malware--1', 'malware--2'],
+        'rel_object.inferred_id.keyword': ['malware--1'],
+      },
+    }, simpleRefRegardingOfFilter))).toEqual(['manual', 'inferred']);
   });
 });
 

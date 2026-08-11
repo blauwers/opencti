@@ -93,6 +93,8 @@ export interface EntityOptions<T extends BasicStoreCommon> extends EntityFilters
   indices?: Array<string>;
   historyFiltering?: boolean;
   includeAuthorities?: boolean | null;
+  // Set false only when the caller's edge contract cannot expose regardingOf manual/inferred metadata.
+  includeRegardingOfTypes?: boolean;
   withInferences?: boolean;
   includeDeletedInDraft?: boolean | null;
 }

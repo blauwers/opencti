@@ -3828,22 +3828,136 @@ const buildSearchResult = <T extends BasicStoreBase>(
   return elements;
 };
 
+type SimpleRegardingOfMetadata = {
+  ids: Set<string>;
+  manualField: string;
+  inferredField?: string;
+};
+
+const getSimpleRegardingOfMetadata = (filter: Filter): SimpleRegardingOfMetadata | undefined => {
+  const idSubfilters = filter.values.filter((value) => value.key === ID_SUBFILTER);
+  const relationshipTypeSubfilters = filter.values.filter((value) => value.key === RELATION_TYPE_SUBFILTER);
+  const hasOnlySupportedSubfilters = filter.values.every((value) => [ID_SUBFILTER, RELATION_TYPE_SUBFILTER].includes(value.key));
+  const ids = idSubfilters.length === 1 ? idSubfilters[0].values.filter((value: unknown): value is string => typeof value === 'string' && isNotEmptyField(value)) : [];
+  const relationshipTypes = relationshipTypeSubfilters.length === 1
+    ? relationshipTypeSubfilters[0].values.filter((value: unknown): value is string => typeof value === 'string' && isNotEmptyField(value))
+    : [];
+  if (!hasOnlySupportedSubfilters || ids.length === 0 || relationshipTypes.length !== 1) {
+    return undefined;
+  }
+  const [relationshipType] = relationshipTypes;
+  return {
+    ids: new Set(ids),
+    manualField: buildRefRelationSearchKey(relationshipType, ID_INTERNAL),
+    // Only STIX ref relationships keep inferred ids in a distinct denormalized field.
+    // Core and internal relationships collapse manual and inferred ids into internal_id.
+    inferredField: isStixRefRelationship(relationshipType) ? buildRefRelationSearchKey(relationshipType, ID_INFERRED) : undefined,
+  };
+};
+
+export const canSkipRegardingOfPostFiltering = (user: AuthUser, filter: Filter, needsRegardingOfTypes = true) => {
+  const filterKeys = Array.isArray(filter.key) ? filter.key : [filter.key];
+  const metadata = getSimpleRegardingOfMetadata(filter);
+  // Bypass users can already see every relationship, so the denormalized
+  // relation-field query is sufficient for this exact regardingOf shape.
+  // Keep wildcard, multi-type, constrained, or dynamic variants on the
+  // relationship-index post-filter path because that pass still carries
+  // real semantics and/or edge metadata that cannot be reconstructed cheaply.
+  return isBypassUser(user)
+    && filterKeys.length === 1
+    && filterKeys[0] === INSTANCE_REGARDING_OF
+    && (isEmptyField(filter.operator) || filter.operator === FilterOperator.Eq)
+    && metadata !== undefined
+    && (!needsRegardingOfTypes || metadata.inferredField !== undefined);
+};
+
+export const getRegardingOfMetadataDocvalueFields = (filter: Filter): string[] => {
+  const metadata = getSimpleRegardingOfMetadata(filter);
+  return metadata?.inferredField ? [metadata.manualField, metadata.inferredField] : [];
+};
+
+const getHitFieldValues = (hit: any, field: string): unknown[] => {
+  const sourceField = field.endsWith('.keyword') ? field.slice(0, -'.keyword'.length) : field;
+  const value = hit?.fields?.[field] ?? hit?._source?.[sourceField] ?? hit?._source?.[field];
+  if (Array.isArray(value)) {
+    return value;
+  }
+  return isNotEmptyField(value) ? [value] : [];
+};
+
+export const resolveRegardingOfTypesFromHit = (hit: any, filter: Filter): Set<string> | undefined => {
+  const metadata = getSimpleRegardingOfMetadata(filter);
+  if (!metadata?.inferredField) {
+    return undefined;
+  }
+  const types = new Set<string>();
+  if (getHitFieldValues(hit, metadata.manualField).some((value) => typeof value === 'string' && metadata.ids.has(value))) {
+    types.add('manual');
+  }
+  if (getHitFieldValues(hit, metadata.inferredField).some((value) => typeof value === 'string' && metadata.ids.has(value))) {
+    types.add('inferred');
+  }
+  return types;
+};
+
+type LocatedPostFilteringFilter = {
+  filter: Filter;
+  hasOrAncestor: boolean;
+};
+
+const locatePostFilteringFilters = (
+  filters: FilterGroup | undefined | null,
+  hasOrAncestor = false,
+): LocatedPostFilteringFilter[] => {
+  if (!filters) {
+    return [];
+  }
+  const currentHasOrAncestor = hasOrAncestor || filters.mode === FilterMode.Or;
+  const localFilters = (filters.filters ?? [])
+    .filter((filter) => {
+      const keys = Array.isArray(filter.key) ? filter.key : [filter.key];
+      return keys.some((key) => [INSTANCE_REGARDING_OF, INSTANCE_DYNAMIC_REGARDING_OF].includes(key));
+    })
+    .map((filter) => ({ filter, hasOrAncestor: currentHasOrAncestor }));
+  const nestedFilters = (filters.filterGroups ?? []).flatMap((filterGroup) => locatePostFilteringFilters(filterGroup, currentHasOrAncestor));
+  return [...localFilters, ...nestedFilters];
+};
+
+type RegardingOfPostFilteringPlan = {
+  createPostFilter?: <T extends BasicStoreBase>(
+    context: AuthContext,
+    user: AuthUser,
+    elementsIds: string[],
+  ) => Promise<(element: T, tagsToIgnore: Set<string>) => boolean>;
+  skippedFilter?: Filter;
+};
+
 const tagFiltersForPostFiltering = (
   filters: FilterGroup | undefined | null,
+  user: AuthUser,
+  needsRegardingOfTypes: boolean,
   noRegardingOfFilterIdsCheck?: boolean,
-) => {
-  const taggedFilters: (Filter & { postFilteringTag: string })[] = filters
+): RegardingOfPostFilteringPlan => {
+  const locatedFilters = locatePostFilteringFilters(filters);
+  const postFilteringFilters = filters
     ? extractFiltersFromGroup(filters, [INSTANCE_REGARDING_OF, INSTANCE_DYNAMIC_REGARDING_OF])
         .filter((filter) => isEmptyField(filter.operator) || filter.operator === 'eq')
-        .map((filter, i) => {
-          const taggedFilter = filter as Filter & { postFilteringTag: string };
-          taggedFilter.postFilteringTag = `${i}`;
-          return taggedFilter;
-        })
     : [];
+  const skippedFilter = locatedFilters.length === 1
+    && !locatedFilters[0].hasOrAncestor
+    && canSkipRegardingOfPostFiltering(user, locatedFilters[0].filter, needsRegardingOfTypes)
+    ? locatedFilters[0].filter
+    : undefined;
+  const taggedFilters: (Filter & { postFilteringTag: string })[] = postFilteringFilters
+    .filter((filter) => filter !== skippedFilter)
+    .map((filter, i) => {
+      const taggedFilter = filter as Filter & { postFilteringTag: string };
+      taggedFilter.postFilteringTag = `${i}`;
+      return taggedFilter;
+    });
 
   if (taggedFilters.length > 0) {
-    return async <T extends BasicStoreBase>(context: AuthContext, user: AuthUser, elementsIds: string[]) => {
+    const createPostFilter = async <T extends BasicStoreBase>(context: AuthContext, user: AuthUser, elementsIds: string[]) => {
       const postFilters: { tag: string; postFilter: (element: T) => boolean }[] = [];
       for (let i = 0; i < taggedFilters.length; i++) {
         const taggedFilter = taggedFilters[i];
@@ -3857,8 +3971,9 @@ const tagFiltersForPostFiltering = (
           .filter(({ tag }) => !tagsToIgnore.has(tag))
           .every(({ postFilter }) => postFilter(element));
     };
+    return { createPostFilter, skippedFilter };
   }
-  return undefined;
+  return { skippedFilter };
 };
 
 export type PaginateOpts = QueryBodyBuilderOpts & {
@@ -3871,6 +3986,8 @@ export type PaginateOpts = QueryBodyBuilderOpts & {
   first?: number;
   filters?: FilterGroup | null;
   connectionFormat?: boolean;
+  // Set false only when the caller's edge contract cannot expose regardingOf manual/inferred metadata.
+  includeRegardingOfTypes?: boolean;
 };
 type PaginateResultWithMeta<T extends BasicStoreBase> = {
   elements: T[] | BasicConnection<T>;
@@ -3893,10 +4010,12 @@ export const elPaginate = async <T extends BasicStoreBase>(
     withResultMeta = false,
     first = ES_DEFAULT_PAGINATION,
     connectionFormat = true,
+    includeRegardingOfTypes = true,
     noRegardingOfFilterIdsCheck = false,
   } = options;
+  const needsRegardingOfTypes = connectionFormat && includeRegardingOfTypes;
   // tagFiltersForPostFiltering have side effect on options.filters, it must be done before elQueryBodyBuilder
-  const createPostFilter = tagFiltersForPostFiltering(options.filters, noRegardingOfFilterIdsCheck);
+  const { createPostFilter, skippedFilter } = tagFiltersForPostFiltering(options.filters, user, needsRegardingOfTypes, noRegardingOfFilterIdsCheck);
   const body = await elQueryBodyBuilder(context, user, options);
   if (body.size > ES_MAX_PAGINATION && !bypassSizeLimit) {
     logApp.info('[SEARCH] Pagination limited to max result config', { size: body.size, max: ES_MAX_PAGINATION });
@@ -3911,8 +4030,9 @@ export const elPaginate = async <T extends BasicStoreBase>(
     _source,
     body,
   };
-  if (withoutRels) { // Force denorm rel security
-    query.docvalue_fields = REL_DEFAULT_FETCH;
+  const regardingOfMetadataFields = needsRegardingOfTypes && skippedFilter ? getRegardingOfMetadataDocvalueFields(skippedFilter) : [];
+  if (withoutRels || regardingOfMetadataFields.length > 0) { // Force denorm rel security and preserve edge metadata for skipped regardingOf filtering
+    query.docvalue_fields = R.uniq([...(withoutRels ? REL_DEFAULT_FETCH : []), ...regardingOfMetadataFields]);
   }
   logApp.debug('[SEARCH] paginate', { query });
   try {
@@ -3928,6 +4048,22 @@ export const elPaginate = async <T extends BasicStoreBase>(
           .flatMap((matchedQuery: string) => matchedQuery.split(NAMED_QUERIES_UNIQUENESS_SEPARATOR)[0].split(POST_FILTER_TAG_SEPARATOR)));
         return postFilter(element, tagsToIgnoreSet);
       });
+    }
+    if (finalElements.length > 0 && skippedFilter && needsRegardingOfTypes) {
+      const hitsById = new Map(hits.map((hit: any) => [hit._source?.internal_id, hit]));
+      const missingMetadata = finalElements.some((element: T & { regardingOfTypes?: Set<string> }) => {
+        const regardingOfTypes = resolveRegardingOfTypesFromHit(hitsById.get(element.id), skippedFilter);
+        if (regardingOfTypes && regardingOfTypes.size > 0) {
+          element.regardingOfTypes = regardingOfTypes;
+          return false;
+        }
+        return true;
+      });
+      if (missingMetadata) {
+        logApp.debug('[SEARCH] Falling back to regardingOf post-filter metadata resolution', { filter: skippedFilter });
+        const postFilter = await buildRegardingOfFilter<T>(context, user, finalElements.map(({ id }) => id), skippedFilter, noRegardingOfFilterIdsCheck);
+        finalElements = finalElements.filter((element) => postFilter(element));
+      }
     }
     const filterCount = elements.length - finalElements.length;
     const result = buildSearchResult(finalElements, first, body.search_after, globalCount, filterCount, connectionFormat);

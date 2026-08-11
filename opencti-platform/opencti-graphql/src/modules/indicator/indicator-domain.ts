@@ -69,7 +69,7 @@ export const findById = (context: AuthContext, user: AuthUser, indicatorId: stri
 };
 
 export const findIndicatorPaginated = (context: AuthContext, user: AuthUser, args: QueryIndicatorsArgs) => {
-  return pageEntitiesConnection<BasicStoreEntityIndicator>(context, user, [ENTITY_TYPE_INDICATOR], args);
+  return pageEntitiesConnection<BasicStoreEntityIndicator>(context, user, [ENTITY_TYPE_INDICATOR], { ...args, includeRegardingOfTypes: false });
 };
 
 /**
