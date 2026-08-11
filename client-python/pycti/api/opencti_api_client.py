@@ -20,7 +20,11 @@ import requests
 from urllib3.fields import RequestField
 
 from pycti import __version__
-from pycti.api.opencti_api_batch import BatchMutationPlan, BatchMutationPlanTooLarge
+from pycti.api.opencti_api_batch import (
+    BatchMutationPlan,
+    BatchMutationPlanLimitExceeded,
+    BatchMutationPlanTooLarge,
+)
 from pycti.api.opencti_api_connector import OpenCTIApiConnector
 from pycti.api.opencti_api_draft import OpenCTIApiDraft
 from pycti.api.opencti_api_internal_file import OpenCTIApiInternalFile
@@ -1311,6 +1315,11 @@ class OpenCTIApiClient:
         self._batch_mutation_plan = plan
         try:
             yield plan
+        except BatchMutationPlanLimitExceeded:
+            # Local capture can run long enough for the shared keep-alive pool
+            # to expire before durable split/recovery mutations are sent.
+            self.session.close()
+            raise
         finally:
             self._batch_mutation_plan = None
 

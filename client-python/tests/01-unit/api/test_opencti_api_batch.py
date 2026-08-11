@@ -387,6 +387,30 @@ def test_batch_mutation_plan_applies_client_execution_group_limit():
                 pass
 
 
+def test_batch_mutation_plan_limit_closes_shared_session_before_recovery_calls():
+    client = OpenCTIApiClient(
+        url="http://localhost:4000",
+        token="test-token",
+        perform_health_check=False,
+        batch_requests_max_execution_groups=1,
+    )
+    shared_session = MagicMock()
+    client.session = shared_session
+
+    with pytest.raises(BatchMutationPlanTooManyExecutionGroups):
+        with client.batch_mutation_plan() as plan:
+            with plan.execution_group(0, "indicator--1"):
+                plan.capture(
+                    "mutation IndicatorAdd($input: IndicatorAddInput!) { indicatorAdd(input: $input) { id } }",
+                    {"input": {"stix_id": "indicator--1"}},
+                    [],
+                )
+            with plan.execution_group(0, "indicator--2"):
+                pass
+
+    shared_session.close.assert_called_once()
+
+
 def test_send_bundle_to_api_uses_json_admission_below_payload_threshold():
     client = OpenCTIApiClient(
         url="http://localhost:4000",
