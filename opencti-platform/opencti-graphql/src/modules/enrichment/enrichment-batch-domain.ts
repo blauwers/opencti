@@ -9,13 +9,18 @@ import type { AuthContext, AuthUser } from '../../types/user';
 import type { BasicStoreEntityConnector } from '../../types/connector';
 import type { Work } from '../../types/work';
 import {
+  buildEnrichmentBatchResultEnvelope,
   normalizeEnrichmentBatchCapability,
   parseEnrichmentBatchEnvelope,
   parseEnrichmentBatchResultEnvelope,
+  serializeEnrichmentBatchEnvelope,
   serializeEnrichmentBatchResultEnvelope,
+  type EnrichmentBatchCapability,
+  type EnrichmentBatchEnvelope,
   type EnrichmentBatchResultEnvelope,
   EnrichmentBatchResultStatus,
 } from './enrichment-batch-contract';
+import { readEnrichmentBatchResultReceiptPayload, reserveEnrichmentBatchResultReceipt } from './enrichment-batch-result-receipt-domain';
 
 const ENRICHMENT_BATCH_RESULT_IDEMPOTENCY_PREFIX = 'enrichment-batch-result:';
 const ENRICHMENT_BATCH_RECEIVED_MESSAGE = 'Connector ready to process the operation';
@@ -98,6 +103,53 @@ const settleEnrichmentBatchResultWorks = async (
   })));
 };
 
+const submitTerminalEnrichmentBatchResult = async (
+  context: AuthContext,
+  user: AuthUser,
+  connector: BasicStoreEntityConnector,
+  capability: EnrichmentBatchCapability,
+  envelope: EnrichmentBatchEnvelope,
+  candidateResultEnvelope: EnrichmentBatchResultEnvelope,
+): Promise<boolean> => {
+  if (candidateResultEnvelope.results.some((result) => result.status === EnrichmentBatchResultStatus.Retryable)) {
+    throw FunctionalError('Retryable enrichment batch results cannot be submitted for terminal settlement', {
+      connector_id: connector.internal_id,
+      batch_id: envelope.batch_id,
+    });
+  }
+  const worksById = await loadAndAssertBatchWorksBelongToConnector(
+    context,
+    user,
+    connector,
+    candidateResultEnvelope.results.map((result) => result.work_id),
+  );
+  const serializedEnvelope = serializeEnrichmentBatchEnvelope(envelope);
+  const receipt = await reserveEnrichmentBatchResultReceipt(context, {
+    connectorId: connector.internal_id,
+    batchId: envelope.batch_id,
+    serializedEnvelope,
+    serializedResult: serializeEnrichmentBatchResultEnvelope(candidateResultEnvelope),
+  });
+  const resultEnvelope = parseEnrichmentBatchResultEnvelope(
+    readEnrichmentBatchResultReceiptPayload(receipt),
+    envelope,
+    capability,
+  );
+
+  const processedResults = resultEnvelope.results.filter((result) => result.status === EnrichmentBatchResultStatus.Processed);
+  if (resultEnvelope.output_bundle && processedResults.length > 0) {
+    const primaryWorkId = processedResults[0].work_id;
+    await submitStixBundle(context, user, connector.internal_id, resultEnvelope.output_bundle, primaryWorkId, {
+      idempotencyKey: `${ENRICHMENT_BATCH_RESULT_IDEMPOTENCY_PREFIX}${resultEnvelope.batch_id}`,
+      enrichmentBatchResult: serializeEnrichmentBatchResultEnvelope(resultEnvelope),
+      additionalWorkIds: processedResults.slice(1).map((result) => result.work_id),
+      fingerprintContext: buildEnrichmentBatchResultFingerprintContext(resultEnvelope),
+    });
+  }
+  await settleEnrichmentBatchResultWorks(context, user, worksById, resultEnvelope);
+  return true;
+};
+
 export const submitEnrichmentBatchReceived = async (
   context: AuthContext,
   user: AuthUser,
@@ -121,15 +173,19 @@ export const submitEnrichmentBatchFailure = async (
   envelopeInput: string,
   message: string,
 ): Promise<boolean> => {
-  const { connector, envelope } = await loadValidatedEnrichmentBatchContext(context, user, connectorId, envelopeInput);
-  const workIds = envelope.items.map((item) => item.work_id);
-  const worksById = await loadAndAssertBatchWorksBelongToConnector(context, user, connector, workIds);
-  await updateProcessedTimes(context, user, workIds.map((workId) => ({
-    work: worksById[workId],
-    message,
-    inError: true,
-  })));
-  return true;
+  const { connector, capability, envelope } = await loadValidatedEnrichmentBatchContext(context, user, connectorId, envelopeInput);
+  const resultEnvelope = buildEnrichmentBatchResultEnvelope(
+    envelope,
+    envelope.items.map((item) => ({
+      itemId: item.item_id,
+      workId: item.work_id,
+      status: EnrichmentBatchResultStatus.Failed,
+      message,
+    })),
+    null,
+    capability,
+  );
+  return submitTerminalEnrichmentBatchResult(context, user, connector, capability, envelope, resultEnvelope);
 };
 
 export const submitEnrichmentBatchResult = async (
@@ -141,29 +197,5 @@ export const submitEnrichmentBatchResult = async (
 ): Promise<boolean> => {
   const { connector, capability, envelope } = await loadValidatedEnrichmentBatchContext(context, user, connectorId, envelopeInput);
   const resultEnvelope = parseEnrichmentBatchResultEnvelope(resultInput, envelope, capability);
-  if (resultEnvelope.results.some((result) => result.status === EnrichmentBatchResultStatus.Retryable)) {
-    throw FunctionalError('Retryable enrichment batch results cannot be submitted for terminal settlement', {
-      connector_id: connector.internal_id,
-      batch_id: envelope.batch_id,
-    });
-  }
-  const worksById = await loadAndAssertBatchWorksBelongToConnector(
-    context,
-    user,
-    connector,
-    resultEnvelope.results.map((result) => result.work_id),
-  );
-
-  const processedResults = resultEnvelope.results.filter((result) => result.status === EnrichmentBatchResultStatus.Processed);
-  if (resultEnvelope.output_bundle && processedResults.length > 0) {
-    const primaryWorkId = processedResults[0].work_id;
-    await submitStixBundle(context, user, connectorId, resultEnvelope.output_bundle, primaryWorkId, {
-      idempotencyKey: `${ENRICHMENT_BATCH_RESULT_IDEMPOTENCY_PREFIX}${resultEnvelope.batch_id}`,
-      enrichmentBatchResult: serializeEnrichmentBatchResultEnvelope(resultEnvelope),
-      additionalWorkIds: processedResults.slice(1).map((result) => result.work_id),
-      fingerprintContext: buildEnrichmentBatchResultFingerprintContext(resultEnvelope),
-    });
-  }
-  await settleEnrichmentBatchResultWorks(context, user, worksById, resultEnvelope);
-  return true;
+  return submitTerminalEnrichmentBatchResult(context, user, connector, capability, envelope, resultEnvelope);
 };

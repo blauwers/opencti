@@ -172,6 +172,42 @@ describe('createWorks', () => {
     });
   });
 
+  it('does not rewrite completed work rows on received replay', async () => {
+    await updateReceivedTimes(context, user, [
+      {
+        work: { _index: INDEX_HISTORY, id: 'work--1', internal_id: 'work--1', status: 'complete' },
+        message: 'Connector ready to process the operation',
+      },
+      {
+        work: { _index: INDEX_HISTORY, id: 'work--2', internal_id: 'work--2', status: 'progress' },
+        message: 'Connector ready to process the operation',
+      },
+    ]);
+
+    expect(elUpdateWithBufferedApply).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[0][2]).toBe('work--2');
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[0][3]).toMatchObject({
+      script: {
+        source: expect.stringContaining('if (ctx._source.status != "complete" && ctx._source.received_time == null)'),
+      },
+    });
+  });
+
+  it('does not append another received message when a non-terminal work was already received', async () => {
+    await updateReceivedTimes(context, user, [{
+      work: {
+        _index: INDEX_HISTORY,
+        id: 'work--1',
+        internal_id: 'work--1',
+        status: 'progress',
+        received_time: '2026-08-11T00:00:00.000Z',
+      },
+      message: 'Connector ready to process the operation',
+    }]);
+
+    expect(elUpdateWithBufferedApply).not.toHaveBeenCalled();
+  });
+
   it('reads and marks Redis completion state once for one processed batch', async () => {
     await updateProcessedTimes(context, user, [
       {
@@ -216,5 +252,61 @@ describe('createWorks', () => {
         },
       },
     });
+  });
+
+  it('does not rewrite completed work rows on processed replay', async () => {
+    await updateProcessedTimes(context, user, [
+      {
+        work: {
+          _index: INDEX_HISTORY,
+          id: 'work--1',
+          internal_id: 'work--1',
+          event_type: 'OTHER',
+          status: 'complete',
+        },
+        message: 'already complete',
+        inError: false,
+      },
+      {
+        work: {
+          _index: INDEX_HISTORY,
+          id: 'work--2',
+          internal_id: 'work--2',
+          event_type: 'OTHER',
+          status: 'progress',
+        },
+        message: 'updated',
+        inError: false,
+      },
+    ]);
+
+    expect(redisGetWorksCompletionState).toHaveBeenCalledWith(['work--2']);
+    expect(redisMarkWorksAsProcessed).toHaveBeenCalledWith(['work--2']);
+    expect(elUpdateWithBufferedApply).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[0][2]).toBe('work--2');
+    expect(vi.mocked(elUpdateWithBufferedApply).mock.calls[0][3]).toMatchObject({
+      script: {
+        source: expect.stringContaining('if (ctx._source.status != "complete" && ctx._source.processed_time == null)'),
+      },
+    });
+  });
+
+  it('does not append another processed message when a non-terminal work was already processed', async () => {
+    await updateProcessedTimes(context, user, [{
+      work: {
+        _index: INDEX_HISTORY,
+        id: 'work--1',
+        internal_id: 'work--1',
+        event_type: 'OTHER',
+        status: 'progress',
+        processed_time: '2026-08-11T00:00:00.000Z',
+      },
+      message: 'already processed',
+      inError: false,
+    }]);
+
+    expect(redisGetWorksCompletionState).not.toHaveBeenCalled();
+    expect(redisMarkWorksAsProcessed).not.toHaveBeenCalled();
+    expect(elUpdateWithBufferedApply).not.toHaveBeenCalled();
   });
 });

@@ -3,11 +3,7 @@ import type { Readable } from 'node:stream';
 import { FunctionalError } from '../../config/errors';
 import { submitStixBundle } from '../../domain/stix';
 import { streamConverter } from '../../database/file-storage';
-import {
-  submitEnrichmentBatchFailure,
-  submitEnrichmentBatchReceived,
-  submitEnrichmentBatchResult,
-} from '../enrichment/enrichment-batch-domain';
+import { submitEnrichmentBatchFailure, submitEnrichmentBatchReceived, submitEnrichmentBatchResult } from '../enrichment/enrichment-batch-domain';
 import { loadBatchDeliveryHandoff, markBatchDeliveryChildrenPublished, promoteBatchDeliveryCandidateRoot, reserveBatchDeliveryChildren } from './batch-delivery-domain';
 import { loadBatchExecutionReconciliation } from './batch-execution-reconciliation-domain';
 import { loadBatchExecutionReceipt, readBatchExecutionReceiptResultMetadata } from './batch-execution-receipt-domain';

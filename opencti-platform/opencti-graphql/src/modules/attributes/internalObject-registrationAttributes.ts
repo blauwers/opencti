@@ -47,6 +47,7 @@ import {
   ENTITY_TYPE_BATCH_STREAM_PUBLICATION_MANIFEST,
   ENTITY_TYPE_BATCH_SUBMISSION,
 } from '../batch/batch-types';
+import { ENTITY_TYPE_ENRICHMENT_BATCH_RESULT_RECEIPT } from '../enrichment/enrichment-batch-types';
 import { ENTITY_TYPE_IDENTITY_ORGANIZATION } from '../organization/organization-types';
 import { ENTITY_TYPE_PIR } from '../pir/pir-types';
 
@@ -669,6 +670,16 @@ const internalObjectsAttributes: { [k: string]: Array<AttributeDefinition<any>> 
     { name: 'serialized_bytes', label: 'Serialized bytes', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'staging_fingerprint', label: 'Staging fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { name: 'staged_at', label: 'Staged at', type: 'date', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { ...createdAt, isFilterable: false },
+    { ...updatedAt, isFilterable: false },
+  ],
+  [ENTITY_TYPE_ENRICHMENT_BATCH_RESULT_RECEIPT]: [
+    { name: 'connector_id', label: 'Connector ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'batch_id', label: 'Batch ID', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: true },
+    { name: 'envelope_fingerprint', label: 'Envelope fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_payload_version', label: 'Result payload version', type: 'numeric', precision: 'integer', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_fingerprint', label: 'Result fingerprint', type: 'string', format: 'short', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
+    { name: 'result_payload', label: 'Result payload', type: 'string', format: 'json', editDefault: false, mandatoryType: 'internal', multiple: false, upsert: false, isFilterable: false },
     { ...createdAt, isFilterable: false },
     { ...updatedAt, isFilterable: false },
   ],

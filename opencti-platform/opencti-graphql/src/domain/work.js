@@ -449,24 +449,33 @@ const appendWorkEntry = (existing, key, entry) => {
 };
 
 const workIdFromLoadedWork = (work) => work.id ?? work.internal_id;
+const isUnsetWorkTimestamp = (value) => value === null || value === undefined;
 
 export const updateReceivedTimes = async (context, _user, workUpdates) => {
   if (!Array.isArray(workUpdates) || workUpdates.length === 0) {
+    return [];
+  }
+  const pendingWorkUpdates = workUpdates.filter(({ work }) => work.status !== 'complete' && isUnsetWorkTimestamp(work.received_time));
+  if (pendingWorkUpdates.length === 0) {
     return [];
   }
   const receivedTime = now();
   return executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
     executeWrite: async () => {
-      for (const { work, message } of workUpdates) {
+      for (const { work, message } of pendingWorkUpdates) {
         const workId = workIdFromLoadedWork(work);
         const params = { received_time: receivedTime, message };
-        let source = 'ctx._source.status = "progress";';
+        let source = 'if (ctx._source.status != "complete" && ctx._source.received_time == null) { ctx._source.status = "progress";';
         source += 'ctx._source["received_time"] = params.received_time;';
         if (isNotEmptyField(message)) {
           source += 'ctx._source.messages.add(["timestamp": params.received_time, "message": params.message]); ';
         }
+        source += '}';
         await elUpdateWithBufferedApply(context, work._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+          if (existing.status === 'complete' || !isUnsetWorkTimestamp(existing.received_time)) {
+            return existing;
+          }
           const updated = {
             ...existing,
             status: 'progress',
@@ -477,7 +486,7 @@ export const updateReceivedTimes = async (context, _user, workUpdates) => {
             : updated;
         });
       }
-      return workUpdates.map(({ work }) => workIdFromLoadedWork(work));
+      return pendingWorkUpdates.map(({ work }) => workIdFromLoadedWork(work));
     },
   });
 };
@@ -486,19 +495,23 @@ export const updateProcessedTimes = async (context, _user, workUpdates) => {
   if (!Array.isArray(workUpdates) || workUpdates.length === 0) {
     return [];
   }
-  const workIds = workUpdates.map(({ work }) => workIdFromLoadedWork(work));
+  const pendingWorkUpdates = workUpdates.filter(({ work }) => work.status !== 'complete' && isUnsetWorkTimestamp(work.processed_time));
+  if (pendingWorkUpdates.length === 0) {
+    return [];
+  }
+  const workIds = pendingWorkUpdates.map(({ work }) => workIdFromLoadedWork(work));
   const completionStates = await redisGetWorksCompletionState(workIds);
   await redisMarkWorksAsProcessed(workIds);
   const processedTime = now();
   return executeSingleBatchMutation({
     kind: BatchMutationKind.UpdateAttribute,
     executeWrite: async () => {
-      for (const { work, message, inError = false } of workUpdates) {
+      for (const { work, message, inError = false } of pendingWorkUpdates) {
         const workId = workIdFromLoadedWork(work);
         const { expected, total } = completionStates[workId];
         const isComplete = isWorkFinished(expected, total);
         const params = { processed_time: processedTime, message };
-        let source = 'ctx._source["processed_time"] = params.processed_time;';
+        let source = 'if (ctx._source.status != "complete" && ctx._source.processed_time == null) { ctx._source["processed_time"] = params.processed_time;';
         if (isComplete) {
           params.completed_number = total && !Number.isNaN(total) ? total : 1;
           source += `ctx._source['status'] = "complete";
@@ -514,7 +527,11 @@ export const updateProcessedTimes = async (context, _user, workUpdates) => {
             source += 'ctx._source.messages.add(["timestamp": params.processed_time, "message": params.message]); ';
           }
         }
+        source += '}';
         await elUpdateWithBufferedApply(context, work._index, workId, { script: { source, lang: 'painless', params } }, (existing) => {
+          if (existing.status === 'complete' || !isUnsetWorkTimestamp(existing.processed_time)) {
+            return existing;
+          }
           let updated = {
             ...existing,
             processed_time: params.processed_time,

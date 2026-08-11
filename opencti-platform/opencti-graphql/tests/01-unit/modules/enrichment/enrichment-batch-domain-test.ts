@@ -20,6 +20,10 @@ import {
   submitEnrichmentBatchReceived,
   submitEnrichmentBatchResult,
 } from '../../../../src/modules/enrichment/enrichment-batch-domain';
+import {
+  readEnrichmentBatchResultReceiptPayload,
+  reserveEnrichmentBatchResultReceipt,
+} from '../../../../src/modules/enrichment/enrichment-batch-result-receipt-domain';
 import { ENTITY_TYPE_WORK } from '../../../../src/schema/internalObject';
 import type { AuthContext, AuthUser } from '../../../../src/types/user';
 
@@ -38,6 +42,11 @@ vi.mock('../../../../src/domain/stix', () => ({
 vi.mock('../../../../src/domain/work', () => ({
   updateProcessedTimes: vi.fn(),
   updateReceivedTimes: vi.fn(),
+}));
+
+vi.mock('../../../../src/modules/enrichment/enrichment-batch-result-receipt-domain', () => ({
+  readEnrichmentBatchResultReceiptPayload: vi.fn(),
+  reserveEnrichmentBatchResultReceipt: vi.fn(),
 }));
 
 const testContext = {} as AuthContext;
@@ -80,6 +89,11 @@ describe('submitEnrichmentBatchResult', () => {
     vi.mocked(submitStixBundle).mockResolvedValue({ submissionId: 'submission--1' } as never);
     vi.mocked(updateProcessedTimes).mockResolvedValue([] as never);
     vi.mocked(updateReceivedTimes).mockResolvedValue([] as never);
+    vi.mocked(reserveEnrichmentBatchResultReceipt).mockImplementation(async (_context, input) => ({
+      internal_id: 'receipt--1',
+      result_payload: input.serializedResult,
+    }) as never);
+    vi.mocked(readEnrichmentBatchResultReceiptPayload).mockImplementation((receipt) => receipt.result_payload);
   });
 
   it('marks one physical envelope received with one batch work transition', async () => {
@@ -226,6 +240,110 @@ describe('submitEnrichmentBatchResult', () => {
     ]);
   });
 
+  it('replays the first accepted output result when a later candidate changes after live state mutation', async () => {
+    const envelope = buildEnrichmentBatchEnvelope([
+      candidate(),
+      candidate({ workId: 'work--2', entityId: 'indicator--2' }),
+    ], DEFAULT_ENRICHMENT_BATCH_CAPABILITY);
+    const firstOutputBundle = JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--first',
+      objects: [
+        { id: 'indicator--1', type: 'indicator', modified: '2026-08-11T00:00:00.000Z' },
+        { id: 'indicator--2', type: 'indicator', modified: '2026-08-11T00:00:00.000Z' },
+      ],
+    });
+    const laterOutputBundle = JSON.stringify({
+      type: 'bundle',
+      id: 'bundle--later',
+      objects: [
+        { id: 'indicator--1', type: 'indicator', modified: '2026-08-11T00:01:00.000Z' },
+        { id: 'indicator--2', type: 'indicator', modified: '2026-08-11T00:01:00.000Z' },
+      ],
+    });
+    const buildResult = (outputBundle: string) => buildEnrichmentBatchResultEnvelope(
+      envelope,
+      envelope.items.map((item) => ({
+        itemId: item.item_id,
+        workId: item.work_id,
+        status: EnrichmentBatchResultStatus.Processed,
+        outputObjectIds: [item.entity_id],
+      })),
+      outputBundle,
+      DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
+    );
+    const firstResultEnvelope = buildResult(firstOutputBundle);
+    const laterResultEnvelope = buildResult(laterOutputBundle);
+    const firstSerializedResult = serializeEnrichmentBatchResultEnvelope(firstResultEnvelope);
+    vi.mocked(reserveEnrichmentBatchResultReceipt).mockResolvedValue({
+      internal_id: 'receipt--1',
+      result_payload: firstSerializedResult,
+    } as never);
+
+    await submitEnrichmentBatchResult(
+      testContext,
+      testUser,
+      connector.internal_id,
+      serializeEnrichmentBatchEnvelope(envelope),
+      serializeEnrichmentBatchResultEnvelope(laterResultEnvelope),
+    );
+
+    expect(reserveEnrichmentBatchResultReceipt).toHaveBeenCalledWith(testContext, expect.objectContaining({
+      connectorId: connector.internal_id,
+      batchId: envelope.batch_id,
+      serializedResult: serializeEnrichmentBatchResultEnvelope(laterResultEnvelope),
+    }));
+    expect(submitStixBundle).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(submitStixBundle).mock.calls[0][3]).toBe(firstOutputBundle);
+    expect(vi.mocked(submitStixBundle).mock.calls[0][5]).toMatchObject({
+      enrichmentBatchResult: firstSerializedResult,
+    });
+  });
+
+  it('replays a stored no-output terminal result instead of settling from a later candidate', async () => {
+    const envelope = buildEnrichmentBatchEnvelope([candidate()], DEFAULT_ENRICHMENT_BATCH_CAPABILITY);
+    const firstResultEnvelope = buildEnrichmentBatchResultEnvelope(
+      envelope,
+      [{
+        itemId: envelope.items[0].item_id,
+        workId: envelope.items[0].work_id,
+        status: EnrichmentBatchResultStatus.Unchanged,
+      }],
+      null,
+      DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
+    );
+    const laterResultEnvelope = buildEnrichmentBatchResultEnvelope(
+      envelope,
+      [{
+        itemId: envelope.items[0].item_id,
+        workId: envelope.items[0].work_id,
+        status: EnrichmentBatchResultStatus.Failed,
+        message: 'later failure',
+      }],
+      null,
+      DEFAULT_ENRICHMENT_BATCH_CAPABILITY,
+    );
+    vi.mocked(reserveEnrichmentBatchResultReceipt).mockResolvedValue({
+      internal_id: 'receipt--1',
+      result_payload: serializeEnrichmentBatchResultEnvelope(firstResultEnvelope),
+    } as never);
+
+    await submitEnrichmentBatchResult(
+      testContext,
+      testUser,
+      connector.internal_id,
+      serializeEnrichmentBatchEnvelope(envelope),
+      serializeEnrichmentBatchResultEnvelope(laterResultEnvelope),
+    );
+
+    expect(submitStixBundle).not.toHaveBeenCalled();
+    expect(updateProcessedTimes).toHaveBeenCalledWith(testContext, testUser, [{
+      work: expect.objectContaining({ internal_id: 'work--1' }),
+      message: 'No changes produced by connector',
+      inError: false,
+    }]);
+  });
+
   it('marks callback failures with one batch work transition', async () => {
     const envelope = buildEnrichmentBatchEnvelope([
       candidate(),
@@ -253,6 +371,7 @@ describe('submitEnrichmentBatchResult', () => {
         inError: true,
       },
     ]);
+    expect(reserveEnrichmentBatchResultReceipt).toHaveBeenCalledTimes(1);
   });
 
   it('rejects retryable result submission before terminal settlement', async () => {
