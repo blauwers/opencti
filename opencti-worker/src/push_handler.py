@@ -637,14 +637,66 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             parent_envelope.delivery_id,
             self._build_child_reservations(child_queue_messages),
         )
-        self._publish_reserved_child_handoff(
+        self._publish_reserved_child_handoff_with_retry(
             push_channel,
             exchange,
             routing_key,
+            data,
             parent_envelope.delivery_id,
             handoff,
             is_split_bundle,
         )
+
+    def _publish_reserved_child_handoff_with_retry(
+        self,
+        push_channel: BlockingChannel,
+        exchange: str,
+        routing_key: str,
+        data: Dict[str, Any],
+        parent_delivery_id: str,
+        handoff: Dict[str, Any],
+        is_split_bundle=False,
+    ) -> None:
+        try:
+            self._publish_reserved_child_handoff(
+                push_channel,
+                exchange,
+                routing_key,
+                parent_delivery_id,
+                handoff,
+                is_split_bundle,
+            )
+            return
+        except BatchDeliveryChildPublishRetryable:
+            retry_handoff = self.api.batch_delivery_handoff(parent_delivery_id)
+            if retry_handoff.get("handoff_evidence") not in {
+                BATCH_DELIVERY_HANDOFF_CHILDREN_RESERVED,
+                BATCH_DELIVERY_HANDOFF_CHILDREN_PUBLISHED,
+            }:
+                raise
+            self.logger.warning(
+                "Retrying durable child handoff on a fresh broker channel",
+                {"parent_delivery_id": parent_delivery_id},
+            )
+
+        try:
+            with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
+                with push_pika_connection.channel() as retry_channel:
+                    self._confirm_delivery(retry_channel, data)
+                    self._publish_reserved_child_handoff(
+                        retry_channel,
+                        exchange,
+                        routing_key,
+                        parent_delivery_id,
+                        retry_handoff,
+                        is_split_bundle,
+                    )
+        except BatchDeliveryChildPublishRetryable:
+            raise
+        except Exception as err:  # pylint: disable=broad-except
+            raise BatchDeliveryChildPublishRetryable(
+                "Unable to retry durable child handoff"
+            ) from err
 
     def _resume_reserved_child_handoff(
         self,
@@ -666,10 +718,11 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             return False
         if not self._handoff_matches_branch(handoff, expected_branch_kind):
             return False
-        self._publish_reserved_child_handoff(
+        self._publish_reserved_child_handoff_with_retry(
             push_channel,
             exchange,
             routing_key,
+            data,
             parent_envelope.delivery_id,
             handoff,
             is_split_bundle,
@@ -717,10 +770,11 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
         with pika.BlockingConnection(self.pika_parameters) as push_pika_connection:
             with push_pika_connection.channel() as push_channel:
                 self._confirm_delivery(push_channel, data)
-                self._publish_reserved_child_handoff(
+                self._publish_reserved_child_handoff_with_retry(
                     push_channel,
                     route[0],
                     route[1],
+                    data,
                     parent_envelope.delivery_id,
                     handoff,
                     route[2],

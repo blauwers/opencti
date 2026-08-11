@@ -1723,6 +1723,104 @@ def test_handler_requeues_reserved_v2_child_publish_failures(monkeypatch):
     assert result == "requeue"
     handler.api.reserve_batch_delivery_children.assert_not_called()
     handler.api.mark_batch_delivery_children_published.assert_not_called()
+    assert handler.send_queue_message_to_specific_queue.call_count == 2
+
+
+def test_reserved_v2_child_publish_failure_retries_only_pending_children(
+    monkeypatch,
+):
+    handler = build_handler()
+    root_delivery_id = build_root_delivery_id("batch-submission--1")
+    first_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                0,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=0,
+        )
+    )
+    second_child = json.loads(
+        build_v2_message(
+            delivery_id=build_child_delivery_id(
+                root_delivery_id,
+                BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+                0,
+                1,
+            ),
+            parent_delivery_id=root_delivery_id,
+            delivery_kind=BATCH_DELIVERY_KIND_CHILD,
+            delivery_branch_kind=BATCH_DELIVERY_BRANCH_LEGACY_SPLIT,
+            delivery_branch_sequence=0,
+            delivery_branch_ordinal=1,
+        )
+    )
+    initial_handoff = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(first_child), json.dumps(second_child)],
+    )
+    retry_handoff = build_reserved_handoff(
+        root_delivery_id,
+        [json.dumps(second_child)],
+    )
+    handler.api.reserve_batch_delivery_children.return_value = initial_handoff
+    handler.api.reserve_batch_delivery_children.side_effect = None
+    handler.api.batch_delivery_handoff.return_value = retry_handoff
+    handler.send_queue_message_to_specific_queue = MagicMock(
+        side_effect=[None, RuntimeError("broker connection lost"), None]
+    )
+    initial_channel = MagicMock()
+    retry_channel = MagicMock()
+    retry_connection = MagicMock()
+    retry_connection.__enter__.return_value = retry_connection
+    retry_connection.channel.return_value.__enter__.return_value = retry_channel
+    monkeypatch.setattr(
+        push_handler.pika, "BlockingConnection", lambda *args: retry_connection
+    )
+
+    handler._reserve_and_publish_child_handoff(
+        initial_channel,
+        "push-exchange",
+        "push-routing",
+        json.loads(build_v2_message()),
+        [first_child, second_child],
+        True,
+    )
+
+    assert handler.send_queue_message_to_specific_queue.call_args_list == [
+        call(
+            initial_channel,
+            "push-exchange",
+            "push-routing",
+            first_child,
+            True,
+        ),
+        call(
+            initial_channel,
+            "push-exchange",
+            "push-routing",
+            second_child,
+            True,
+        ),
+        call(
+            retry_channel,
+            "push-exchange",
+            "push-routing",
+            second_child,
+            True,
+        ),
+    ]
+    retry_channel.confirm_delivery.assert_called_once_with()
+    assert handler.api.mark_batch_delivery_children_published.call_args_list == [
+        call(root_delivery_id, [first_child["delivery_id"]]),
+        call(root_delivery_id, [second_child["delivery_id"]]),
+    ]
 
 
 def test_resume_reserved_handoff_rejects_mismatched_child_branch_route():
