@@ -14,9 +14,13 @@ from .stix_cyber_observable.opencti_stix_cyber_observable_deprecated import (
 )
 from .stix_cyber_observable.opencti_stix_cyber_observable_properties import (
     SCO_PROPERTIES,
+    SCO_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES,
+    SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS_WITHOUT_EXTERNAL_REFERENCES,
     SCO_PROPERTIES_WITH_FILES,
     SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS,
+    SCO_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES,
     SCO_PROPERTIES_WITHOUT_INDICATORS,
+    SCO_PROPERTIES_WITHOUT_INDICATORS_WITHOUT_EXTERNAL_REFERENCES,
 )
 
 
@@ -43,16 +47,47 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         self.properties_with_files_without_indicators = (
             SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS
         )
+        self.properties_without_external_references = (
+            SCO_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES
+        )
+        self.properties_with_files_without_external_references = (
+            SCO_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES
+        )
+        self.properties_without_indicators_without_external_references = (
+            SCO_PROPERTIES_WITHOUT_INDICATORS_WITHOUT_EXTERNAL_REFERENCES
+        )
+        self.properties_with_files_without_indicators_without_external_references = (
+            SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS_WITHOUT_EXTERNAL_REFERENCES
+        )
 
-    def _properties_for_query(self, with_files: bool, with_indicators: bool) -> str:
+    def _properties_for_query(
+        self,
+        with_files: bool,
+        with_indicators: bool,
+        with_external_references: bool,
+    ) -> str:
         if with_files:
+            if with_indicators:
+                return (
+                    self.properties_with_files
+                    if with_external_references
+                    else self.properties_with_files_without_external_references
+                )
             return (
-                self.properties_with_files
-                if with_indicators
-                else self.properties_with_files_without_indicators
+                self.properties_with_files_without_indicators
+                if with_external_references
+                else self.properties_with_files_without_indicators_without_external_references
+            )
+        if with_indicators:
+            return (
+                self.properties
+                if with_external_references
+                else self.properties_without_external_references
             )
         return (
-            self.properties if with_indicators else self.properties_without_indicators
+            self.properties_without_indicators
+            if with_external_references
+            else self.properties_without_indicators_without_external_references
         )
 
     def list(self, **kwargs):
@@ -82,6 +117,8 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         :type withFiles: bool
         :param withIndicators: whether to include related indicators
         :type withIndicators: bool
+        :param withExternalReferences: whether to include external references
+        :type withExternalReferences: bool
         :return: List of StixCyberObservable objects
         :rtype: list
         """
@@ -97,6 +134,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         with_pagination = kwargs.get("withPagination", False)
         with_files = kwargs.get("withFiles", False)
         with_indicators = kwargs.get("withIndicators", True)
+        with_external_references = kwargs.get("withExternalReferences", True)
 
         self.opencti.app_logger.info(
             "Listing StixCyberObservables with filters",
@@ -112,7 +150,9 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
             + (
                 custom_attributes
                 if custom_attributes is not None
-                else self._properties_for_query(with_files, with_indicators)
+                else self._properties_for_query(
+                    with_files, with_indicators, with_external_references
+                )
             )
             + """
                         }
@@ -185,6 +225,8 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         :type withFiles: bool
         :param withIndicators: whether to include related indicators
         :type withIndicators: bool
+        :param withExternalReferences: whether to include external references
+        :type withExternalReferences: bool
         :return: StixCyberObservable object
         :rtype: dict or None
         """
@@ -193,6 +235,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
         custom_attributes = kwargs.get("customAttributes", None)
         with_files = kwargs.get("withFiles", False)
         with_indicators = kwargs.get("withIndicators", True)
+        with_external_references = kwargs.get("withExternalReferences", True)
         if id is not None:
             self.opencti.app_logger.info("Reading StixCyberObservable", {"id": id})
             query = (
@@ -203,7 +246,9 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
                 + (
                     custom_attributes
                     if custom_attributes is not None
-                    else self._properties_for_query(with_files, with_indicators)
+                    else self._properties_for_query(
+                        with_files, with_indicators, with_external_references
+                    )
                 )
                 + """
                     }
@@ -220,6 +265,7 @@ class StixCyberObservable(StixCyberObservableDeprecatedMixin):
                 customAttributes=custom_attributes,
                 withFiles=with_files,
                 withIndicators=with_indicators,
+                withExternalReferences=with_external_references,
             )
             if len(result) > 0:
                 return result[0]

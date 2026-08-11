@@ -123,6 +123,7 @@ def _helper():
     helper.connect_type = "INTERNAL_ENRICHMENT"
     helper.connect_enrichment_entity_with_files = True
     helper.connect_enrichment_entity_with_indicators = True
+    helper.connect_enrichment_entity_with_external_references = True
     helper.connector_id = "connector--1"
     helper.api = _FakeApi()
     helper.api_impersonate = _FakeApi()
@@ -414,6 +415,47 @@ def test_batch_callback_omits_indicator_projection_for_observables_when_connecto
         getAll=True,
         withFiles=True,
         withIndicators=False,
+        withExternalReferences=True,
+    )
+
+
+def test_batch_callback_omits_external_reference_projection_for_observables_when_connector_opts_out():
+    message = _message()
+    envelope = json.loads(message["event"]["enrichment_batch"])
+    envelope["items"] = [
+        {
+            "item_id": "item--1",
+            "work_id": "work--1",
+            "entity_id": "domain-name--1",
+            "entity_type": "Domain-Name",
+            "payload_fingerprint": "payload--1",
+            "stix_entity": None,
+            "stix_objects": None,
+        },
+        {
+            "item_id": "item--2",
+            "work_id": "work--2",
+            "entity_id": "domain-name--2",
+            "entity_type": "Domain-Name",
+            "payload_fingerprint": "payload--2",
+            "stix_entity": None,
+            "stix_objects": None,
+        },
+    ]
+    envelope["item_count"] = 2
+    message["event"]["enrichment_batch"] = json.dumps(envelope)
+    listen_queue = _listen_queue(_unchanged_result)
+    listen_queue.helper.connect_enrichment_entity_with_external_references = False
+
+    assert listen_queue._data_handler(message) is True
+
+    listen_queue.helper.api._listers["Domain-Name"].assert_called_once_with(
+        filters={"ids": ["domain-name--1", "domain-name--2"]},
+        first=2,
+        getAll=True,
+        withFiles=True,
+        withIndicators=True,
+        withExternalReferences=False,
     )
 
 

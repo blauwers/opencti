@@ -886,6 +886,11 @@ class ListenQueue(threading.Thread):
     def _enrichment_entity_with_indicators(self) -> bool:
         return getattr(self.helper, "connect_enrichment_entity_with_indicators", True)
 
+    def _enrichment_entity_with_external_references(self) -> bool:
+        return getattr(
+            self.helper, "connect_enrichment_entity_with_external_references", True
+        )
+
     @staticmethod
     def _is_stix_cyber_observable_entity_type(entity_type: str) -> bool:
         if not isinstance(entity_type, str):
@@ -899,6 +904,9 @@ class ListenQueue(threading.Thread):
         read_kwargs = {"withFiles": self._enrichment_entity_with_files()}
         if self._is_stix_cyber_observable_entity_type(entity_type):
             read_kwargs["withIndicators"] = self._enrichment_entity_with_indicators()
+            read_kwargs["withExternalReferences"] = (
+                self._enrichment_entity_with_external_references()
+            )
         return read_kwargs
 
     def _read_enrichment_batch_entity(
@@ -2949,6 +2957,14 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             config,
             # Preserve current connector behavior unless the connector explicitly
             # opts out of based-on indicator expansion for observable reads.
+            default=True,
+        )
+        self.connect_enrichment_entity_with_external_references = get_config_variable(
+            "CONNECTOR_ENRICHMENT_ENTITY_WITH_EXTERNAL_REFERENCES",
+            ["connector", "enrichment_entity_with_external_references"],
+            config,
+            # Preserve current connector behavior unless the connector explicitly
+            # opts out of external-reference expansion for observable reads.
             default=True,
         )
         self.connect_enrichment_batch_capability = parse_json_object_config(

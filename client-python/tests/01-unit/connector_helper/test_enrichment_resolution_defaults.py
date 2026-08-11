@@ -91,6 +91,7 @@ class TestEnrichmentResolutionDefaults(TestCase):
         helper = DummyEnrichmentHelper()
         helper.connect_enrichment_entity_with_files = False
         helper.connect_enrichment_entity_with_indicators = False
+        helper.connect_enrichment_entity_with_external_references = False
         reader = MagicMock(return_value={"standard_id": "indicator--test"})
         helper.api.stix2.get_reader.return_value = reader
         helper.api.stix2.prepare_export.return_value = [
@@ -125,6 +126,7 @@ class TestEnrichmentResolutionDefaults(TestCase):
     ):
         helper = DummyEnrichmentHelper()
         helper.connect_enrichment_entity_with_indicators = False
+        helper.connect_enrichment_entity_with_external_references = False
         reader = MagicMock(return_value={"standard_id": "domain-name--test"})
         helper.api.stix2.get_reader.return_value = reader
         helper.api.stix2.prepare_export.return_value = [
@@ -156,4 +158,5 @@ class TestEnrichmentResolutionDefaults(TestCase):
             id="domain-name--test",
             withFiles=True,
             withIndicators=False,
+            withExternalReferences=False,
         )

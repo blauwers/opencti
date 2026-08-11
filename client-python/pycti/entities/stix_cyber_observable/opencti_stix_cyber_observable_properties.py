@@ -717,7 +717,72 @@ _SCO_INDICATORS_FRAGMENT = """
     }
 """
 
+_SCO_EXTERNAL_REFERENCES_FRAGMENT = """
+    externalReferences {
+        edges {
+            node {
+                id
+                standard_id
+                entity_type
+                source_name
+                description
+                url
+                hash
+                external_id
+                created
+                modified
+            }
+        }
+    }
+"""
+
+_SCO_EXTERNAL_REFERENCES_WITH_FILES_FRAGMENT = """
+    externalReferences {
+        edges {
+            node {
+                id
+                standard_id
+                entity_type
+                source_name
+                description
+                url
+                hash
+                external_id
+                created
+                modified
+                importFiles {
+                    edges {
+                        node {
+                            id
+                            name
+                            size
+                            metaData {
+                                mimetype
+                                version
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+"""
+
 SCO_PROPERTIES_WITHOUT_INDICATORS = SCO_PROPERTIES.replace(_SCO_INDICATORS_FRAGMENT, "")
 SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS = SCO_PROPERTIES_WITH_FILES.replace(
     _SCO_INDICATORS_FRAGMENT, ""
+)
+SCO_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES = SCO_PROPERTIES.replace(
+    _SCO_EXTERNAL_REFERENCES_FRAGMENT, ""
+)
+SCO_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES = SCO_PROPERTIES_WITH_FILES.replace(
+    _SCO_EXTERNAL_REFERENCES_WITH_FILES_FRAGMENT, ""
+)
+SCO_PROPERTIES_WITHOUT_INDICATORS_WITHOUT_EXTERNAL_REFERENCES = (
+    SCO_PROPERTIES_WITHOUT_EXTERNAL_REFERENCES.replace(_SCO_INDICATORS_FRAGMENT, "")
+)
+SCO_PROPERTIES_WITH_FILES_WITHOUT_INDICATORS_WITHOUT_EXTERNAL_REFERENCES = (
+    SCO_PROPERTIES_WITH_FILES_WITHOUT_EXTERNAL_REFERENCES.replace(
+        _SCO_INDICATORS_FRAGMENT, ""
+    )
 )

@@ -70,6 +70,32 @@ def test_read_can_omit_related_indicators_without_changing_default_projection():
     assert "    indicators {" not in client.queries[0][0]
 
 
+def test_read_can_omit_external_references_without_changing_default_projection():
+    client = _ProjectionClient()
+
+    StixCyberObservable(client).read(
+        id="domain-name--1", withExternalReferences=False
+    )
+
+    assert "    externalReferences {" not in client.queries[0][0]
+    assert "    indicators {" in client.queries[0][0]
+
+
+def test_read_can_omit_external_references_with_files_and_indicators():
+    client = _ProjectionClient()
+
+    StixCyberObservable(client).read(
+        id="domain-name--1",
+        withFiles=True,
+        withIndicators=False,
+        withExternalReferences=False,
+    )
+
+    assert "    externalReferences {" not in client.queries[0][0]
+    assert "    indicators {" not in client.queries[0][0]
+    assert "    importFiles {" in client.queries[0][0]
+
+
 def test_filtered_read_preserves_indicator_projection_choice():
     client = _ProjectionClient()
 
@@ -79,3 +105,14 @@ def test_filtered_read_preserves_indicator_projection_choice():
     )
 
     assert "    indicators {" not in client.queries[0][0]
+
+
+def test_filtered_read_preserves_external_reference_projection_choice():
+    client = _ProjectionClient()
+
+    StixCyberObservable(client).read(
+        filters={"mode": "and", "filters": [], "filterGroups": []},
+        withExternalReferences=False,
+    )
+
+    assert "    externalReferences {" not in client.queries[0][0]
