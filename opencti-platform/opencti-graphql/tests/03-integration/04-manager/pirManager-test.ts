@@ -149,6 +149,16 @@ describe('pirManager: pirManagerHandler()', () => {
     ...overrides,
   });
 
+  const deferred = <T>() => {
+    let resolve: (value: T) => void = () => {};
+    let reject: (reason?: unknown) => void = () => {};
+    const promise = new Promise<T>((promiseResolve, promiseReject) => {
+      resolve = promiseResolve;
+      reject = promiseReject;
+    });
+    return { promise, reject, resolve };
+  };
+
   it('should update the Pir lastEventId when the stream advances', async () => {
     const mockPir = buildMockPir();
     mockPirCache([mockPir]);
@@ -176,5 +186,49 @@ describe('pirManager: pirManagerHandler()', () => {
     await pirManagerHandler();
 
     expect(updatePirSpy).not.toHaveBeenCalled();
+  });
+
+  it('waits for started PIR scans after a watermark update failure', async () => {
+    const pirs = Array.from({ length: 6 }, (_value, index) => buildMockPir({
+      id: `pir-${index + 1}`,
+      internal_id: `pir-${index + 1}`,
+      lastEventId: `${index + 1}-0`,
+    }));
+    mockPirCache(pirs);
+
+    const startedRanges: string[] = [];
+    vi.spyOn(streamHandler, 'fetchStreamEventsRangeFromEventId').mockImplementation(async (lastEventId) => {
+      startedRanges.push(lastEventId);
+      return { lastEventId: `${lastEventId}-advanced` } as any;
+    });
+
+    const siblingUpdates = [deferred<any>(), deferred<any>(), deferred<any>(), deferred<any>()];
+    const firstError = new Error('pir watermark update failed');
+    let rejected = false;
+    vi.spyOn(pirDomain, 'updatePir').mockImplementation(async (_context, _user, pirId) => {
+      if (pirId === 'pir-1') {
+        throw firstError;
+      }
+      const siblingIndex = Number.parseInt(pirId.split('-')[1], 10) - 2;
+      if (siblingIndex >= 0 && siblingIndex < siblingUpdates.length) {
+        return siblingUpdates[siblingIndex].promise;
+      }
+      return {};
+    });
+
+    const running = pirManagerHandler().catch((reason) => {
+      rejected = true;
+      throw reason;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(startedRanges).toEqual(['1-0', '2-0', '3-0', '4-0', '5-0']);
+    expect(rejected).toBe(false);
+
+    siblingUpdates.forEach((sibling) => sibling.resolve({}));
+    await expect(running).rejects.toBe(firstError);
+    expect(startedRanges).toEqual(['1-0', '2-0', '3-0', '4-0', '5-0']);
   });
 });

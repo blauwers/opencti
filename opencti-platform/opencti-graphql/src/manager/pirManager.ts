@@ -13,7 +13,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 */
 
-import { Promise as BluePromise } from 'bluebird';
 import { type ManagerDefinition, registerManager } from './managerModule';
 import { executionContext, PIR_MANAGER_USER } from '../utils/access';
 import type { DataEvent, SseEvent } from '../types/event';
@@ -32,6 +31,7 @@ import convertEntityPirToStix from '../modules/pir/pir-converter';
 import { buildStixBundle } from '../database/stix-2-1-converter';
 import conf, { booleanConf } from '../config/conf';
 import { EVENT_TYPE_CREATE, EVENT_TYPE_DELETE, EVENT_TYPE_UPDATE } from '../database/utils';
+import { promiseMapWaitForStarted } from '../utils/promiseUtils';
 
 const PIR_MANAGER_ID = 'PIR_MANAGER';
 const PIR_MANAGER_LABEL = 'Pir Manager';
@@ -172,7 +172,9 @@ export const pirManagerHandler = async () => {
   const allPirs = await getEntitiesListFromCache<BasicStoreEntityPir>(context, PIR_MANAGER_USER, ENTITY_TYPE_PIR);
 
   // Loop through all Pirs by group
-  await BluePromise.map(allPirs, async (pir) => {
+  // The manager lock must cover every PIR scan that already started. A fast
+  // watermark write failure must not let sibling scans escape the ownership window.
+  await promiseMapWaitForStarted(allPirs, async (pir) => {
     // Fetch stream events since last event id caught by the Pir.
     const { lastEventId } = await fetchStreamEventsRangeFromEventId(
       pir.lastEventId,
@@ -183,7 +185,7 @@ export const pirManagerHandler = async () => {
     if (lastEventId !== pir.lastEventId) {
       await updatePir(context, PIR_MANAGER_USER, pir.id, [{ key: 'lastEventId', value: [lastEventId] }], { auditLogEnabled: false });
     }
-  }, { concurrency: PIR_MANAGER_MAX_CONCURRENCY });
+  }, PIR_MANAGER_MAX_CONCURRENCY);
 };
 
 // Configuration of the manager.
