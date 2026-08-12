@@ -98,7 +98,7 @@ export const executeProcessing = async (context: AuthContext, retentionRule: Ret
   const result = await getElementsToDelete(context, scope, before, filters);
   let remainingDeletions = result.pageInfo.globalCount;
   const elements = result.edges;
-  let deletedCount = elements.length;
+  let deletedCount = 0;
   // Collect deleted history entries details for audit log
   const deletedHistoryEntries: Array<{ id: string; timestamp: string }> = [];
   if (elements.length > 0) {
@@ -112,6 +112,7 @@ export const executeProcessing = async (context: AuthContext, retentionRule: Ret
         if (canElementBeDeleted) { // filter elements that can't be deleted (ex: user individuals)
           const humanDuration = moment.duration(utcDate(up).diff(utcDate())).humanize();
           await deleteElement(context, scope, scope === 'knowledge' ? node.internal_id : node.id, { knowledgeType: node.entity_type });
+          deletedCount += 1;
           logApp.debug(`[OPENCTI] Retention manager deleting ${node.id} after ${humanDuration}`);
 
           if (scope === 'history' || scope === 'activity') {
@@ -123,7 +124,6 @@ export const executeProcessing = async (context: AuthContext, retentionRule: Ret
         } else {
           // remove element from counters, since we can't delete it
           remainingDeletions -= 1;
-          deletedCount -= 1;
           logApp.debug(`[OPENCTI] Retention manager cannot delete ${node.id}.`);
         }
       } catch (err: any) {
@@ -145,7 +145,7 @@ export const executeProcessing = async (context: AuthContext, retentionRule: Ret
       });
       await Promise.all(promises);
     }
-    logApp.debug(`[OPENCTI] Retention manager deleted ${elements.length} in ${new Date().getTime() - start} ms`);
+    logApp.debug(`[OPENCTI] Retention manager deleted ${deletedCount} in ${new Date().getTime() - start} ms`);
   }
   // Patch the last execution of the rule
   const patch = {
