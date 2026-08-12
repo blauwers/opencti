@@ -1,5 +1,5 @@
 import { clearIntervalAsync, setIntervalAsync } from 'set-interval-async/fixed';
-import { redisGetConnectorStatus, redisGetWorkCompletionState } from '../database/redis';
+import { redisGetConnectorStatus, redisGetWorkCompletionState, redisGetWorksCompletionState } from '../database/redis';
 import { lockResources } from '../lock/master-lock';
 import conf, { booleanConf, logApp } from '../config/conf';
 import { TYPE_LOCK_ERROR } from '../config/errors';
@@ -9,6 +9,7 @@ import { executionContext, SYSTEM_USER } from '../utils/access';
 import { READ_INDEX_HISTORY } from '../database/utils';
 import { now } from '../utils/format';
 import { canReconcileWorkCompletionFromRedis, deleteWorksRaw } from '../domain/work';
+import { BatchMutationKind, executeSingleBatchMutation } from '../modules/batch/batch-executor';
 
 // Manage work created by connectors
 // Update status to complete when needed
@@ -18,6 +19,85 @@ const CONNECTOR_MANAGER_KEY = conf.get('connector_manager:lock_key') || 'connect
 const CONNECTOR_WORK_RANGE = conf.get('connector_manager:works_day_range') || 7;
 const BATCH_SIZE = conf.get('connector_manager:batch_size') || 10000;
 let running = false;
+
+const buildWorkCompletionReconciliation = (element, completionState) => {
+  const params = { completed_time: now(), completed_number: completionState.total };
+  const sourceScript = `ctx._source['status'] = "complete";
+      ctx._source['completed_time'] = params.completed_time;
+      ctx._source['completed_number'] = params.completed_number;`;
+  return { element, completionState, params, sourceScript };
+};
+
+const applyWorkCompletionReconciliation = async (context, reconciliation) => {
+  const { element, params, sourceScript } = reconciliation;
+  await elUpdateWithBufferedApply(context, element._index, element.internal_id, {
+    script: {
+      source: sourceScript,
+      lang: 'painless',
+      params,
+    },
+  }, (existing) => ({
+    ...existing,
+    status: 'complete',
+    completed_time: params.completed_time,
+    completed_number: params.completed_number,
+  }));
+};
+
+const logWorkCompletionReconciled = ({ element, completionState }) => {
+  logApp.info('Work completion reconciled from Redis state', {
+    workId: element.internal_id,
+    completedNumber: completionState.total,
+  });
+};
+
+const loadWorkCompletionStates = async (elements) => {
+  const workIds = elements.map((element) => element.internal_id);
+  try {
+    return await redisGetWorksCompletionState(workIds);
+  } catch (e) {
+    logApp.warn('[OPENCTI-MODULE] Connector manager bulk work completion read failed, falling back to scalar reads', { cause: e });
+    const completionStates = {};
+    for (let index = 0; index < elements.length; index += 1) {
+      const element = elements[index];
+      try {
+        completionStates[element.internal_id] = await redisGetWorkCompletionState(element.internal_id);
+      } catch (error) {
+        logApp.error('[OPENCTI-MODULE] Connector manager error processing work closing', { cause: error });
+      }
+    }
+    return completionStates;
+  }
+};
+
+const reconcileWorkCompletions = async (context, reconciliations) => {
+  if (reconciliations.length === 0) {
+    return;
+  }
+  try {
+    await executeSingleBatchMutation({
+      kind: BatchMutationKind.UpdateAttribute,
+      executeWrite: async () => {
+        for (let index = 0; index < reconciliations.length; index += 1) {
+          await applyWorkCompletionReconciliation(context, reconciliations[index]);
+        }
+        return reconciliations.map(({ element }) => element.internal_id);
+      },
+    });
+    reconciliations.forEach(logWorkCompletionReconciled);
+  } catch (e) {
+    logApp.warn('[OPENCTI-MODULE] Connector manager batch work closing failed, falling back to scalar updates', { cause: e });
+    for (let index = 0; index < reconciliations.length; index += 1) {
+      const reconciliation = reconciliations[index];
+      try {
+        await applyWorkCompletionReconciliation(context, reconciliation);
+        logWorkCompletionReconciled(reconciliation);
+      } catch (error) {
+        logApp.error('[OPENCTI-MODULE] Connector manager error processing work closing', { cause: error });
+      }
+    }
+  }
+};
 
 export const closeOldWorks = async (context, connector) => {
   // Get current status from Redis
@@ -36,36 +116,14 @@ export const closeOldWorks = async (context, connector) => {
       filterGroups: [],
     };
     const queryCallback = async (elements) => {
-      for (let i = 0; i < elements.length; i += 1) {
-        const element = elements[i];
-        try {
-          const completionState = await redisGetWorkCompletionState(element.internal_id);
-          if (canReconcileWorkCompletionFromRedis(completionState)) {
-            const params = { completed_time: now(), completed_number: completionState.total };
-            const sourceScript = `ctx._source['status'] = "complete";
-                ctx._source['completed_time'] = params.completed_time;
-                ctx._source['completed_number'] = params.completed_number;`;
-            await elUpdateWithBufferedApply(context, element._index, element.internal_id, {
-              script: {
-                source: sourceScript,
-                lang: 'painless',
-                params,
-              },
-            }, (existing) => ({
-              ...existing,
-              status: 'complete',
-              completed_time: params.completed_time,
-              completed_number: params.completed_number,
-            }));
-            logApp.info('Work completion reconciled from Redis state', {
-              workId: element.internal_id,
-              completedNumber: completionState.total,
-            });
-          }
-        } catch (e) {
-          logApp.error('[OPENCTI-MODULE] Connector manager error processing work closing', { cause: e });
-        }
-      }
+      const completionStates = await loadWorkCompletionStates(elements);
+      const reconciliations = elements.flatMap((element) => {
+        const completionState = completionStates[element.internal_id];
+        return completionState && canReconcileWorkCompletionFromRedis(completionState)
+          ? [buildWorkCompletionReconciliation(element, completionState)]
+          : [];
+      });
+      await reconcileWorkCompletions(context, reconciliations);
     };
     await elList(context, SYSTEM_USER, [READ_INDEX_HISTORY], {
       filters,
