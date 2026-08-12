@@ -4036,9 +4036,11 @@ export const elPaginate = async <T extends BasicStoreBase>(
   const _source: { excludes: string[]; includes?: string[] } = { excludes: [] };
   if (withoutRels) _source.excludes.push(`${REL_INDEX_PREFIX}*`);
   if (baseData) _source.includes = [...BASE_FIELDS, ...baseFields];
+  // Raw array callers do not expose totals; keep exact counts only when pagination metadata needs them.
+  const trackTotalHits = connectionFormat || withResultMeta;
   const query: any = {
     index: getIndicesToQuery(context, user, indexName),
-    track_total_hits: true,
+    track_total_hits: trackTotalHits,
     _source,
     body,
   };
@@ -4048,7 +4050,9 @@ export const elPaginate = async <T extends BasicStoreBase>(
   }
   logApp.debug('[SEARCH] paginate', { query });
   try {
-    const { hits: { hits, total: { value: globalCount } } } = await elRawSearch(context, user, types !== null ? types : 'Any', query);
+    const { hits: searchHits } = await elRawSearch(context, user, types !== null ? types : 'Any', query);
+    const { hits, total } = searchHits;
+    const globalCount = total?.value ?? 0;
     const elements = await elConvertHits<T>(hits);
     let finalElements = elements;
     if (finalElements.length > 0 && createPostFilter) {
