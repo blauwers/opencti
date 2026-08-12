@@ -3995,6 +3995,8 @@ export type PaginateOpts = QueryBodyBuilderOpts & {
   withoutRels?: boolean;
   types?: string[] | string | null;
   withResultMeta?: boolean;
+  // Set false only when the caller neither exposes nor consumes exact total metadata.
+  includeTotalCount?: boolean;
   first?: number;
   filters?: FilterGroup | null;
   connectionFormat?: boolean;
@@ -4020,6 +4022,7 @@ export const elPaginate = async <T extends BasicStoreBase>(
     withoutRels = true,
     types = null,
     withResultMeta = false,
+    includeTotalCount,
     first = ES_DEFAULT_PAGINATION,
     connectionFormat = true,
     includeRegardingOfTypes = true,
@@ -4036,8 +4039,8 @@ export const elPaginate = async <T extends BasicStoreBase>(
   const _source: { excludes: string[]; includes?: string[] } = { excludes: [] };
   if (withoutRels) _source.excludes.push(`${REL_INDEX_PREFIX}*`);
   if (baseData) _source.includes = [...BASE_FIELDS, ...baseFields];
-  // Raw array callers do not expose totals; keep exact counts only when pagination metadata needs them.
-  const trackTotalHits = connectionFormat || withResultMeta;
+  // Keep exact counts only when the caller exposes or consumes total metadata.
+  const trackTotalHits = includeTotalCount ?? (connectionFormat || withResultMeta);
   const query: any = {
     index: getIndicesToQuery(context, user, indexName),
     track_total_hits: trackTotalHits,
@@ -4121,9 +4124,17 @@ const elRepaginate = async <T extends BasicStoreBase>(
   let continueProcess = true;
   let searchAfter = opts.after;
   const listing: T[] | BasicNodeEdge<T>[] = [];
+  const requiresTotalCount = connectionFormat || callback !== undefined;
   while (continueProcess && (maxSize === undefined || emitSize < maxSize) && hasNextPage) {
     // Force options to get connection format and manage search after and metadata
-    const paginateOpts = { ...opts, first, after: searchAfter, connectionFormat: true, withResultMeta: true };
+    const paginateOpts = {
+      ...opts,
+      first,
+      after: searchAfter,
+      connectionFormat: true,
+      withResultMeta: true,
+      includeTotalCount: requiresTotalCount,
+    };
     const { elements: page, filterCount, total, endCursor } = await elPaginate<T>(context, user, indexName, paginateOpts) as any;
 
     // when first === maxSize only one iteration is necessary except in case of post filtering
@@ -4150,7 +4161,9 @@ const elRepaginate = async <T extends BasicStoreBase>(
     hasNextPage = page.pageInfo.hasNextPage;
     searchAfter = endCursor;
     totalFilteredCount += filterCount;
-    globalHitsCount = total - totalFilteredCount;
+    if (requiresTotalCount) {
+      globalHitsCount = total - totalFilteredCount;
+    }
   }
   return { elements: listing, totalCount: globalHitsCount };
 };
