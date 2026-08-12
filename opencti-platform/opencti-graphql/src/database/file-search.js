@@ -328,7 +328,7 @@ export const elSearchFiles = async (context, user, options = {}) => {
   const sourceExcludes = (excludeFields?.length > 0) ? excludeFields : [];
   const query = {
     index: INDEX_FILES,
-    track_total_hits: true,
+    track_total_hits: connectionFormat,
     _source: { includes: sourceIncludes, excludes: sourceExcludes },
     body,
   };

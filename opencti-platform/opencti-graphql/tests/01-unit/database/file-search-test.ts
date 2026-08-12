@@ -3,21 +3,23 @@ import { INDEX_FILES } from '../../../src/database/utils';
 
 const elFindByIds = vi.fn(async () => ({}));
 const elRawBulk = vi.fn();
+const elRawSearch = vi.fn();
+const buildDataRestrictions = vi.fn(async () => ({ must: [], must_not: [] }));
 
 vi.mock('../../../src/database/engine', () => ({
   BULK_TIMEOUT: '1h',
   ES_MINIMUM_FIXED_PAGINATION: 1,
   MAX_BULK_BYTES: 2 * 1024 * 1024,
   MAX_BULK_OPERATIONS: 5000,
-  buildDataRestrictions: vi.fn(),
+  buildDataRestrictions,
   elFindByIds,
   elRawBulk,
   elRawCount: vi.fn(),
   elRawDeleteByQuery: vi.fn(),
-  elRawSearch: vi.fn(),
+  elRawSearch,
 }));
 
-const { elIndexFiles } = await import('../../../src/database/file-search');
+const { elIndexFiles, elSearchFiles } = await import('../../../src/database/file-search');
 
 const buildFiles = (count: number) => Array.from({ length: count }, (_, index) => ({
   internal_id: `doc-${index}`,
@@ -37,9 +39,16 @@ const buildSuccessItems = (count: number) => Array.from({ length: count }, () =>
 describe('file search indexing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    buildDataRestrictions.mockResolvedValue({ must: [], must_not: [] });
     elRawBulk.mockResolvedValue({
       errors: false,
       items: buildSuccessItems(100),
+    });
+    elRawSearch.mockResolvedValue({
+      hits: {
+        total: { value: 0 },
+        hits: [],
+      },
     });
   });
 
@@ -162,5 +171,55 @@ describe('file search indexing', () => {
     expect(fallbackBody[1]).not.toHaveProperty('file_data');
     expect(fallbackBody[3]).not.toHaveProperty('file_data');
     expect(fallbackBody[5]).not.toHaveProperty('file_data');
+  });
+
+  it('requests exact hit totals only for connection-form file searches', async () => {
+    await elSearchFiles({} as any, {} as any);
+    await elSearchFiles({} as any, {} as any, { connectionFormat: false });
+
+    expect(elRawSearch).toHaveBeenNthCalledWith(1, {}, {}, null, expect.objectContaining({
+      track_total_hits: true,
+    }));
+    expect(elRawSearch).toHaveBeenNthCalledWith(2, {}, {}, null, expect.objectContaining({
+      track_total_hits: false,
+    }));
+  });
+
+  it('keeps raw-array file search conversion unchanged when exact totals are disabled', async () => {
+    elRawSearch.mockResolvedValueOnce({
+      hits: {
+        total: { value: 1 },
+        hits: [{
+          _index: 'files-000001',
+          _source: {
+            internal_id: 'doc-1',
+            name: 'report.txt',
+            indexed_at: '2026-08-12T00:00:00.000Z',
+            uploaded_at: '2026-08-12T00:01:00.000Z',
+            entity_id: 'entity-1',
+            file_id: 'file-1',
+          },
+          sort: ['2026-08-12T00:00:00.000Z', 'doc-1'],
+        }],
+      },
+    });
+
+    const result = await elSearchFiles({} as any, {} as any, {
+      connectionFormat: false,
+      highlight: false,
+    });
+
+    expect(result).toEqual([{
+      _index: 'files-000001',
+      id: 'doc-1',
+      internal_id: 'doc-1',
+      name: 'report.txt',
+      indexed_at: '2026-08-12T00:00:00.000Z',
+      uploaded_at: '2026-08-12T00:01:00.000Z',
+      entity_id: 'entity-1',
+      file_id: 'file-1',
+      searchOccurrences: 0,
+      sort: ['2026-08-12T00:00:00.000Z', 'doc-1'],
+    }]);
   });
 });
