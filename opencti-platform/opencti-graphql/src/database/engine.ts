@@ -2132,6 +2132,22 @@ const getBufferedEngineState = (): BufferedEngineState | undefined => {
   return getBatchExecutionMetadata<BufferedEngineState>(BATCH_ENGINE_WRITES_METADATA_KEY);
 };
 
+const normalizeBufferedEngineLookupIds = (ids: Array<string | null | undefined>): string[] => {
+  return R.uniq(ids.filter((id) => isNotEmptyField(id)) as string[]);
+};
+
+const getBufferedEngineElementLookupIds = (element: Record<string, any>): string[] => {
+  if (isNotEmptyField(element.entity_type)) {
+    return getInstanceIds(element);
+  }
+  return normalizeBufferedEngineLookupIds([
+    element.internal_id,
+    element.standard_id,
+    ...(element.x_opencti_stix_ids ?? []),
+    ...(element.i_aliases_ids ?? []),
+  ]);
+};
+
 const getBufferedWriteInvalidationIds = (elements: BasicStoreBase[]): string[] => {
   const ids = new Set<string>();
   const addId = (id: string | null | undefined) => {
@@ -2140,7 +2156,7 @@ const getBufferedWriteInvalidationIds = (elements: BasicStoreBase[]): string[] =
     }
   };
   elements.forEach((element) => {
-    getInstanceIds(element).forEach((id) => addId(id));
+    getBufferedEngineElementLookupIds(element).forEach((id) => addId(id));
     const hashes = (element as BasicStoreBase & { hashes?: Record<string, string> }).hashes ?? {};
     extractNotFuzzyHashValues(hashes).forEach((hash) => addId(hash));
     if (element.base_type === BASE_TYPE_RELATION) {
@@ -2179,7 +2195,7 @@ const matchesBufferedEngineElement = (
   types: string | string[] | null | undefined,
   indices: string | string[] | null | undefined,
 ): boolean => {
-  const elementIds = getInstanceIds(element);
+  const elementIds = getBufferedEngineElementLookupIds(element);
   if (!elementIds.some((id) => ids.includes(id))) {
     return false;
   }
@@ -2236,10 +2252,6 @@ const getBufferedWriteElements = (
   })) as BasicStoreBase[];
 };
 
-const normalizeBufferedEngineLookupIds = (ids: Array<string | null | undefined>): string[] => {
-  return R.uniq(ids.filter((id) => isNotEmptyField(id)) as string[]);
-};
-
 const getBufferedEngineWriteLookups = (write: BufferedEngineWrite): BufferedEngineWriteLookup[] => {
   if (write.kind === 'bulk-update') {
     return write.operations
@@ -2248,7 +2260,7 @@ const getBufferedEngineWriteLookups = (write: BufferedEngineWrite): BufferedEngi
       .map((ids) => ({ write, ids }));
   }
   return getBufferedWriteElements(write)
-    .map((element) => normalizeBufferedEngineLookupIds(getInstanceIds(element)))
+    .map((element) => getBufferedEngineElementLookupIds(element))
     .filter((ids) => ids.length > 0)
     .map((ids) => ({ write, ids }));
 };
@@ -2306,7 +2318,7 @@ const mergeBufferedEngineElements = <T extends BasicStoreBase>(
   indices: string | string[] | null | undefined,
 ): T[] => {
   const mergedHits = new Map(hits.map((hit) => [hit.internal_id, hit]));
-  const lookupIds = R.uniq([...ids, ...hits.flatMap((hit) => getInstanceIds(hit))]);
+  const lookupIds = R.uniq([...ids, ...hits.flatMap((hit) => getBufferedEngineElementLookupIds(hit))]);
   getOrderedBufferedEngineWritesForIds(lookupIds).forEach((write) => {
     if (write.kind === 'bulk-update') {
       write.operations.forEach((operation) => {
@@ -2414,7 +2426,7 @@ const getBufferedSatisfaction = <T extends BasicStoreBase>(
   const satisfiedIds = new Set<string>();
   const { completeElements } = resolveBufferedEngineElementsByIds<T>(processIds, types, computedIndices);
   completeElements.forEach((hit) => {
-    getInstanceIds(hit).forEach((id) => {
+    getBufferedEngineElementLookupIds(hit).forEach((id) => {
       if (requestedIds.has(id)) {
         satisfiedIds.add(id);
       }
