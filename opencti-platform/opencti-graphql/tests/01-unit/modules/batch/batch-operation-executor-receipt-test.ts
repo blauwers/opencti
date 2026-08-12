@@ -1,5 +1,5 @@
 import { makeExecutableSchema } from '@graphql-tools/schema';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { elIndex, elLoadById, elUpdate } from '../../../../src/database/engine';
 import { lockResources } from '../../../../src/lock/master-lock';
 import { loadBatchDelivery, readBatchDeliveryQueueMessage } from '../../../../src/modules/batch/batch-delivery-domain';
@@ -15,7 +15,10 @@ import {
 } from '../../../../src/modules/batch/batch-execution-receipt-domain';
 import {
   BatchSideEffectKind,
+  getBatchExecutionMetadata,
+  registerBatchCommitter,
   registerBatchSideEffect,
+  setBatchExecutionMetadata,
 } from '../../../../src/modules/batch/batch-executor';
 import { executeBatchGraphqlOperations } from '../../../../src/modules/batch/batch-operation-executor';
 import {
@@ -119,6 +122,14 @@ const buildChildDelivery = (
   branch_sequence: branchKind === BatchDeliveryBranchKind.IntactReplay ? 1 : 0,
   branch_ordinal: branchOrdinal,
   payload_fingerprint: `payload-fingerprint-child-${branchKind}-${branchOrdinal}`,
+});
+const buildRootDelivery = (deliveryId: string, submissionId: string): BatchDelivery => ({
+  ...delivery,
+  id: deliveryId,
+  internal_id: deliveryId,
+  standard_id: deliveryId,
+  submission_id: submissionId,
+  payload_fingerprint: `payload-fingerprint-root-${deliveryId}`,
 });
 const buildDeferred = () => {
   let resolve!: () => void;
@@ -236,6 +247,10 @@ describe('batch GraphQL execution receipt boundary', () => {
       receipts.set(id, next);
       return next;
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('reuses PREPARED receipts and executes exactly once after a retry', async () => {
@@ -393,6 +408,233 @@ describe('batch GraphQL execution receipt boundary', () => {
 
     const serializationLockId = buildBatchDirectDeliveryExecutionLockId(delivery.submission_id);
     expect(vi.mocked(lockResources).mock.calls.some(([ids]) => ids[0] === serializationLockId)).toBe(false);
+  });
+
+  it('shares one temporal commit boundary across compatible root deliveries while completing both receipts', async () => {
+    vi.useFakeTimers();
+    const firstDelivery = buildRootDelivery('batch-delivery--root-one', 'batch-submission--root-one');
+    const secondDelivery = buildRootDelivery('batch-delivery--root-two', 'batch-submission--root-two');
+    deliveries.set(firstDelivery.internal_id, firstDelivery);
+    deliveries.set(secondDelivery.internal_id, secondDelivery);
+    const calls: string[] = [];
+    const schema = makeExecutableSchema({
+      typeDefs: `
+        type Query {
+          status: String!
+        }
+
+        type Mutation {
+          record(value: String!): String!
+        }
+      `,
+      resolvers: {
+        Query: {
+          status: () => 'ok',
+        },
+        Mutation: {
+          record: async (_: unknown, { value }: { value: string }) => {
+            calls.push(`write:${value}`);
+            const values = getBatchExecutionMetadata<string[]>('receipt-temporal-values') ?? [];
+            values.push(value);
+            setBatchExecutionMetadata('receipt-temporal-values', values);
+            registerBatchCommitter({
+              key: 'receipt-temporal-commit',
+              execute: async () => {
+                calls.push(`commit:${getBatchExecutionMetadata<string[]>('receipt-temporal-values')?.join(',')}`);
+              },
+            });
+            return value;
+          },
+        },
+      },
+    });
+    const temporalContext = { ...testContext, batchTemporalBypass: false };
+
+    const firstExecution = executeBatchGraphqlOperations(schema, temporalContext, [operation], {
+      directDeliveryContext: buildDirectDeliveryContext(firstDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+    const secondExecution = executeBatchGraphqlOperations(schema, temporalContext, [{
+      ...operation,
+      variables: JSON.stringify({ value: 'two' }),
+      objectId: 'indicator--2',
+    }], {
+      directDeliveryContext: buildDirectDeliveryContext(secondDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(Promise.all([firstExecution, secondExecution])).resolves.toMatchObject([
+      { materialized: true },
+      { materialized: true },
+    ]);
+    expect(calls).toEqual(['write:one', 'write:two', 'commit:one,two']);
+    expect(receipts.get(buildBatchExecutionReceiptId(firstDelivery.internal_id))).toMatchObject({
+      state: BatchExecutionReceiptState.Completed,
+      result_materialized: true,
+    });
+    expect(receipts.get(buildBatchExecutionReceiptId(secondDelivery.internal_id))).toMatchObject({
+      state: BatchExecutionReceiptState.Completed,
+      result_materialized: true,
+    });
+  });
+
+  it('coalesces duplicate root deliveries that are still pending in the same temporal bucket', async () => {
+    vi.useFakeTimers();
+    const rootDelivery = buildRootDelivery('batch-delivery--root-duplicate', 'batch-submission--root-duplicate');
+    deliveries.set(rootDelivery.internal_id, rootDelivery);
+    const calls: string[] = [];
+    const temporalContext = { ...testContext, batchTemporalBypass: false };
+    const schema = buildSchema(calls);
+
+    const firstExecution = executeBatchGraphqlOperations(schema, temporalContext, [operation], {
+      directDeliveryContext: buildDirectDeliveryContext(rootDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+    const duplicateExecution = executeBatchGraphqlOperations(schema, temporalContext, [operation], {
+      directDeliveryContext: buildDirectDeliveryContext(rootDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(Promise.all([firstExecution, duplicateExecution])).resolves.toMatchObject([
+      { materialized: true },
+      { materialized: true },
+    ]);
+    expect(calls).toEqual(['write:one']);
+    expect(receipts.get(buildBatchExecutionReceiptId(rootDelivery.internal_id))).toMatchObject({
+      state: BatchExecutionReceiptState.Completed,
+      result_materialized: true,
+    });
+  });
+
+  it('keeps root deliveries with different batch wait headers in separate temporal buckets', async () => {
+    vi.useFakeTimers();
+    const firstDelivery = buildRootDelivery('batch-delivery--root-wait-one', 'batch-submission--root-wait-one');
+    const secondDelivery = buildRootDelivery('batch-delivery--root-wait-two', 'batch-submission--root-wait-two');
+    deliveries.set(firstDelivery.internal_id, firstDelivery);
+    deliveries.set(secondDelivery.internal_id, secondDelivery);
+    const calls: string[] = [];
+    const schema = makeExecutableSchema({
+      typeDefs: `
+        type Query {
+          status: String!
+        }
+
+        type Mutation {
+          record(value: String!): String!
+        }
+      `,
+      resolvers: {
+        Query: {
+          status: () => 'ok',
+        },
+        Mutation: {
+          record: async (_: unknown, { value }: { value: string }) => {
+            const values = getBatchExecutionMetadata<string[]>('receipt-temporal-wait-values') ?? [];
+            values.push(value);
+            setBatchExecutionMetadata('receipt-temporal-wait-values', values);
+            registerBatchCommitter({
+              key: 'receipt-temporal-wait-commit',
+              execute: async () => {
+                calls.push(`commit:${getBatchExecutionMetadata<string[]>('receipt-temporal-wait-values')?.join(',')}`);
+              },
+            });
+            return value;
+          },
+        },
+      },
+    });
+
+    const firstExecution = executeBatchGraphqlOperations(schema, {
+      ...testContext,
+      batchTemporalBypass: false,
+      batchWaitUntil: BatchWaitUntil.Materialized,
+    }, [operation], {
+      directDeliveryContext: buildDirectDeliveryContext(firstDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+    const secondExecution = executeBatchGraphqlOperations(schema, {
+      ...testContext,
+      batchTemporalBypass: false,
+      batchWaitUntil: BatchWaitUntil.Committed,
+    }, [{
+      ...operation,
+      variables: JSON.stringify({ value: 'two' }),
+      objectId: 'indicator--2',
+    }], {
+      directDeliveryContext: buildDirectDeliveryContext(secondDelivery),
+      waitUntil: BatchWaitUntil.Materialized,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(Promise.all([firstExecution, secondExecution])).resolves.toHaveLength(2);
+    expect(calls.sort()).toEqual(['commit:one', 'commit:two']);
+  });
+
+  it('flushes a temporal root bucket larger than the ordinary admission cap as one commit scope', async () => {
+    vi.useFakeTimers();
+    const rootDeliveries = Array.from({ length: 5 }, (_, index) => buildRootDelivery(
+      `batch-delivery--root-${index + 1}`,
+      `batch-submission--root-${index + 1}`,
+    ));
+    rootDeliveries.forEach((candidate) => deliveries.set(candidate.internal_id, candidate));
+    const calls: string[] = [];
+    const schema = makeExecutableSchema({
+      typeDefs: `
+        type Query {
+          status: String!
+        }
+
+        type Mutation {
+          record(value: String!): String!
+        }
+      `,
+      resolvers: {
+        Query: {
+          status: () => 'ok',
+        },
+        Mutation: {
+          record: async (_: unknown, { value }: { value: string }) => {
+            calls.push(`write:${value}`);
+            registerBatchCommitter({
+              key: 'receipt-temporal-admission-cap-commit',
+              execute: async () => {
+                calls.push('commit');
+              },
+            });
+            return value;
+          },
+        },
+      },
+    });
+    const temporalContext = { ...testContext, batchTemporalBypass: false };
+
+    const executions = rootDeliveries.map((candidate, index) => executeBatchGraphqlOperations(schema, temporalContext, [{
+      ...operation,
+      variables: JSON.stringify({ value: String(index + 1) }),
+      objectId: `indicator--${index + 1}`,
+    }], {
+      directDeliveryContext: buildDirectDeliveryContext(candidate),
+      waitUntil: BatchWaitUntil.Materialized,
+    }));
+
+    await vi.runAllTimersAsync();
+    await expect(Promise.all(executions)).resolves.toHaveLength(5);
+    expect(calls).toEqual([
+      'write:1',
+      'write:2',
+      'write:3',
+      'write:4',
+      'write:5',
+      'commit',
+    ]);
+    rootDeliveries.forEach((candidate) => {
+      expect(receipts.get(buildBatchExecutionReceiptId(candidate.internal_id))).toMatchObject({
+        state: BatchExecutionReceiptState.Completed,
+        result_materialized: true,
+      });
+    });
   });
 
   it('keeps direct execution semantics unchanged when observation startup fails', async () => {

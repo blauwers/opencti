@@ -6,7 +6,9 @@ import { shutdownModules, startModules } from './managers';
 import { initLockFork } from './lock/master-lock';
 import { checkSystemDependencies } from './boot-utils';
 import { startLivenessServer, stopLivenessServer } from './http/httpLiveness';
+import httpServer from './http/httpServer';
 import { startEngineHealthMonitor, stopEngineHealthMonitor } from './database/engine-monitoring';
+import { waitForPendingBatchMaterializations } from './modules/batch/batch-executor';
 
 // region platform start and stop
 export const platformStart = async () => {
@@ -70,6 +72,10 @@ export const platformStop = async () => {
   await stopLivenessServer();
   // Stop the engine health monitoring CRON
   stopEngineHealthMonitor();
+  // Stop accepting new API requests before flushing bounded temporal work.
+  await httpServer.shutdown();
+  // Flush any dwell-window batch entries and finish deferred materialization while managers are still available.
+  await waitForPendingBatchMaterializations();
   // Shutdown the cache manager
   await cacheManager.shutdown();
   // Destroy the modules

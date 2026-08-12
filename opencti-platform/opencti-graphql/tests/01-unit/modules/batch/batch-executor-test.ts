@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  BATCH_TEMPORAL_DWELL_MS,
   BATCH_SIDE_EFFECT_SEAL_DESCRIPTORS,
   BatchMutationKind,
   BatchSideEffectKind,
@@ -18,6 +19,10 @@ import {
 import { BatchExecutionMode, BatchWaitUntil } from '../../../../src/modules/batch/batch-types';
 
 describe('batch executor', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('executes mutations in order with bulk materialization defaults', async () => {
     const calls: string[] = [];
 
@@ -62,6 +67,86 @@ describe('batch executor', () => {
     expect(execution.executionMode).toBe(BatchExecutionMode.Bulk);
     expect(execution.waitUntil).toBe(BatchWaitUntil.Committed);
     expect(execution.materialized).toBe(true);
+  });
+
+  it('shares one commit boundary for compatible temporal entries while preserving per-entry side effects', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+
+    const first = executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        calls.push('first-write');
+        setBatchExecutionMetadata('temporal-values', ['first']);
+        registerBatchCommitter({
+          key: 'temporal-write',
+          execute: async () => {
+            calls.push(`commit:${getBatchExecutionMetadata<string[]>('temporal-values')?.join(',')}`);
+          },
+        });
+        return 'first-result';
+      },
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.StreamPublication,
+        execute: async () => {
+          calls.push('first-side-effect');
+        },
+      }],
+    }], {
+      temporalBatch: {
+        key: 'shared-temporal-scope',
+        itemCount: 1,
+        encodedBytes: 10,
+      },
+    });
+    const second = executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => {
+        calls.push('second-write');
+        getBatchExecutionMetadata<string[]>('temporal-values')?.push('second');
+        registerBatchCommitter({
+          key: 'temporal-write',
+          execute: async () => {
+            calls.push(`commit:${getBatchExecutionMetadata<string[]>('temporal-values')?.join(',')}`);
+          },
+        });
+        return 'second-result';
+      },
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.WorkLifecycle,
+        execute: async () => {
+          calls.push('second-side-effect');
+        },
+      }],
+    }], {
+      temporalBatch: {
+        key: 'shared-temporal-scope',
+        itemCount: 1,
+        encodedBytes: 10,
+      },
+    });
+
+    expect(calls).toEqual([]);
+    await vi.advanceTimersByTimeAsync(BATCH_TEMPORAL_DWELL_MS);
+
+    const [firstExecution, secondExecution] = await Promise.all([first, second]);
+    expect(calls).toEqual([
+      'first-write',
+      'second-write',
+      'commit:first,second',
+      'first-side-effect',
+      'second-side-effect',
+    ]);
+    expect(firstExecution).toMatchObject({
+      results: ['first-result'],
+      sideEffectKinds: [BatchSideEffectKind.StreamPublication],
+      materialized: true,
+    });
+    expect(secondExecution).toMatchObject({
+      results: ['second-result'],
+      sideEffectKinds: [BatchSideEffectKind.WorkLifecycle],
+      materialized: true,
+    });
   });
 
   it('returns the singular result while preserving fail-fast behavior', async () => {
@@ -644,6 +729,97 @@ describe('batch executor', () => {
       'first-side-effect:end',
       'second-side-effect:end',
     ].sort());
+  });
+
+  it('keeps temporal side-effect attribution isolated across concurrent auto enrichments', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let markSecondStarted: (() => void) | undefined;
+    let markFirstNestedRegistered: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    const secondStarted = new Promise<void>((resolve) => {
+      markSecondStarted = resolve;
+    });
+    const firstNestedRegistered = new Promise<void>((resolve) => {
+      markFirstNestedRegistered = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+
+    const first = executeBatchMutations([{
+      kind: BatchMutationKind.CreateEntity,
+      executeWrite: async () => 'first-result',
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.AutoEnrichment,
+        execute: async () => {
+          calls.push('first-side-effect:start');
+          await secondStarted;
+          await registerBatchSideEffect({
+            kind: BatchSideEffectKind.WorkLifecycle,
+            execute: async () => {
+              calls.push('first-nested-side-effect');
+            },
+          });
+          markFirstNestedRegistered?.();
+          calls.push('first-side-effect:end');
+        },
+      }],
+    }], {
+      temporalBatch: {
+        key: 'temporal-owner-isolation',
+        itemCount: 1,
+        encodedBytes: 10,
+      },
+    });
+    const second = executeBatchMutations([{
+      kind: BatchMutationKind.CreateRelation,
+      executeWrite: async () => 'second-result',
+      sideEffects: () => [{
+        kind: BatchSideEffectKind.AutoEnrichment,
+        execute: async () => {
+          calls.push('second-side-effect:start');
+          markSecondStarted?.();
+          await firstNestedRegistered;
+          await registerBatchSideEffect({
+            kind: BatchSideEffectKind.StreamPublication,
+            execute: async () => {
+              calls.push('second-nested-side-effect');
+            },
+          });
+          await secondGate;
+          calls.push('second-side-effect:end');
+        },
+      }],
+    }], {
+      temporalBatch: {
+        key: 'temporal-owner-isolation',
+        itemCount: 1,
+        encodedBytes: 10,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(BATCH_TEMPORAL_DWELL_MS);
+    await firstNestedRegistered;
+    releaseSecond?.();
+
+    const [firstExecution, secondExecution] = await Promise.all([first, second]);
+    expect(calls).toEqual([
+      'first-side-effect:start',
+      'second-side-effect:start',
+      'first-nested-side-effect',
+      'first-side-effect:end',
+      'second-nested-side-effect',
+      'second-side-effect:end',
+    ]);
+    expect(firstExecution.sideEffectKinds).toEqual([
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.WorkLifecycle,
+    ]);
+    expect(secondExecution.sideEffectKinds).toEqual([
+      BatchSideEffectKind.AutoEnrichment,
+      BatchSideEffectKind.StreamPublication,
+    ]);
   });
 
   it('keeps side effects registered by committers and finalizers queued until materialization starts', async () => {

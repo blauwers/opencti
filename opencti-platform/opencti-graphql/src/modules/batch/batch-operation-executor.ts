@@ -27,7 +27,7 @@ import {
 } from './batch-entity-create-coordinator';
 import { startBatchBackendAttemptObservationRefreshLoop, type BatchBackendAttemptObservationRefreshLoop } from './batch-backend-attempt-observation-domain';
 import { acquireBatchDirectDeliveryExecutionLock } from './batch-direct-delivery-execution-lock';
-import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
+import { createBatchExecutionAdmissionGate, type BatchExecutionAdmissionRelease } from './batch-execution-admission';
 import {
   ensureBatchExecutionReconciliationBeforeRequiresReconciliation,
   ensureBatchExecutionReconciliationForRequiresReconciliation,
@@ -54,12 +54,14 @@ import { BatchMutationKind, executeBatchMutations, normalizeBatchExecutionOption
 import {
   BatchAdmissionErrorCode,
   type BatchDelivery,
+  BatchDeliveryBranchKind,
   type BatchDirectDeliveryContext,
   BatchExecutionMode,
   BatchExecutionReconciliationEvidenceClass,
   BatchExecutionReconciliationOpenedReason,
   BatchExecutionReceiptFailureProof,
   BatchExecutionReceiptState,
+  BatchWaitUntil,
   type BatchExecutionReceipt,
   type BatchExecutionReceiptOperationManifest,
   type BatchExecutionReceiptResultMetadata,
@@ -162,6 +164,55 @@ const BATCH_OPERATION_FAILED_CODE = 'BATCH_OPERATION_FAILED';
 const BATCH_LOCK_ERROR_CODE = 'LOCK_ERROR';
 const RETRYABLE_PARTIAL_OPERATION_ERROR_CODES = new Set([MISSING_REF_ERROR, BATCH_LOCK_ERROR_CODE]);
 const NON_RETRYABLE_PARTIAL_OPERATION_ERROR_CODES = new Set([FUNCTIONAL_ERROR, VALIDATION_ERROR]);
+
+const buildBatchGraphqlTemporalExecutionKey = (
+  context: AuthContext,
+  normalizedOptions: ReturnType<typeof normalizeBatchExecutionOptions>,
+): string => {
+  return hashSHA256(jsonCanonicalize({
+    batch_wait_until: context.batchWaitUntil ?? null,
+    draft_context: context.draft_context ?? null,
+    event_id: context.eventId ?? null,
+    execution_mode: normalizedOptions.executionMode,
+    previous_standard: context.previousStandard ?? null,
+    source: context.source,
+    synchronized_upsert: context.synchronizedUpsert === true,
+    user_id: context.user?.internal_id ?? null,
+    user_inside_platform_organization: context.user_inside_platform_organization === true,
+    user_origin: context.user?.origin ?? null,
+    wait_until: normalizedOptions.waitUntil,
+  }) ?? '');
+};
+
+const buildBatchGraphqlTemporalExecutionOptions = (
+  context: AuthContext,
+  normalizedOptions: ReturnType<typeof normalizeBatchExecutionOptions>,
+  admissionStats: BatchGraphqlExecutionAdmissionStats,
+  directDelivery: BatchDelivery | undefined,
+) => {
+  if (
+    context.batchTemporalBypass
+    || directDelivery?.branch_kind !== BatchDeliveryBranchKind.Root
+    || normalizedOptions.executionMode !== BatchExecutionMode.Bulk
+    || normalizedOptions.waitUntil !== BatchWaitUntil.Materialized
+  ) {
+    return undefined;
+  }
+  return {
+    acquire: async (entries: readonly { admissionWeight?: number }[]) => {
+      const combinedWeight = Math.min(
+        BATCH_GRAPHQL_MAX_ACTIVE_EXECUTIONS,
+        Math.max(1, entries.reduce((total, entry) => total + (entry.admissionWeight ?? 1), 0)),
+      );
+      return batchGraphqlExecutionAdmissionGate.acquire(combinedWeight);
+    },
+    admissionWeight: admissionStats.weight,
+    dedupeKey: directDelivery.internal_id,
+    key: buildBatchGraphqlTemporalExecutionKey(context, normalizedOptions),
+    itemCount: 1,
+    encodedBytes: admissionStats.encodedBytes,
+  };
+};
 
 const getStringByteLength = (value: string | null | undefined): number => {
   return value ? Buffer.byteLength(value, 'utf8') : 0;
@@ -1472,24 +1523,37 @@ const executeBatchGraphqlOperationsWithAdmission = async (
       admission_snapshot_before: admissionSnapshotBefore,
     });
   }
-  const releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(admissionStats.weight);
-  const admittedAt = Date.now();
+  const normalizedOptions = normalizeBatchExecutionOptions(options);
+  const temporalBatch = buildBatchGraphqlTemporalExecutionOptions(
+    context,
+    normalizedOptions,
+    admissionStats,
+    validatedDirectDelivery,
+  );
+  let releaseAdmission: BatchExecutionAdmissionRelease | undefined;
+  let admittedAt = admissionRequestedAt;
   const materializationAdmissionWeight = Math.max(1, admissionStats.weight - BATCH_GRAPHQL_MATERIALIZATION_RELEASED_WEIGHT);
-  if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
-    logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
-      event: 'admitted',
-      ...admissionMetadata,
-      operation_count: admissionStats.operationCount,
-      encoded_bytes: admissionStats.encodedBytes,
-      admission_weight: admissionStats.weight,
-      admission_wait_ms: admittedAt - admissionRequestedAt,
-      admission_snapshot_before: admissionSnapshotBefore,
-      admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
-    });
-  }
+  const acquireImmediateAdmission = async () => {
+    releaseAdmission = await batchGraphqlExecutionAdmissionGate.acquire(admissionStats.weight);
+    admittedAt = Date.now();
+    if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+      logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
+        event: 'admitted',
+        ...admissionMetadata,
+        operation_count: admissionStats.operationCount,
+        encoded_bytes: admissionStats.encodedBytes,
+        admission_weight: admissionStats.weight,
+        admission_wait_ms: admittedAt - admissionRequestedAt,
+        admission_snapshot_before: admissionSnapshotBefore,
+        admission_snapshot_after: batchGraphqlExecutionAdmissionGate.snapshot(),
+      });
+    }
+  };
   try {
+    if (!temporalBatch) {
+      await acquireImmediateAdmission();
+    }
     const preparedOperations = prepareBatchGraphqlOperations(schema, operations, options.pruneUnusedResultFields);
-    const normalizedOptions = normalizeBatchExecutionOptions(options);
     let receiptReservationInput: ReserveBatchExecutionReceiptInput | undefined;
     if (options.directDeliveryContext) {
       const delivery = validatedDirectDelivery ?? await assertBatchDirectDeliveryContext(context, options.directDeliveryContext);
@@ -1523,42 +1587,49 @@ const executeBatchGraphqlOperationsWithAdmission = async (
     }
     let startedReceipt: BatchExecutionReceipt | undefined;
     let attemptObservationRefreshLoop: BatchBackendAttemptObservationRefreshLoop | undefined;
+    let replayResult: BatchGraphqlExecutionResult | undefined;
     try {
-      if (receiptReservationInput) {
-        const started = await startPreparedBatchExecutionReceipt(context, receiptReservationInput);
-        if (started.replay) {
-          return started.replay;
-        }
-        startedReceipt = started.receipt;
-        try {
-          attemptObservationRefreshLoop = await startBatchBackendAttemptObservationRefreshLoop(startedReceipt);
-        } catch (error) {
-          logApp.warn('[BATCH] Unable to start backend attempt observation refresh loop; direct execution continues without fresh liveness evidence', {
-            cause: error,
-            receipt_id: startedReceipt.internal_id,
-            delivery_id: startedReceipt.delivery_id,
-          });
-        }
-      }
       const resultBindings: BatchGraphqlResultBindings = new Map();
       let result: BatchGraphqlExecutionResult;
       try {
         const execution = await executeBatchMutations<BatchGraphqlOperationExecution>([{
           kind: BatchMutationKind.GraphqlOperation,
-          executeWrite: () => executeOperationGroups(
-            schema,
-            context,
-            preparedOperations,
-            operationGroups,
-            resultBindings,
-            normalizedOptions.executionMode !== BatchExecutionMode.Atomic,
-            executionId,
-          ),
+          executeWrite: async () => {
+            if (receiptReservationInput && !startedReceipt && !replayResult) {
+              const started = await startPreparedBatchExecutionReceipt(context, receiptReservationInput);
+              if (started.replay) {
+                replayResult = started.replay;
+                return {
+                  operationErrors: started.replay.operationErrors,
+                  results: started.replay.results,
+                };
+              }
+              startedReceipt = started.receipt;
+              try {
+                attemptObservationRefreshLoop = await startBatchBackendAttemptObservationRefreshLoop(startedReceipt);
+              } catch (error) {
+                logApp.warn('[BATCH] Unable to start backend attempt observation refresh loop; direct execution continues without fresh liveness evidence', {
+                  cause: error,
+                  receipt_id: startedReceipt.internal_id,
+                  delivery_id: startedReceipt.delivery_id,
+                });
+              }
+            }
+            return executeOperationGroups(
+              schema,
+              context,
+              preparedOperations,
+              operationGroups,
+              resultBindings,
+              normalizedOptions.executionMode !== BatchExecutionMode.Atomic,
+              executionId,
+            );
+          },
         }], {
           ...options,
           onMaterializationStarted: async () => {
             await options.onMaterializationStarted?.();
-            if (materializationAdmissionWeight >= admissionStats.weight) {
+            if (!releaseAdmission || materializationAdmissionWeight >= admissionStats.weight) {
               return;
             }
             releaseAdmission.downgrade(materializationAdmissionWeight);
@@ -1577,8 +1648,9 @@ const executeBatchGraphqlOperationsWithAdmission = async (
             }
           },
           performanceTraceId: executionId,
+          temporalBatch,
         });
-        result = {
+        result = replayResult ?? {
           ...execution,
           operationErrors: execution.results[0].operationErrors,
           results: execution.results[0].results,
@@ -1621,8 +1693,8 @@ const executeBatchGraphqlOperationsWithAdmission = async (
     }
   } finally {
     const completedAt = Date.now();
-    releaseAdmission();
-    if (BATCH_GRAPHQL_PERFORMANCE_LOG) {
+    releaseAdmission?.();
+    if (releaseAdmission && BATCH_GRAPHQL_PERFORMANCE_LOG) {
       logApp.info(BATCH_GRAPHQL_ADMISSION_LOG_MESSAGE, {
         event: 'released',
         ...admissionMetadata,

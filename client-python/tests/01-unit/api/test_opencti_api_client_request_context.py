@@ -22,6 +22,7 @@ def _snapshot(client):
         "applicant_id": headers.get("opencti-applicant-id"),
         "retry_number": headers.get("opencti-retry-number"),
         "batch_wait_until": headers.get("opencti-batch-wait-until"),
+        "batch_temporal_bypass": headers.get("opencti-batch-temporal-bypass"),
     }
 
 
@@ -37,6 +38,7 @@ def test_contextual_request_headers_are_isolated_across_threads():
         client.set_applicant_id_header("applicant--a")
         client.set_retry_number(1)
         client.set_batch_wait_until("COMMITTED")
+        client.set_batch_temporal_bypass(True)
         first_ready.set()
         second_ready.wait()
         snapshots["a"] = _snapshot(client)
@@ -48,6 +50,7 @@ def test_contextual_request_headers_are_isolated_across_threads():
         client.set_applicant_id_header("applicant--b")
         client.set_retry_number(2)
         client.set_batch_wait_until("MATERIALIZED")
+        client.set_batch_temporal_bypass(False)
         second_ready.set()
         snapshots["b"] = _snapshot(client)
 
@@ -65,6 +68,7 @@ def test_contextual_request_headers_are_isolated_across_threads():
             "applicant_id": "applicant--a",
             "retry_number": "1",
             "batch_wait_until": "COMMITTED",
+            "batch_temporal_bypass": "true",
         },
         "b": {
             "draft_id": "draft--b",
@@ -72,6 +76,7 @@ def test_contextual_request_headers_are_isolated_across_threads():
             "applicant_id": "applicant--b",
             "retry_number": "2",
             "batch_wait_until": "MATERIALIZED",
+            "batch_temporal_bypass": "false",
         },
     }
 
@@ -89,6 +94,7 @@ def test_request_context_restores_previous_header_overrides():
             "applicant_id": None,
             "retry_number": None,
             "batch_wait_until": None,
+            "batch_temporal_bypass": None,
         }
         client.set_work_id("work--inner")
         client.set_draft_id("draft--inner")
@@ -108,10 +114,12 @@ def test_contextual_setters_do_not_mutate_shared_transport_headers():
     client.set_work_id("work--1")
     client.set_draft_id("draft--1")
     client.set_batch_wait_until("MATERIALIZED")
+    client.set_batch_temporal_bypass(True)
 
     assert "opencti-work-id" not in client.request_headers
     assert "opencti-draft-id" not in client.request_headers
     assert "opencti-batch-wait-until" not in client.request_headers
+    assert "opencti-batch-temporal-bypass" not in client.request_headers
 
 
 def test_batch_mutation_plans_are_isolated_across_threads():

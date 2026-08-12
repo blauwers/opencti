@@ -414,6 +414,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
     batch_requests_max_payload_size: Optional[int] = None
     batch_requests_max_execution_groups: Optional[int] = None
     custom_headers: Optional[str] = None
+    temporal_batch_bypass: bool = False
 
     def __post_init__(self) -> None:
         self.api = OpenCTIApiClient(
@@ -1069,6 +1070,7 @@ class PushHandler:  # pylint: disable=too-many-instance-attributes
             self.api.set_synchronized_upsert_header(data.get("synchronized", False))
             self.api.set_previous_standard_header(data.get("previous_standard"))
             self.api.set_batch_wait_until(data.get("batch_wait_until"))
+            self.api.set_batch_temporal_bypass(self.temporal_batch_bypass)
             replay_count = batch_replay_count(data)
             self.api.set_retry_number(replay_count if replay_count > 0 else None)
             work_id = data.get("work_id")

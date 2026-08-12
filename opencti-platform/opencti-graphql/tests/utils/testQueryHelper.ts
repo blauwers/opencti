@@ -200,6 +200,7 @@ const queryAsTestUser = async <T = Record<string, any>>(testUser: UserTestData, 
 
 const query = async <T = Record<string, any>>(params: { user?: AuthUser; request: Request; draftContext?: any }) => {
   const execContext = executionContext('test', params.user, params.draftContext ?? undefined);
+  execContext.batchTemporalBypass = true;
   execContext.changeDraftContext = (draftId) => {
     execContext.draft_context = draftId;
   };

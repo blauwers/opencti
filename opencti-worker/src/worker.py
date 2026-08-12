@@ -326,6 +326,9 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
                             )
 
                         pika_parameters = self.build_pika_parameters(connector_config)
+                        is_realtime = is_priority_connector(
+                            connector["connector_priority_group"]
+                        )
                         push_handler = PushHandler(
                             self.worker_logger,
                             self.log_level,
@@ -347,9 +350,7 @@ class Worker:  # pylint: disable=too-few-public-methods, too-many-instance-attri
                             batch_requests_max_payload_size=self.opencti_api_batch_requests_max_payload_size,
                             batch_requests_max_execution_groups=self.opencti_api_batch_requests_max_execution_groups,
                             custom_headers=self.opencti_api_custom_headers,
-                        )
-                        is_realtime = is_priority_connector(
-                            connector["connector_priority_group"]
+                            temporal_batch_bypass=is_realtime,
                         )
 
                         self.consumers[push_queue] = MessageQueueConsumer(

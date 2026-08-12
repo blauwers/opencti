@@ -77,6 +77,7 @@ interface AuthContext {
   draft_context?: string | undefined;
   workId?: string;
   batchWaitUntil?: string;
+  batchTemporalBypass?: boolean;
   batch?: Record<string, any>;
   changeDraftContext?: (draftId: string) => void;
   eventId?: string | undefined;

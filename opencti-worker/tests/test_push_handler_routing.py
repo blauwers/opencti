@@ -68,6 +68,7 @@ def build_handler():
     handler.bundles_global_counter = MagicMock()
     handler.bundles_processing_time_gauge = MagicMock()
     handler.objects_max_refs = 0
+    handler.temporal_batch_bypass = False
     return handler
 
 
@@ -584,6 +585,16 @@ def test_handler_forwards_v2_direct_delivery_context_to_batch_importer():
         "delivery_branch_sequence": 0,
         "delivery_branch_ordinal": 0,
     }
+
+
+def test_handler_forwards_temporal_batch_bypass_header():
+    handler = build_handler()
+    handler.temporal_batch_bypass = True
+
+    result = handler.handle_message(build_v2_message(split_bundles=False))
+
+    assert result == "ack"
+    handler.api.set_batch_temporal_bypass.assert_called_once_with(True)
 
 
 def test_batch_plan_limit_detection_handles_typed_and_backend_errors():

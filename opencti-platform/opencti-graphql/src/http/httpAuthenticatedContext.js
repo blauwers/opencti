@@ -94,6 +94,7 @@ export const createAuthenticatedContext = async (req, res, contextName) => {
   executeContext.otp_mandatory = settings?.otp_mandatory ?? false; // Null check fixes 500 error on platform theme selection
   executeContext.workId = req.headers['opencti-work-id']; // Api call comes from a worker processing
   executeContext.batchWaitUntil = req.headers['opencti-batch-wait-until']; // Batch consistency requested by a worker processing
+  executeContext.batchTemporalBypass = req.headers['opencti-batch-temporal-bypass'] === 'true'; // Realtime workers bypass temporal dwell
   executeContext.draft_context = req.headers['opencti-draft-id']; // Api call is to be made is specific draft context
   executeContext.eventId = req.headers['opencti-event-id']; // Api call is due to listening event
   executeContext.previousStandard = req.headers['previous-standard']; // Previous standard id

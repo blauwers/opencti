@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import conf, { booleanConf, logApp } from '../../config/conf';
 import { promiseMap } from '../../utils/promiseUtils';
 import { createBatchExecutionAdmissionGate } from './batch-execution-admission';
+import { BatchTemporalCoordinator } from './batch-temporal-coordinator';
 import { BatchExecutionMode, BatchWaitUntil } from './batch-types';
 
 export enum BatchMutationKind {
@@ -140,7 +141,18 @@ export interface BatchExecutionOptions {
   onMaterializationStarted?: () => Promise<void> | void;
   onSideEffectSealEvaluated?: (snapshot: BatchSideEffectSealSnapshot | undefined) => Promise<void> | void;
   performanceTraceId?: string;
+  temporalBatch?: BatchTemporalExecutionOptions;
   waitUntil?: BatchWaitUntil | string;
+}
+
+export interface BatchTemporalExecutionOptions {
+  acquire?: (entries: readonly BatchTemporalExecutionOptions[]) => Promise<() => void>;
+  admissionWeight?: number;
+  barrier?: boolean;
+  dedupeKey?: string;
+  encodedBytes: number;
+  itemCount: number;
+  key: string;
 }
 
 export type NormalizedBatchExecutionOptions = {
@@ -163,14 +175,16 @@ interface BatchExecutionState {
   materializationState?: BatchSideEffectMaterializationState;
   metadata: Map<string, unknown>;
   sideEffectSealSnapshot?: BatchSideEffectSealSnapshot;
-  sideEffects: BatchSideEffect[];
+  sideEffectKindsByTemporalOwner: Map<number, BatchSideEffectKind[]>;
+  sideEffects: BatchScheduledSideEffect[];
   sideEffectKinds: BatchSideEffectKind[];
   writeBoundaryOpen: boolean;
 }
 
 interface BatchExecutionScope {
-  active: boolean;
+  active: { value: boolean };
   state: BatchExecutionState;
+  temporalOwnerId?: number;
 }
 
 interface BatchSideEffectMaterializationState {
@@ -191,6 +205,20 @@ interface BatchSideEffectActiveExecution {
   startedAt: number;
 }
 
+type BatchScheduledSideEffect = BatchSideEffect & {
+  temporalOwnerId?: number;
+};
+
+type BatchExecutionEntry<T> = {
+  mutations: BatchMutation<T>[];
+  options: BatchExecutionOptions;
+  temporalOwnerId?: number;
+};
+
+type BatchTemporalExecutionEntry = BatchExecutionEntry<unknown> & {
+  temporalOwnerId: number;
+};
+
 type BatchSideEffectMaterializationStage = 'ordered' | 'auto_enrichment' | 'complete';
 
 const batchExecutionStorage = new AsyncLocalStorage<BatchExecutionScope>();
@@ -200,17 +228,41 @@ const BATCH_EXECUTION_LOG_MESSAGE = '[BATCH] Execution phase';
 const BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY = 'batch.performance-trace-id';
 const BATCH_SIDE_EFFECT_PROGRESS_INTERVAL_MS = 5000;
 const BATCH_SIDE_EFFECT_DEFAULT_MAX_ACTIVE_AUTO_ENRICHMENTS = 4;
+const BATCH_TEMPORAL_DEFAULT_DWELL_MS = 1000;
+const BATCH_TEMPORAL_DEFAULT_MAX_ITEMS = 100;
+const BATCH_TEMPORAL_DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const BATCH_SIDE_EFFECT_SEAL_CLASS_VALUES = new Set(Object.values(BatchSideEffectSealClass));
 const configuredBatchMaxActiveAutoEnrichments = Number(conf.get('app:concurrency:batch_max_active_auto_enrichments'));
 export const BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS = Number.isInteger(configuredBatchMaxActiveAutoEnrichments)
   && configuredBatchMaxActiveAutoEnrichments > 0
   ? configuredBatchMaxActiveAutoEnrichments
   : BATCH_SIDE_EFFECT_DEFAULT_MAX_ACTIVE_AUTO_ENRICHMENTS;
+const configuredBatchTemporalDwellMs = Number(conf.get('app:concurrency:batch_temporal_dwell_ms'));
+export const BATCH_TEMPORAL_DWELL_MS = Number.isInteger(configuredBatchTemporalDwellMs) && configuredBatchTemporalDwellMs >= 0
+  ? configuredBatchTemporalDwellMs
+  : BATCH_TEMPORAL_DEFAULT_DWELL_MS;
+const configuredBatchTemporalMaxItems = Number(conf.get('app:concurrency:batch_temporal_max_items'));
+export const BATCH_TEMPORAL_MAX_ITEMS = Number.isInteger(configuredBatchTemporalMaxItems) && configuredBatchTemporalMaxItems > 0
+  ? configuredBatchTemporalMaxItems
+  : BATCH_TEMPORAL_DEFAULT_MAX_ITEMS;
+const configuredBatchTemporalMaxBytes = Number(conf.get('app:concurrency:batch_temporal_max_bytes'));
+export const BATCH_TEMPORAL_MAX_BYTES = Number.isInteger(configuredBatchTemporalMaxBytes) && configuredBatchTemporalMaxBytes > 0
+  ? configuredBatchTemporalMaxBytes
+  : BATCH_TEMPORAL_DEFAULT_MAX_BYTES;
 const batchAutoEnrichmentMaterializationGate = createBatchExecutionAdmissionGate(BATCH_SIDE_EFFECT_MAX_ACTIVE_AUTO_ENRICHMENTS);
+let batchTemporalExecutionSequence = 0;
+
+const getActiveBatchExecutionScope = (): BatchExecutionScope | undefined => {
+  const scope = batchExecutionStorage.getStore();
+  return scope?.active.value ? scope : undefined;
+};
 
 const getActiveBatchExecutionState = (): BatchExecutionState | undefined => {
-  const scope = batchExecutionStorage.getStore();
-  return scope?.active ? scope.state : undefined;
+  return getActiveBatchExecutionScope()?.state;
+};
+
+const getActiveBatchTemporalOwnerId = (): number | undefined => {
+  return getActiveBatchExecutionScope()?.temporalOwnerId;
 };
 
 const runWithBatchExecutionState = async <T>(
@@ -218,16 +270,31 @@ const runWithBatchExecutionState = async <T>(
   execute: () => Promise<T>,
 ): Promise<T> => {
   const scope: BatchExecutionScope = {
-    active: true,
+    active: { value: true },
     state,
   };
   return batchExecutionStorage.run(scope, async () => {
     try {
       return await execute();
     } finally {
-      scope.active = false;
+      scope.active.value = false;
     }
   });
+};
+
+const runWithBatchTemporalOwner = async <T>(
+  state: BatchExecutionState,
+  temporalOwnerId: number | undefined,
+  execute: () => Promise<T>,
+): Promise<T> => {
+  const scope = getActiveBatchExecutionScope();
+  if (!scope || scope.state !== state) {
+    return execute();
+  }
+  return batchExecutionStorage.run({
+    ...scope,
+    temporalOwnerId,
+  }, execute);
 };
 
 export const normalizeBatchExecutionOptions = (options: BatchExecutionOptions = {}): NormalizedBatchExecutionOptions => ({
@@ -327,7 +394,7 @@ const logBatchSideEffectProgress = (state: BatchExecutionState) => {
 
 const executeBatchSideEffect = async (
   state: BatchExecutionState,
-  sideEffect: BatchSideEffect,
+  sideEffect: BatchScheduledSideEffect,
   execute: () => Promise<void> = sideEffect.execute,
   logicalSideEffectCount = 1,
 ) => {
@@ -342,7 +409,7 @@ const executeBatchSideEffect = async (
   activeExecutions.add(activeExecution);
   materializationState.activeExecutionsByKind.set(sideEffect.kind, activeExecutions);
   try {
-    await execute();
+    await runWithBatchTemporalOwner(state, sideEffect.temporalOwnerId, execute);
   } finally {
     materializationState.completedCount += logicalSideEffectCount;
     materializationState.completedCountByKind.set(
@@ -364,36 +431,48 @@ const scheduleBatchSideEffect = async (state: BatchExecutionState, sideEffect: B
   if (state.sideEffectSealSnapshot) {
     throw new Error(`Cannot register batch side effect ${sideEffect.kind} after pre-materialization seal`);
   }
+  const temporalOwnerId = getActiveBatchTemporalOwnerId();
+  const scheduledSideEffect: BatchScheduledSideEffect = temporalOwnerId === undefined
+    ? sideEffect
+    : { ...sideEffect, temporalOwnerId };
   state.sideEffectKinds.push(sideEffect.kind);
+  if (temporalOwnerId !== undefined) {
+    const sideEffectKinds = state.sideEffectKindsByTemporalOwner.get(temporalOwnerId) ?? [];
+    sideEffectKinds.push(sideEffect.kind);
+    state.sideEffectKindsByTemporalOwner.set(temporalOwnerId, sideEffectKinds);
+  }
   if (state.materializationState?.active) {
-    await executeBatchSideEffect(state, sideEffect);
+    await executeBatchSideEffect(state, scheduledSideEffect);
     return;
   }
-  state.sideEffects.push(sideEffect);
+  state.sideEffects.push(scheduledSideEffect);
 };
 
 const executeWrites = async <T>(
   mutations: BatchMutation<T>[],
   state: BatchExecutionState,
+  temporalOwnerId?: number,
 ): Promise<T[]> => {
   const results: T[] = [];
 
-  for (const mutation of mutations) {
-    const result = await mutation.executeWrite();
-    results.push(result);
-    if (mutation.sideEffects) {
-      for (const sideEffect of mutation.sideEffects(result)) {
-        await scheduleBatchSideEffect(state, sideEffect);
+  await runWithBatchTemporalOwner(state, temporalOwnerId, async () => {
+    for (const mutation of mutations) {
+      const result = await mutation.executeWrite();
+      results.push(result);
+      if (mutation.sideEffects) {
+        for (const sideEffect of mutation.sideEffects(result)) {
+          await scheduleBatchSideEffect(state, sideEffect);
+        }
       }
     }
-  }
+  });
 
   return results;
 };
 
 const executeAutoEnrichmentSideEffectGroup = async (
   state: BatchExecutionState,
-  sideEffects: readonly BatchSideEffect[],
+  sideEffects: readonly BatchScheduledSideEffect[],
 ) => {
   const firstSideEffect = sideEffects[0];
   if (!firstSideEffect) {
@@ -416,8 +495,8 @@ const executeAutoEnrichmentSideEffectGroup = async (
   }
 };
 
-const groupAutoEnrichmentSideEffects = (sideEffects: readonly BatchSideEffect[]): BatchSideEffect[][] => {
-  const groupedSideEffects: BatchSideEffect[][] = [];
+const groupAutoEnrichmentSideEffects = (sideEffects: readonly BatchScheduledSideEffect[]): BatchScheduledSideEffect[][] => {
+  const groupedSideEffects: BatchScheduledSideEffect[][] = [];
   const groupIndexes = new Map<string, number>();
   for (const sideEffect of sideEffects) {
     const batchKey = sideEffect.batchDescriptor?.key;
@@ -425,9 +504,10 @@ const groupAutoEnrichmentSideEffects = (sideEffects: readonly BatchSideEffect[])
       groupedSideEffects.push([sideEffect]);
       continue;
     }
-    const existingGroupIndex = groupIndexes.get(batchKey);
+    const ownerScopedBatchKey = sideEffect.temporalOwnerId === undefined ? batchKey : `${sideEffect.temporalOwnerId}:${batchKey}`;
+    const existingGroupIndex = groupIndexes.get(ownerScopedBatchKey);
     if (existingGroupIndex === undefined) {
-      groupIndexes.set(batchKey, groupedSideEffects.length);
+      groupIndexes.set(ownerScopedBatchKey, groupedSideEffects.length);
       groupedSideEffects.push([sideEffect]);
     } else {
       groupedSideEffects[existingGroupIndex].push(sideEffect);
@@ -514,16 +594,18 @@ const runFinalizers = async (state: BatchExecutionState) => {
 
 const evaluatePreMaterializationSideEffectSeal = async (
   state: BatchExecutionState,
-  options: BatchExecutionOptions,
+  entries: Array<BatchExecutionEntry<unknown>>,
 ) => {
-  if (!options.onSideEffectSealEvaluated) {
+  if (!entries.some((entry) => entry.options.onSideEffectSealEvaluated)) {
     return;
   }
   const snapshot = evaluateBatchSideEffectSeal(state.sideEffects);
   if (snapshot) {
     state.sideEffectSealSnapshot = snapshot;
   }
-  await options.onSideEffectSealEvaluated(snapshot);
+  for (const entry of entries) {
+    await entry.options.onSideEffectSealEvaluated?.(evaluateBatchSideEffectSeal(getBatchExecutionEntrySideEffects(state, entry)));
+  }
 };
 
 export const hasActiveBatchExecution = (): boolean => {
@@ -621,7 +703,130 @@ const trackPendingMaterialization = (materialization: Promise<void>) => {
     .finally(() => pendingMaterializations.delete(materialization));
 };
 
+const createBatchExecutionState = (entries: Array<BatchExecutionEntry<unknown>>): BatchExecutionState => {
+  const state: BatchExecutionState = {
+    committers: new Map(),
+    finalizers: new Map(),
+    finalizersRun: false,
+    metadata: new Map(),
+    sideEffectKindsByTemporalOwner: new Map(),
+    sideEffects: [],
+    sideEffectKinds: [],
+    writeBoundaryOpen: true,
+  };
+  const performanceTraceIds = entries.flatMap((entry) => (entry.options.performanceTraceId ? [entry.options.performanceTraceId] : []));
+  if (performanceTraceIds.length === 1) {
+    state.metadata.set(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY, performanceTraceIds[0]);
+  } else if (performanceTraceIds.length > 1) {
+    batchTemporalExecutionSequence += 1;
+    state.metadata.set(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY, `batch-temporal-${batchTemporalExecutionSequence}`);
+  }
+  return state;
+};
+
+const getBatchExecutionEntrySideEffectKinds = (
+  state: BatchExecutionState,
+  entry: BatchExecutionEntry<unknown>,
+): BatchSideEffectKind[] => {
+  if (entry.temporalOwnerId === undefined) {
+    return [...state.sideEffectKinds];
+  }
+  return [...(state.sideEffectKindsByTemporalOwner.get(entry.temporalOwnerId) ?? [])];
+};
+
+const getBatchExecutionEntrySideEffects = (
+  state: BatchExecutionState,
+  entry: BatchExecutionEntry<unknown>,
+): BatchScheduledSideEffect[] => {
+  if (entry.temporalOwnerId === undefined) {
+    return [...state.sideEffects];
+  }
+  return state.sideEffects.filter((sideEffect) => sideEffect.temporalOwnerId === entry.temporalOwnerId);
+};
+
+const executeBatchMutationEntries = async (
+  entries: Array<BatchExecutionEntry<unknown>>,
+): Promise<Array<BatchExecutionResult<unknown>>> => {
+  const normalizedOptions = entries.map((entry) => normalizeBatchExecutionOptions(entry.options));
+  const sharedExecutionMode = normalizedOptions[0]?.executionMode ?? BatchExecutionMode.Bulk;
+  const sharedWaitUntil = normalizedOptions[0]?.waitUntil ?? BatchWaitUntil.Materialized;
+  if (normalizedOptions.some((entryOptions) => entryOptions.executionMode !== sharedExecutionMode || entryOptions.waitUntil !== sharedWaitUntil)) {
+    throw new Error('Temporal batch execution requires one shared execution mode and waitUntil mode');
+  }
+  const temporalEntries = entries.flatMap((entry) => (entry.options.temporalBatch ? [entry.options.temporalBatch] : []));
+  const releaseTemporalAdmission = temporalEntries.length > 0
+    ? await temporalEntries[0].acquire?.(temporalEntries)
+    : undefined;
+  const state = createBatchExecutionState(entries);
+  try {
+    return await runWithBatchExecutionState(state, async () => {
+      const executionStartedAt = Date.now();
+      try {
+        const writesStartedAt = Date.now();
+        const resultsByEntry: unknown[][] = [];
+        for (const entry of entries) {
+          resultsByEntry.push(await executeWrites(entry.mutations, state, entry.temporalOwnerId));
+        }
+        logBatchExecutionPhase(state, 'execute_writes', Date.now() - writesStartedAt, {
+          mutation_count: entries.reduce((total, entry) => total + entry.mutations.length, 0),
+          temporal_entry_count: entries.length,
+        });
+        state.writeBoundaryOpen = false;
+        const commitStartedAt = Date.now();
+        await commitWrites(state);
+        logBatchExecutionPhase(state, 'commit_writes', Date.now() - commitStartedAt);
+        const finalizersStartedAt = Date.now();
+        await runFinalizers(state);
+        logBatchExecutionPhase(state, 'run_finalizers', Date.now() - finalizersStartedAt);
+        await evaluatePreMaterializationSideEffectSeal(state, entries);
+        const sideEffectsByEntry = entries.map((entry) => getBatchExecutionEntrySideEffects(state, entry));
+        const hasSideEffects = sideEffectsByEntry.some((sideEffects) => sideEffects.length > 0);
+        if (hasSideEffects) {
+          for (const [index, entry] of entries.entries()) {
+            if (sideEffectsByEntry[index].length === 0) {
+              continue;
+            }
+            await entry.options.onMaterializationStarted?.();
+          }
+        }
+        const materializationStartedAt = Date.now();
+        const materialization = runWithBatchExecutionState(state, () => materializeSideEffects(state))
+          .finally(() => logBatchExecutionPhase(state, 'materialize_side_effects', Date.now() - materializationStartedAt));
+        if (sharedWaitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
+          await materialization;
+        } else {
+          trackPendingMaterialization(materialization);
+        }
+        return entries.map((entry, index) => ({
+          ...normalizedOptions[index],
+          results: resultsByEntry[index],
+          sideEffectKinds: getBatchExecutionEntrySideEffectKinds(state, entry),
+          materialized: sharedWaitUntil === BatchWaitUntil.Materialized || sideEffectsByEntry[index].length === 0,
+        }));
+      } finally {
+        state.writeBoundaryOpen = false;
+        const finalizersStartedAt = Date.now();
+        await runFinalizers(state);
+        logBatchExecutionPhase(state, 'finalize_cleanup', Date.now() - finalizersStartedAt);
+        logBatchExecutionPhase(state, 'total', Date.now() - executionStartedAt, {
+          mutation_count: entries.reduce((total, entry) => total + entry.mutations.length, 0),
+          temporal_entry_count: entries.length,
+        });
+      }
+    });
+  } finally {
+    releaseTemporalAdmission?.();
+  }
+};
+
+const batchTemporalExecutionCoordinator = new BatchTemporalCoordinator<BatchTemporalExecutionEntry, BatchExecutionResult<unknown>>({
+  dwellMs: BATCH_TEMPORAL_DWELL_MS,
+  maxItems: BATCH_TEMPORAL_MAX_ITEMS,
+  maxBytes: BATCH_TEMPORAL_MAX_BYTES,
+}, async (entries) => executeBatchMutationEntries(entries));
+
 export const waitForPendingBatchMaterializations = async (): Promise<void> => {
+  await batchTemporalExecutionCoordinator.flushPending();
   await Promise.allSettled(Array.from(pendingMaterializations));
 };
 
@@ -632,71 +837,37 @@ export const executeBatchMutations = async <T>(
   const normalizedOptions = normalizeBatchExecutionOptions(options);
   const existingState = getActiveBatchExecutionState();
   if (existingState) {
-    const results = await executeWrites(mutations, existingState);
+    const temporalOwnerId = getActiveBatchTemporalOwnerId();
+    const results = await executeWrites(mutations, existingState, temporalOwnerId);
     return {
       ...normalizedOptions,
       results,
-      sideEffectKinds: existingState.sideEffectKinds,
+      sideEffectKinds: temporalOwnerId === undefined
+        ? existingState.sideEffectKinds
+        : existingState.sideEffectKindsByTemporalOwner.get(temporalOwnerId) ?? [],
       materialized: false,
     };
   }
-
-  const state: BatchExecutionState = {
-    committers: new Map(),
-    finalizers: new Map(),
-    finalizersRun: false,
-    metadata: new Map(),
-    sideEffects: [],
-    sideEffectKinds: [],
-    writeBoundaryOpen: true,
-  };
-  if (options.performanceTraceId) {
-    state.metadata.set(BATCH_EXECUTION_PERFORMANCE_TRACE_METADATA_KEY, options.performanceTraceId);
+  if (options.temporalBatch) {
+    batchTemporalExecutionSequence += 1;
+    return batchTemporalExecutionCoordinator.enqueue({
+      key: options.temporalBatch.key,
+      dedupeKey: options.temporalBatch.dedupeKey,
+      itemCount: options.temporalBatch.itemCount,
+      encodedBytes: options.temporalBatch.encodedBytes,
+      barrier: options.temporalBatch.barrier,
+      payload: {
+        mutations: mutations as BatchMutation<unknown>[],
+        options,
+        temporalOwnerId: batchTemporalExecutionSequence,
+      },
+    }) as Promise<BatchExecutionResult<T>>;
   }
-  return runWithBatchExecutionState(state, async () => {
-    const executionStartedAt = Date.now();
-    try {
-      const writesStartedAt = Date.now();
-      const results = await executeWrites(mutations, state);
-      logBatchExecutionPhase(state, 'execute_writes', Date.now() - writesStartedAt, {
-        mutation_count: mutations.length,
-      });
-      state.writeBoundaryOpen = false;
-      const commitStartedAt = Date.now();
-      await commitWrites(state);
-      logBatchExecutionPhase(state, 'commit_writes', Date.now() - commitStartedAt);
-      const finalizersStartedAt = Date.now();
-      await runFinalizers(state);
-      logBatchExecutionPhase(state, 'run_finalizers', Date.now() - finalizersStartedAt);
-      await evaluatePreMaterializationSideEffectSeal(state, options);
-      const hasSideEffects = state.sideEffects.length > 0;
-      if (hasSideEffects) {
-        await options.onMaterializationStarted?.();
-      }
-      const materializationStartedAt = Date.now();
-      const materialization = runWithBatchExecutionState(state, () => materializeSideEffects(state))
-        .finally(() => logBatchExecutionPhase(state, 'materialize_side_effects', Date.now() - materializationStartedAt));
-      if (normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects) {
-        await materialization;
-      } else {
-        trackPendingMaterialization(materialization);
-      }
-      return {
-        ...normalizedOptions,
-        results,
-        sideEffectKinds: state.sideEffectKinds,
-        materialized: normalizedOptions.waitUntil === BatchWaitUntil.Materialized || !hasSideEffects,
-      };
-    } finally {
-      state.writeBoundaryOpen = false;
-      const finalizersStartedAt = Date.now();
-      await runFinalizers(state);
-      logBatchExecutionPhase(state, 'finalize_cleanup', Date.now() - finalizersStartedAt);
-      logBatchExecutionPhase(state, 'total', Date.now() - executionStartedAt, {
-        mutation_count: mutations.length,
-      });
-    }
-  });
+  const [execution] = await executeBatchMutationEntries([{
+    mutations: mutations as BatchMutation<unknown>[],
+    options,
+  }]);
+  return execution as BatchExecutionResult<T>;
 };
 
 export const executeSingleBatchMutation = async <T>(

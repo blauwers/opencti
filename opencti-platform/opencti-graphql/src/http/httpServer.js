@@ -227,6 +227,7 @@ const initHttpServer = () => {
     shutdown: async () => {
       if (server) {
         await stopServer(server);
+        server = undefined;
       }
     },
   };

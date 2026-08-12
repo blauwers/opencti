@@ -895,6 +895,12 @@ class OpenCTIApiClient:
             "opencti-batch-wait-until", "" if wait_until is None else str(wait_until)
         )
 
+    def set_batch_temporal_bypass(self, bypass):
+        """Bypass backend temporal batching for latency-sensitive requests."""
+        self._set_request_header(
+            "opencti-batch-temporal-bypass", "true" if bypass is True else "false"
+        )
+
     def set_synchronized_upsert_header(self, synchronized):
         """Set the synchronized upsert header.
 
