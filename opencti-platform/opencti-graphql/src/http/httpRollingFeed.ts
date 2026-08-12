@@ -21,13 +21,26 @@ import type { AuthContext, AuthUser } from '../types/user';
 import { FilterMode, FilterOperator } from '../generated/graphql';
 import { fullRelationsList } from '../database/middleware-loader';
 import type { FilterGroupWithNested, FiltersWithNested } from '../database/middleware-loader';
-import { elFindByIds } from '../database/engine';
+import { elFindByIds, ES_MAX_CONCURRENCY } from '../database/engine';
 import { READ_RELATIONSHIPS_INDICES } from '../database/utils';
+import { promiseMap } from '../utils/promiseUtils';
 
 const SIZE_LIMIT = nconf.get('data_sharing:max_csv_feed_result') || 5000;
 
 type NeighborsMap = Map<string, Map<string, BasicStoreBase[]>>;
 type SourceToTargetIds = Map<string, Set<string>>;
+type NeighborRelationScan = {
+  filters: FilterGroupWithNested;
+  relType: string;
+  sourceToTargetIds: SourceToTargetIds;
+};
+type NeighborPairState = {
+  pairKey: string;
+  relationScans: NeighborRelationScan[];
+  sourceToTargetIdsFrom: SourceToTargetIds;
+  sourceToTargetIdsTo: SourceToTargetIds;
+  targetType: string;
+};
 
 const errorConverter = (e: any) => {
   const details = R.pipe(R.dissoc('reason'), R.dissoc('http_status'))(e.data);
@@ -125,7 +138,7 @@ export const resolveNeighborsForFeed = async (
   const elementIds = elements.map((e) => e.internal_id);
   const elementIdSet = new Set(elementIds);
 
-  const queryRelationsForPair = async (pairKey: string) => {
+  const buildPairState = (pairKey: string): NeighborPairState => {
     const [relType, targetType] = pairKey.split(':');
 
     const fromFilter: FiltersWithNested = {
@@ -174,34 +187,41 @@ export const resolveNeighborsForFeed = async (
 
     const sourceToTargetIdsFrom = new Map<string, Set<string>>();
     const sourceToTargetIdsTo = new Map<string, Set<string>>();
-    const collectRelationPage = (targetMap: SourceToTargetIds) => async (relations: BasicStoreRelation[]) => {
-      appendNeighborTargetIds(relations, elementIdSet, targetMap);
+    return {
+      pairKey,
+      targetType,
+      sourceToTargetIdsFrom,
+      sourceToTargetIdsTo,
+      relationScans: [
+        { relType, filters: filtersFrom, sourceToTargetIds: sourceToTargetIdsFrom },
+        { relType, filters: filtersTo, sourceToTargetIds: sourceToTargetIdsTo },
+      ],
     };
-
-    await Promise.all([
-      fullRelationsList<BasicStoreRelation>(context, user, [relType], {
-        filters: filtersFrom,
-        indices: READ_RELATIONSHIPS_INDICES,
-        noFiltersChecking: true,
-        callback: collectRelationPage(sourceToTargetIdsFrom),
-      }),
-      fullRelationsList<BasicStoreRelation>(context, user, [relType], {
-        filters: filtersTo,
-        indices: READ_RELATIONSHIPS_INDICES,
-        noFiltersChecking: true,
-        callback: collectRelationPage(sourceToTargetIdsTo),
-      }),
-    ]);
-
-    // Keep the original from-before-to ordering without retaining full relation pages.
-    const sourceToTargetIds = mergeNeighborTargetIds(sourceToTargetIdsFrom, sourceToTargetIdsTo);
-
-    return { pairKey, targetType, sourceToTargetIds };
   };
 
-  const pairResults = await Promise.all(
-    Array.from(neededPairs).map((pairKey) => queryRelationsForPair(pairKey)),
+  const pairStates = Array.from(neededPairs).map((pairKey) => buildPairState(pairKey));
+  const collectRelationPage = (targetMap: SourceToTargetIds) => async (relations: BasicStoreRelation[]) => {
+    appendNeighborTargetIds(relations, elementIdSet, targetMap);
+  };
+  const relationScans = pairStates.flatMap((pairState) => pairState.relationScans);
+  await promiseMap(
+    relationScans,
+    async ({ filters, relType, sourceToTargetIds }) => {
+      await fullRelationsList<BasicStoreRelation>(context, user, [relType], {
+        filters,
+        indices: READ_RELATIONSHIPS_INDICES,
+        noFiltersChecking: true,
+        callback: collectRelationPage(sourceToTargetIds),
+      });
+    },
+    ES_MAX_CONCURRENCY,
   );
+  const pairResults = pairStates.map((pairState) => ({
+    pairKey: pairState.pairKey,
+    targetType: pairState.targetType,
+    // Keep the original from-before-to ordering without retaining full relation pages.
+    sourceToTargetIds: mergeNeighborTargetIds(pairState.sourceToTargetIdsFrom, pairState.sourceToTargetIdsTo),
+  }));
 
   // Batch-resolve all target entities across all pairs in a single call
   const allTargetIdsByType = new Map<string, Set<string>>();
@@ -218,11 +238,13 @@ export const resolveNeighborsForFeed = async (
   }
 
   const resolvedByType = new Map<string, Record<string, BasicStoreBase>>();
-  await Promise.all(
-    Array.from(allTargetIdsByType.entries()).map(async ([targetType, ids]) => {
+  await promiseMap(
+    Array.from(allTargetIdsByType.entries()),
+    async ([targetType, ids]) => {
       const resolved = await elFindByIds(context, user, Array.from(ids), { type: targetType, toMap: true }) as Record<string, BasicStoreBase>;
       resolvedByType.set(targetType, resolved);
-    }),
+    },
+    ES_MAX_CONCURRENCY,
   );
 
   // Populate the neighbors map

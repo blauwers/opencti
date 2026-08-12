@@ -10,6 +10,7 @@ vi.mock('../../../src/database/middleware-loader', () => ({
 }));
 
 vi.mock('../../../src/database/engine', () => ({
+  ES_MAX_CONCURRENCY: 2,
   elFindByIds: mocks.elFindByIds,
 }));
 
@@ -70,5 +71,47 @@ describe('resolveNeighborsForFeed', () => {
       'target-2',
       'target-3',
     ]);
+  });
+
+  it('bounds relation scans and target resolutions to the Elasticsearch concurrency budget', async () => {
+    let activeRelationScans = 0;
+    let maxActiveRelationScans = 0;
+    let activeTargetResolutions = 0;
+    let maxActiveTargetResolutions = 0;
+
+    mocks.fullRelationsList.mockImplementation(async (_context, _user, [relType], args) => {
+      activeRelationScans += 1;
+      maxActiveRelationScans = Math.max(maxActiveRelationScans, activeRelationScans);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await args.callback([{ fromId: 'source-1', toId: `${relType}-target` }]);
+      activeRelationScans -= 1;
+      return [];
+    });
+    mocks.elFindByIds.mockImplementation(async (_context, _user, ids: string[]) => {
+      activeTargetResolutions += 1;
+      maxActiveTargetResolutions = Math.max(maxActiveTargetResolutions, activeTargetResolutions);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeTargetResolutions -= 1;
+      return Object.fromEntries(ids.map((id) => [id, { internal_id: id, name: id }]));
+    });
+
+    await resolveNeighborsForFeed(
+      {} as any,
+      {} as any,
+      [{ internal_id: 'source-1' }],
+      {
+        feed_attributes: Array.from({ length: 6 }, (_, index) => ({
+          mappings: [{
+            relationship_type: `relationship-${index}`,
+            target_entity_type: `Target-${index}`,
+          }],
+        })),
+      } as any,
+    );
+
+    expect(mocks.fullRelationsList).toHaveBeenCalledTimes(12);
+    expect(mocks.elFindByIds).toHaveBeenCalledTimes(6);
+    expect(maxActiveRelationScans).toBe(2);
+    expect(maxActiveTargetResolutions).toBe(2);
   });
 });
