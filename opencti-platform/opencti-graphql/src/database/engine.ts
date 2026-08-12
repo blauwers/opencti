@@ -3995,7 +3995,7 @@ export type PaginateOpts = QueryBodyBuilderOpts & {
   withoutRels?: boolean;
   types?: string[] | string | null;
   withResultMeta?: boolean;
-  // Set false only when the caller neither exposes nor consumes exact total metadata.
+  // Internal override for callers that can prove whether exact total metadata is observable.
   includeTotalCount?: boolean;
   first?: number;
   filters?: FilterGroup | null;
@@ -4124,7 +4124,8 @@ const elRepaginate = async <T extends BasicStoreBase>(
   let continueProcess = true;
   let searchAfter = opts.after;
   const listing: T[] | BasicNodeEdge<T>[] = [];
-  const requiresTotalCount = connectionFormat || callback !== undefined;
+  // Connection outputs expose totals; callback scans must opt in when they actually consume them.
+  const requiresTotalCount = connectionFormat || opts.includeTotalCount === true;
   while (continueProcess && (maxSize === undefined || emitSize < maxSize) && hasNextPage) {
     // Force options to get connection format and manage search after and metadata
     const paginateOpts = {

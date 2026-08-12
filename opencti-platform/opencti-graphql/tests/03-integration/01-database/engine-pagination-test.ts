@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { engine, elList, elPaginate } from '../../../src/database/engine';
 import { READ_INDEX_INTERNAL_OBJECTS } from '../../../src/database/utils';
-import { ENTITY_TYPE_SETTINGS } from '../../../src/schema/internalObject';
+import { ENTITY_TYPE_SETTINGS, ENTITY_TYPE_USER } from '../../../src/schema/internalObject';
 import { ADMIN_USER, testContext } from '../../utils/testQuery';
 
 const runSettingsPagination = async (options: Record<string, unknown> = {}) => {
@@ -15,10 +15,10 @@ const runSettingsPagination = async (options: Record<string, unknown> = {}) => {
   return { query, result };
 };
 
-const runSettingsList = async (options: Record<string, unknown> = {}) => {
+const runUserList = async (options: Record<string, unknown> = {}) => {
   const searchSpy = vi.spyOn(engine as any, 'search');
   const result = await elList(testContext, ADMIN_USER, READ_INDEX_INTERNAL_OBJECTS, {
-    types: [ENTITY_TYPE_SETTINGS],
+    types: [ENTITY_TYPE_USER],
     first: 2,
     ...options,
   });
@@ -58,19 +58,29 @@ describe('engine pagination hit counting', () => {
   });
 
   it('suppresses exact totals for plain full-list reads', async () => {
-    const { queries, result } = await runSettingsList();
+    const { queries, result } = await runUserList();
 
-    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.length).toBeGreaterThan(1);
     expect(queries.every((query) => query.track_total_hits === false)).toBe(true);
     expect(Array.isArray(result)).toBe(true);
     expect((result as any[]).length).toBeGreaterThan(0);
   });
 
-  it('keeps exact totals for callback-based full-list reads', async () => {
+  it('suppresses exact totals for callback-based full-list reads by default', async () => {
     const callback = vi.fn();
-    const { queries } = await runSettingsList({ callback });
+    const { queries } = await runUserList({ callback });
 
-    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.length).toBeGreaterThan(1);
+    expect(queries.every((query) => query.track_total_hits === false)).toBe(true);
+    expect(callback).toHaveBeenCalled();
+    expect(callback.mock.calls[0][1]).toBe(0);
+  });
+
+  it('keeps exact totals for callback-based full-list reads when explicitly requested', async () => {
+    const callback = vi.fn();
+    const { queries } = await runUserList({ callback, includeTotalCount: true });
+
+    expect(queries.length).toBeGreaterThan(1);
     expect(queries.every((query) => query.track_total_hits === true)).toBe(true);
     expect(callback).toHaveBeenCalled();
     expect(callback.mock.calls[0][1]).toBeGreaterThan(0);
