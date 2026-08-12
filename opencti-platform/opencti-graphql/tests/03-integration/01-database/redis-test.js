@@ -23,6 +23,7 @@ import {
   redisGetTelemetry,
   redisGetXtmAgentResponse,
   redisAcquireConnectorFreshness,
+  redisAcquireConnectorFreshnessBatch,
   redisCompleteConnectorFreshness,
   redisReleaseConnectorFreshness,
   redisInit,
@@ -252,6 +253,40 @@ describe('Redis XTM agent response cache', () => {
 });
 
 describe('Redis connector freshness leases', () => {
+  it('should acquire mixed connector freshness decisions in input order through one batch', async () => {
+    const connectorId = `connector-${uuid()}`;
+    const namespace = 'shodan-internetdb';
+    const [freshKey, inFlightKey, acquiredKey] = [`ipv4-${uuid()}`, `ipv4-${uuid()}`, `ipv4-${uuid()}`];
+
+    const [freshSeed, inFlightSeed] = await redisAcquireConnectorFreshnessBatch(
+      connectorId,
+      namespace,
+      [freshKey, inFlightKey],
+      60,
+    );
+    await expect(redisCompleteConnectorFreshness(connectorId, namespace, freshKey, freshSeed.leaseToken, 60)).resolves.toBe(true);
+
+    const decisions = await redisAcquireConnectorFreshnessBatch(
+      connectorId,
+      namespace,
+      [freshKey, inFlightKey, acquiredKey],
+      60,
+    );
+
+    expect(decisions.map(({ key }) => key)).toEqual([freshKey, inFlightKey, acquiredKey]);
+    expect(decisions.map(({ status }) => status)).toEqual([
+      CONNECTOR_FRESHNESS_STATUS.Fresh,
+      CONNECTOR_FRESHNESS_STATUS.InFlight,
+      CONNECTOR_FRESHNESS_STATUS.Acquired,
+    ]);
+    expect(decisions[0].leaseToken).toBeNull();
+    expect(decisions[1].leaseToken).toBeNull();
+    expect(decisions[2].leaseToken).toBeTruthy();
+
+    await expect(redisReleaseConnectorFreshness(connectorId, namespace, inFlightKey, inFlightSeed.leaseToken)).resolves.toBe(true);
+    await expect(redisReleaseConnectorFreshness(connectorId, namespace, acquiredKey, decisions[2].leaseToken)).resolves.toBe(true);
+  });
+
   it('should move from acquired to in-flight to fresh only for the matching token', async () => {
     const connectorId = `connector-${uuid()}`;
     const namespace = 'shodan-internetdb';

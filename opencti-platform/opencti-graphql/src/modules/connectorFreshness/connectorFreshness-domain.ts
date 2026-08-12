@@ -1,7 +1,7 @@
 import { ForbiddenAccess, ValidationError } from '../../config/errors';
 import {
   CONNECTOR_FRESHNESS_STATUS,
-  redisAcquireConnectorFreshness,
+  redisAcquireConnectorFreshnessBatch,
   redisCompleteConnectorFreshness,
   redisReleaseConnectorFreshness,
   type ConnectorFreshnessDecision as RedisConnectorFreshnessDecision,
@@ -93,13 +93,13 @@ export const acquireConnectorFreshness = async (
   validateKeys(input.keys);
   validateTtl('lease_ttl_seconds', input.lease_ttl_seconds, MIN_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS);
   await ensureConnectorOwnership(context, user, input.connector_id);
-  const decisions = await Promise.all(input.keys.map((key) => redisAcquireConnectorFreshness(
+  const decisions = await redisAcquireConnectorFreshnessBatch(
     input.connector_id,
     input.namespace,
-    key,
+    input.keys,
     input.lease_ttl_seconds,
     input.force_refresh ?? false,
-  )));
+  );
   return decisions.map(mapConnectorFreshnessDecision);
 };
 

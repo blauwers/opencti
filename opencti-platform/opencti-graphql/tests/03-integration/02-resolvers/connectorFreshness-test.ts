@@ -77,6 +77,30 @@ afterAll(async () => {
 });
 
 describe('Connector freshness resolver', () => {
+  it('should preserve multi-key acquire ordering through the GraphQL boundary', async () => {
+    const keys = [
+      `batch-key-${uuid()}`,
+      `batch-key-${uuid()}`,
+    ];
+    const acquire = await queryAsUserWithSuccess(USER_CONNECTOR, {
+      query: ACQUIRE_FRESHNESS_QUERY,
+      variables: {
+        input: {
+          connector_id: connectorId,
+          namespace: 'shodan-internetdb',
+          keys,
+          lease_ttl_seconds: 30,
+        },
+      },
+    });
+
+    expect(acquire.data.connectorFreshnessAcquire.map((decision: { key: string }) => decision.key)).toEqual(keys);
+    expect(acquire.data.connectorFreshnessAcquire.map((decision: { status: string }) => decision.status)).toEqual([
+      'ACQUIRED',
+      'ACQUIRED',
+    ]);
+  });
+
   it('should acquire and complete a connector-owned freshness lease', async () => {
     const key = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
     const acquire = await queryAsUserWithSuccess(USER_CONNECTOR, {
