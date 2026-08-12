@@ -27,6 +27,7 @@ import { READ_RELATIONSHIPS_INDICES } from '../database/utils';
 const SIZE_LIMIT = nconf.get('data_sharing:max_csv_feed_result') || 5000;
 
 type NeighborsMap = Map<string, Map<string, BasicStoreBase[]>>;
+type SourceToTargetIds = Map<string, Set<string>>;
 
 const errorConverter = (e: any) => {
   const details = R.pipe(R.dissoc('reason'), R.dissoc('http_status'))(e.data);
@@ -48,6 +49,46 @@ const escapeCsvField = (separator: string, data: string) => {
 };
 
 const neighborKey = (relType: string, targetType: string) => `${relType}:${targetType}`;
+
+const appendNeighborTargetIds = (
+  relations: BasicStoreRelation[],
+  elementIdSet: Set<string>,
+  sourceToTargetIds: SourceToTargetIds,
+) => {
+  for (const rel of relations) {
+    let sourceId: string;
+    let targetId: string;
+    if (elementIdSet.has(rel.fromId)) {
+      sourceId = rel.fromId;
+      targetId = rel.toId;
+    } else if (elementIdSet.has(rel.toId)) {
+      sourceId = rel.toId;
+      targetId = rel.fromId;
+    } else {
+      continue;
+    }
+    if (!sourceToTargetIds.has(sourceId)) {
+      sourceToTargetIds.set(sourceId, new Set());
+    }
+    sourceToTargetIds.get(sourceId)!.add(targetId);
+  }
+};
+
+const mergeNeighborTargetIds = (...sources: SourceToTargetIds[]): SourceToTargetIds => {
+  const merged = new Map<string, Set<string>>();
+  for (const sourceToTargetIds of sources) {
+    for (const [sourceId, targetIds] of sourceToTargetIds.entries()) {
+      if (!merged.has(sourceId)) {
+        merged.set(sourceId, new Set());
+      }
+      const mergedTargetIds = merged.get(sourceId)!;
+      for (const targetId of targetIds) {
+        mergedTargetIds.add(targetId);
+      }
+    }
+  }
+  return merged;
+};
 
 const extractAttributeFromEntity = (entity: BasicStoreBase, attributePath: string, listSeparator = ','): string => {
   const isComplexKey = attributePath.includes('.');
@@ -131,39 +172,29 @@ export const resolveNeighborsForFeed = async (
       filterGroups: [],
     };
 
-    const [relsFrom, relsTo] = await Promise.all([
+    const sourceToTargetIdsFrom = new Map<string, Set<string>>();
+    const sourceToTargetIdsTo = new Map<string, Set<string>>();
+    const collectRelationPage = (targetMap: SourceToTargetIds) => async (relations: BasicStoreRelation[]) => {
+      appendNeighborTargetIds(relations, elementIdSet, targetMap);
+    };
+
+    await Promise.all([
       fullRelationsList<BasicStoreRelation>(context, user, [relType], {
         filters: filtersFrom,
         indices: READ_RELATIONSHIPS_INDICES,
         noFiltersChecking: true,
+        callback: collectRelationPage(sourceToTargetIdsFrom),
       }),
       fullRelationsList<BasicStoreRelation>(context, user, [relType], {
         filters: filtersTo,
         indices: READ_RELATIONSHIPS_INDICES,
         noFiltersChecking: true,
+        callback: collectRelationPage(sourceToTargetIdsTo),
       }),
     ]);
 
-    const allRelations = [...relsFrom, ...relsTo];
-
-    const sourceToTargetIds = new Map<string, Set<string>>();
-    for (const rel of allRelations) {
-      let sourceId: string;
-      let targetId: string;
-      if (elementIdSet.has(rel.fromId)) {
-        sourceId = rel.fromId;
-        targetId = rel.toId;
-      } else if (elementIdSet.has(rel.toId)) {
-        sourceId = rel.toId;
-        targetId = rel.fromId;
-      } else {
-        continue;
-      }
-      if (!sourceToTargetIds.has(sourceId)) {
-        sourceToTargetIds.set(sourceId, new Set());
-      }
-      sourceToTargetIds.get(sourceId)!.add(targetId);
-    }
+    // Keep the original from-before-to ordering without retaining full relation pages.
+    const sourceToTargetIds = mergeNeighborTargetIds(sourceToTargetIdsFrom, sourceToTargetIdsTo);
 
     return { pairKey, targetType, sourceToTargetIds };
   };
