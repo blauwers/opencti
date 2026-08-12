@@ -59,6 +59,54 @@ const CSV_FEED_MIN_INTERVAL_MINUTES = conf.get('ingestion_manager:csv_feed:min_i
 let running = false;
 
 // region utils
+// Manager-owned promise sets must fully settle before the manager can release
+// its lock; Promise.all rejects too early once one branch fails.
+export const waitForAllIngestionPromises = async <T>(promises: Promise<T>[]): Promise<T[]> => {
+  let firstRejection: unknown;
+  let hasRejection = false;
+  const trackedPromises = promises.map(async (promise) => {
+    try {
+      return await promise;
+    } catch (error) {
+      if (!hasRejection) {
+        hasRejection = true;
+        firstRejection = error;
+      }
+      throw error;
+    }
+  });
+  const settled = await Promise.allSettled(trackedPromises);
+  if (hasRejection) {
+    throw firstRejection;
+  }
+  return settled.map((result) => {
+    if (result.status === 'rejected') {
+      throw result.reason;
+    }
+    return result.value;
+  });
+};
+
+const waitForStartedIngestionPromises = async <T>(
+  promises: Promise<T>[],
+  schedulingFailure?: { reason: unknown },
+): Promise<T[]> => {
+  let results: T[] | undefined;
+  let promiseFailure: { reason: unknown } | undefined;
+  try {
+    results = await waitForAllIngestionPromises(promises);
+  } catch (error) {
+    promiseFailure = { reason: error };
+  }
+  if (schedulingFailure) {
+    throw schedulingFailure.reason;
+  }
+  if (promiseFailure) {
+    throw promiseFailure.reason;
+  }
+  return results ?? [];
+};
+
 const asArray = (data: unknown) => {
   if (data) {
     if (Array.isArray(data)) {
@@ -253,49 +301,54 @@ const rssDataHandler = async (context: AuthContext, httpRssGet: Getter, turndown
 };
 
 export const rssExecutor = async (context: AuthContext, turndownService: TurndownService) => {
-  const filters = {
-    mode: 'and',
-    filters: [{ key: 'ingestion_running', values: [true] }],
-    filterGroups: [],
-  };
-  const opts = { filters, noFiltersChecking: true };
-  const ingestions = await findAllRssIngestion(context, SYSTEM_USER, opts);
   const ingestionPromises = [];
-  for (let i = 0; i < ingestions.length; i += 1) {
-    const ingestion = ingestions[i];
-    if (isMustExecuteIteration(ingestion.last_execution_date, ingestion.scheduling_period)) {
-      const { messages_number, messages_size } = await queueDetails(connectorIdFromIngestId(ingestion.id));
-      // If ingestion have remaining messages in the queue dont fetch any new data
-      if (messages_number > 0) {
-        logApp.info(`[OPENCTI-MODULE] INGESTION Rss, skipping ${ingestion.name} - queue already filled with messages (${messages_number})`);
-        const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { buffering: true, messages_size });
-        ingestionPromises.push(ingestionPromise);
-        // If last execution was done before RSS_FEED_MIN_INTERVAL_MINUTES minutes, dont fetch any new data
-      } else if (!shouldExecuteIngestion(ingestion, RSS_FEED_MIN_INTERVAL_MINUTES)) {
-        logApp.info(`[OPENCTI-MODULE] INGESTION Rss, skipping ${ingestion.name} - last run is more recent than ${RSS_FEED_MIN_INTERVAL_MINUTES} minutes.`);
-        const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { messages_size });
-        ingestionPromises.push(ingestionPromise);
-        // If no message in queue and last execution is old enough, fetch new data
-      } else {
-        const httpGet = rssHttpGetter(ingestion);
-        const ingestionPromise = rssDataHandler(context, httpGet, turndownService, ingestion)
-          .catch((e) => {
-            logApp.warn('[OPENCTI-MODULE] INGESTION - RSS ingestion execution', { cause: e, name: ingestion.name });
-            if (e instanceof AxiosError) {
-              if (e?.response?.headers) {
-                if (e.response.headers['cf-mitigated']) {
-                  logApp.warn(`[OPENCTI-MODULE] INGESTION Rss - Cloudflare challenge fail for ${ingestion.uri}`);
+  let schedulingFailure: { reason: unknown } | undefined;
+  try {
+    const filters = {
+      mode: 'and',
+      filters: [{ key: 'ingestion_running', values: [true] }],
+      filterGroups: [],
+    };
+    const opts = { filters, noFiltersChecking: true };
+    const ingestions = await findAllRssIngestion(context, SYSTEM_USER, opts);
+    for (let i = 0; i < ingestions.length; i += 1) {
+      const ingestion = ingestions[i];
+      if (isMustExecuteIteration(ingestion.last_execution_date, ingestion.scheduling_period)) {
+        const { messages_number, messages_size } = await queueDetails(connectorIdFromIngestId(ingestion.id));
+        // If ingestion have remaining messages in the queue dont fetch any new data
+        if (messages_number > 0) {
+          logApp.info(`[OPENCTI-MODULE] INGESTION Rss, skipping ${ingestion.name} - queue already filled with messages (${messages_number})`);
+          const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { buffering: true, messages_size });
+          ingestionPromises.push(ingestionPromise);
+          // If last execution was done before RSS_FEED_MIN_INTERVAL_MINUTES minutes, dont fetch any new data
+        } else if (!shouldExecuteIngestion(ingestion, RSS_FEED_MIN_INTERVAL_MINUTES)) {
+          logApp.info(`[OPENCTI-MODULE] INGESTION Rss, skipping ${ingestion.name} - last run is more recent than ${RSS_FEED_MIN_INTERVAL_MINUTES} minutes.`);
+          const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { messages_size });
+          ingestionPromises.push(ingestionPromise);
+          // If no message in queue and last execution is old enough, fetch new data
+        } else {
+          const httpGet = rssHttpGetter(ingestion);
+          const ingestionPromise = rssDataHandler(context, httpGet, turndownService, ingestion)
+            .catch((e) => {
+              logApp.warn('[OPENCTI-MODULE] INGESTION - RSS ingestion execution', { cause: e, name: ingestion.name });
+              if (e instanceof AxiosError) {
+                if (e?.response?.headers) {
+                  if (e.response.headers['cf-mitigated']) {
+                    logApp.warn(`[OPENCTI-MODULE] INGESTION Rss - Cloudflare challenge fail for ${ingestion.uri}`);
+                  }
                 }
               }
-            }
-            // In case of error we need also to take in account the min_interval_minutes with last_execution_date update.
-            patchRssIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_date: now() }).catch((reason) => logApp.error('ERROR', { cause: reason }));
-          });
-        ingestionPromises.push(ingestionPromise);
+              // In case of error we need also to take in account the min_interval_minutes with last_execution_date update.
+              patchRssIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_date: now() }).catch((reason) => logApp.error('ERROR', { cause: reason }));
+            });
+          ingestionPromises.push(ingestionPromise);
+        }
       }
     }
+  } catch (error) {
+    schedulingFailure = { reason: error };
   }
-  return Promise.all(ingestionPromises);
+  return waitForStartedIngestionPromises(ingestionPromises, schedulingFailure);
 };
 // endregion
 
@@ -476,60 +529,65 @@ const TAXII_HANDLERS: { [k: string]: TaxiiHandlerFn } = {
   [TaxiiVersion.V21]: taxiiV21DataHandler,
 };
 export const taxiiExecutor = async (context: AuthContext) => {
-  const filters = {
-    mode: 'and',
-    filters: [{ key: 'ingestion_running', values: [true] }],
-    filterGroups: [],
-  };
-  const opts = { filters, noFiltersChecking: true };
-  const ingestions = await findAllTaxiiIngestion(context, SYSTEM_USER, opts);
   const ingestionPromises = [];
-  for (let i = 0; i < ingestions.length; i += 1) {
-    const ingestion = ingestions[i];
-    if (isMustExecuteIteration(ingestion.last_execution_date, ingestion.scheduling_period)) {
-      // If ingestion have remaining messages in the queue, dont fetch any new data
-      const { messages_number, messages_size } = await queueDetails(connectorIdFromIngestId(ingestion.id));
-      if (messages_number === 0) {
-        const taxiiHandler = TAXII_HANDLERS[ingestion.version];
-        if (!taxiiHandler) {
-          throw UnsupportedError(`[OPENCTI-MODULE] Taxii version ${ingestion.version} is not yet supported`);
-        }
-        const ingestionLogger = createIngestionLogger(ingestion.internal_id, ingestion.name, 'taxii');
-        ingestionLogger.info('Feed execution started', { uri: ingestion.uri, collection: ingestion.collection });
-        const ingestionPromise = taxiiHandler(context, ingestion)
-          .then(async ({ objectsCount }: TaxiiExecutionResult) => {
-            logApp.info('[OPENCTI-MODULE] INGESTION - Taxii handler resolved', { count: objectsCount, name: ingestion.name });
-            try {
-              await patchTaxiiIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_status: 'success' });
-            } catch (patchErr) {
-              logApp.warn('[OPENCTI-MODULE] Failed to patch taxii ingestion success status', { cause: patchErr });
-            }
-            await ingestionLogger.success('Feed fetched successfully', {
-              objects_count: objectsCount,
-              collection: ingestion.collection,
-              uri: ingestion.uri,
+  let schedulingFailure: { reason: unknown } | undefined;
+  try {
+    const filters = {
+      mode: 'and',
+      filters: [{ key: 'ingestion_running', values: [true] }],
+      filterGroups: [],
+    };
+    const opts = { filters, noFiltersChecking: true };
+    const ingestions = await findAllTaxiiIngestion(context, SYSTEM_USER, opts);
+    for (let i = 0; i < ingestions.length; i += 1) {
+      const ingestion = ingestions[i];
+      if (isMustExecuteIteration(ingestion.last_execution_date, ingestion.scheduling_period)) {
+        // If ingestion have remaining messages in the queue, dont fetch any new data
+        const { messages_number, messages_size } = await queueDetails(connectorIdFromIngestId(ingestion.id));
+        if (messages_number === 0) {
+          const taxiiHandler = TAXII_HANDLERS[ingestion.version];
+          if (!taxiiHandler) {
+            throw UnsupportedError(`[OPENCTI-MODULE] Taxii version ${ingestion.version} is not yet supported`);
+          }
+          const ingestionLogger = createIngestionLogger(ingestion.internal_id, ingestion.name, 'taxii');
+          ingestionLogger.info('Feed execution started', { uri: ingestion.uri, collection: ingestion.collection });
+          const ingestionPromise = taxiiHandler(context, ingestion)
+            .then(async ({ objectsCount }: TaxiiExecutionResult) => {
+              logApp.info('[OPENCTI-MODULE] INGESTION - Taxii handler resolved', { count: objectsCount, name: ingestion.name });
+              try {
+                await patchTaxiiIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_status: 'success' });
+              } catch (patchErr) {
+                logApp.warn('[OPENCTI-MODULE] Failed to patch taxii ingestion success status', { cause: patchErr });
+              }
+              await ingestionLogger.success('Feed fetched successfully', {
+                objects_count: objectsCount,
+                collection: ingestion.collection,
+                uri: ingestion.uri,
+              });
+            })
+            .catch(async (e: Error) => {
+              logApp.info('[OPENCTI-MODULE] INGESTION - Taxii handler rejected', { error: e.message, name: ingestion.name });
+              try {
+                await patchTaxiiIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_date: now(), last_execution_status: 'error' });
+              } catch (patchErr) {
+                logApp.warn('[OPENCTI-MODULE] Failed to patch taxii ingestion error status', { cause: patchErr });
+              }
+              await ingestionLogger.error('Feed fetch failed', buildIngestionErrorMeta(e));
             });
-          })
-          .catch(async (e: Error) => {
-            logApp.info('[OPENCTI-MODULE] INGESTION - Taxii handler rejected', { error: e.message, name: ingestion.name });
-            try {
-              await patchTaxiiIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_date: now(), last_execution_status: 'error' });
-            } catch (patchErr) {
-              logApp.warn('[OPENCTI-MODULE] Failed to patch taxii ingestion error status', { cause: patchErr });
-            }
-            await ingestionLogger.error('Feed fetch failed', buildIngestionErrorMeta(e));
-          });
-        ingestionPromises.push(ingestionPromise);
-      } else {
-        // Queue not empty — log buffering state and skip fetch
-        const ingestionLogger = createIngestionLogger(ingestion.internal_id, ingestion.name, 'taxii');
-        ingestionLogger.info('Feed is buffering, waiting for queue to drain', { messages_number, messages_size });
-        const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { buffering: true, messages_size });
-        ingestionPromises.push(ingestionPromise);
+          ingestionPromises.push(ingestionPromise);
+        } else {
+          // Queue not empty — log buffering state and skip fetch
+          const ingestionLogger = createIngestionLogger(ingestion.internal_id, ingestion.name, 'taxii');
+          ingestionLogger.info('Feed is buffering, waiting for queue to drain', { messages_number, messages_size });
+          const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { buffering: true, messages_size });
+          ingestionPromises.push(ingestionPromise);
+        }
       }
     }
+  } catch (error) {
+    schedulingFailure = { reason: error };
   }
-  return Promise.all(ingestionPromises);
+  return waitForStartedIngestionPromises(ingestionPromises, schedulingFailure);
 };
 // endregion
 
@@ -593,41 +651,46 @@ const csvDataHandler = async (context: AuthContext, ingestion: BasicStoreEntityI
 };
 
 export const csvExecutor = async (context: AuthContext) => {
-  const filters = {
-    mode: 'and',
-    filters: [{ key: 'ingestion_running', values: [true] }],
-    filterGroups: [],
-  };
-  const opts = { filters, noFiltersChecking: true };
-  const ingestions = await findAllCsvIngestion(context, SYSTEM_USER, opts);
   const ingestionPromises = [];
-  for (let i = 0; i < ingestions.length; i += 1) {
-    const ingestion = ingestions[i];
-    if (isMustExecuteIteration(ingestion.last_execution_date, ingestion.scheduling_period)) {
-      const { messages_number, messages_size } = await queueDetails(connectorIdFromIngestId(ingestion.id));
-      // If ingestion have remaining messages in the queue dont fetch any new data
-      if (messages_number > 0) {
-        logApp.info(`[OPENCTI-MODULE] INGESTION Csv, skipping ${ingestion.name} - queue already filled with messages (${messages_number})`);
-        const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { buffering: true, messages_size });
-        ingestionPromises.push(ingestionPromise);
-        // If last execution was done before CSV_FEED_MIN_INTERVAL_MINUTES minutes, dont fetch any new data
-      } else if (!shouldExecuteIngestion(ingestion, CSV_FEED_MIN_INTERVAL_MINUTES)) {
-        logApp.info(`[OPENCTI-MODULE] INGESTION Csv, skipping ${ingestion.name} - last run is more recent than ${CSV_FEED_MIN_INTERVAL_MINUTES} minutes.`);
-        const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { messages_size });
-        ingestionPromises.push(ingestionPromise);
-        // If no message in queue and last execution is old enough, fetch new data
-      } else {
-        const ingestionPromise = csvDataHandler(context, ingestion)
-          .catch((e) => {
-            logApp.warn('[OPENCTI-MODULE] INGESTION - Csv ingestion execution', { cause: e.message, name: ingestion.name });
-            // In case of error we need also to take in account the min_interval_minutes with last_execution_date update.
-            patchCsvIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_date: now() }).catch((reason) => logApp.error('ERROR', { cause: reason }));
-          });
-        ingestionPromises.push(ingestionPromise);
+  let schedulingFailure: { reason: unknown } | undefined;
+  try {
+    const filters = {
+      mode: 'and',
+      filters: [{ key: 'ingestion_running', values: [true] }],
+      filterGroups: [],
+    };
+    const opts = { filters, noFiltersChecking: true };
+    const ingestions = await findAllCsvIngestion(context, SYSTEM_USER, opts);
+    for (let i = 0; i < ingestions.length; i += 1) {
+      const ingestion = ingestions[i];
+      if (isMustExecuteIteration(ingestion.last_execution_date, ingestion.scheduling_period)) {
+        const { messages_number, messages_size } = await queueDetails(connectorIdFromIngestId(ingestion.id));
+        // If ingestion have remaining messages in the queue dont fetch any new data
+        if (messages_number > 0) {
+          logApp.info(`[OPENCTI-MODULE] INGESTION Csv, skipping ${ingestion.name} - queue already filled with messages (${messages_number})`);
+          const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { buffering: true, messages_size });
+          ingestionPromises.push(ingestionPromise);
+          // If last execution was done before CSV_FEED_MIN_INTERVAL_MINUTES minutes, dont fetch any new data
+        } else if (!shouldExecuteIngestion(ingestion, CSV_FEED_MIN_INTERVAL_MINUTES)) {
+          logApp.info(`[OPENCTI-MODULE] INGESTION Csv, skipping ${ingestion.name} - last run is more recent than ${CSV_FEED_MIN_INTERVAL_MINUTES} minutes.`);
+          const ingestionPromise = updateBuiltInConnectorInfo(context, ingestion.user_id, ingestion.id, { messages_size });
+          ingestionPromises.push(ingestionPromise);
+          // If no message in queue and last execution is old enough, fetch new data
+        } else {
+          const ingestionPromise = csvDataHandler(context, ingestion)
+            .catch((e) => {
+              logApp.warn('[OPENCTI-MODULE] INGESTION - Csv ingestion execution', { cause: e.message, name: ingestion.name });
+              // In case of error we need also to take in account the min_interval_minutes with last_execution_date update.
+              patchCsvIngestion(context, SYSTEM_USER, ingestion.internal_id, { last_execution_date: now() }).catch((reason) => logApp.error('ERROR', { cause: reason }));
+            });
+          ingestionPromises.push(ingestionPromise);
+        }
       }
     }
+  } catch (error) {
+    schedulingFailure = { reason: error };
   }
-  return Promise.all(ingestionPromises);
+  return waitForStartedIngestionPromises(ingestionPromises, schedulingFailure);
 };
 // endregion
 
@@ -698,12 +761,14 @@ const ingestionHandler = async () => {
     running = true;
     // noinspection JSUnusedLocalSymbols
     const context = executionContext('ingestion_manager');
-    const ingestionPromises = [];
+    const ingestionPromises: Array<Promise<unknown>> = [];
     ingestionPromises.push(rssExecutor(context, turndownService));
     ingestionPromises.push(taxiiExecutor(context));
     ingestionPromises.push(csvExecutor(context));
     ingestionPromises.push(jsonExecutor(context));
-    await Promise.all(ingestionPromises);
+    // Keep the shared manager lock until every started branch settles. A fast
+    // rejection must not let sibling remote work escape the ownership window.
+    await waitForAllIngestionPromises(ingestionPromises);
   } catch (e: any) {
     // We dont care about failing to get the lock.
     if (e.name === TYPE_LOCK_ERROR) {

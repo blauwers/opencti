@@ -15,6 +15,7 @@ const executeJsonQueryMock = vi.fn();
 const decryptIngestionCredentialMock = vi.fn();
 const queueDetailsMock = vi.fn();
 const getHttpClientMock = vi.fn();
+const updateBuiltInConnectorInfoMock = vi.fn();
 
 vi.mock('../../../../src/config/conf', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../src/config/conf')>();
@@ -71,7 +72,7 @@ vi.mock('../../../../src/domain/connector', () => ({
 
 vi.mock('../../../../src/manager/ingestionManager/ingestionManagerPushToQueue', () => ({
   pushBundleToConnectorQueue: vi.fn(),
-  updateBuiltInConnectorInfo: vi.fn(),
+  updateBuiltInConnectorInfo: updateBuiltInConnectorInfoMock,
 }));
 
 vi.mock('../../../../src/utils/http-client', () => ({
@@ -107,6 +108,7 @@ describe('Ingestion manager feed timeout behavior', () => {
     decryptIngestionCredentialMock.mockResolvedValue('');
     fetchCsvFromUrlMock.mockRejectedValue(timeoutError);
     executeJsonQueryMock.mockResolvedValue({ objects: [], variables: {}, nextExecutionState: {} });
+    updateBuiltInConnectorInfoMock.mockResolvedValue(undefined);
 
     getHttpClientMock.mockImplementation(() => ({
       get: async (uri: string) => {
@@ -169,6 +171,49 @@ describe('Ingestion manager feed timeout behavior', () => {
     expect(getHttpClientMock).toHaveBeenCalledWith(
       expect.objectContaining({ timeout: 50 }),
     );
+  });
+
+  it('should wait for already-started RSS work before surfacing a later scheduling failure', async () => {
+    const firstIngestion = {
+      id: 'ingestion--buffering',
+      internal_id: 'internal--buffering',
+      name: 'Buffering RSS',
+      user_id: 'user--1',
+      scheduling_period: 'auto',
+      last_execution_date: undefined,
+      ssl_verify: false,
+      created_by_ref: 'identity--1',
+      object_marking_refs: [],
+      report_types: ['threat-report'],
+    };
+    const secondIngestion = {
+      ...firstIngestion,
+      id: 'ingestion--queue-error',
+      internal_id: 'internal--queue-error',
+      name: 'Queue error RSS',
+    };
+    const queueError = new Error('queue details failed');
+    findAllRssIngestionMock.mockResolvedValue([firstIngestion, secondIngestion]);
+    queueDetailsMock
+      .mockResolvedValueOnce({ messages_number: 1, messages_size: 10 })
+      .mockRejectedValueOnce(queueError);
+    let resolvePendingUpdate: (() => void) | undefined;
+    updateBuiltInConnectorInfoMock.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolvePendingUpdate = resolve;
+    }));
+
+    const { rssExecutor } = await import('../../../../src/manager/ingestionManager');
+    let rejected = false;
+    const execution = rssExecutor({} as any, new TurndownService()).catch((error) => {
+      rejected = true;
+      throw error;
+    });
+
+    await vi.waitFor(() => expect(queueDetailsMock).toHaveBeenCalledTimes(2));
+    expect(rejected).toBe(false);
+
+    resolvePendingUpdate?.();
+    await expect(execution).rejects.toBe(queueError);
   });
 
   it('should continue TAXII iteration when one feed times out and another is healthy', async () => {
