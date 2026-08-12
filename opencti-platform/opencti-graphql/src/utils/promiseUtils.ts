@@ -47,6 +47,53 @@ export const promiseMap = async <T, R>(
   return results;
 };
 
+/**
+ * Execute async operations with concurrency control while keeping ownership of
+ * already-started mapper calls until they settle after the first failure.
+ *
+ * New items stop being scheduled after the first observed rejection, but the
+ * returned promise does not reject until every mapper call that already
+ * started has settled.
+ */
+export const promiseMapWaitForStarted = async <T, R>(
+  items: T[],
+  mapper: (item: T, index: number) => Promise<R>,
+  concurrency: number,
+): Promise<R[]> => {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error('Promise map concurrency must be a positive integer');
+  }
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  let firstFailure: unknown;
+  let hasFailure = false;
+  const worker = async () => {
+    while (!hasFailure) {
+      const index = nextIndex;
+      if (index >= items.length) {
+        return;
+      }
+      nextIndex += 1;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (cause) {
+        if (!hasFailure) {
+          hasFailure = true;
+          firstFailure = cause;
+        }
+      }
+    }
+  };
+
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (hasFailure) {
+    throw firstFailure;
+  }
+  return results;
+};
+
 export const forgetPromise = (promise: Promise<unknown>) => {
   promise.catch(() => {}); // avoid unhandled promise rejection
 };

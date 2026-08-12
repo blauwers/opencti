@@ -10,7 +10,7 @@ import { TYPE_LOCK_ERROR } from '../config/errors';
 import { ENTITY_TYPE_USER } from '../schema/internalObject';
 import { userEditField } from '../domain/user';
 import { ENTITY_TYPE_INDICATOR } from '../modules/indicator/indicator-types';
-import { promiseMap } from '../utils/promiseUtils';
+import { promiseMapWaitForStarted } from '../utils/promiseUtils';
 
 // Expired manager responsible to monitor expired elements
 // In order to change the revoked attribute to true
@@ -20,7 +20,33 @@ const SCHEDULE_TIME = conf.get('expiration_scheduler:interval');
 const EXPIRED_MANAGER_KEY = conf.get('expiration_scheduler:lock_key');
 let running = false;
 
-const revokedInstances = async (context) => {
+export const waitForAllExpirationPromises = async (promises) => {
+  let firstRejection;
+  let hasRejection = false;
+  const trackedPromises = promises.map(async (promise) => {
+    try {
+      return await promise;
+    } catch (error) {
+      if (!hasRejection) {
+        hasRejection = true;
+        firstRejection = error;
+      }
+      throw error;
+    }
+  });
+  const settled = await Promise.allSettled(trackedPromises);
+  if (hasRejection) {
+    throw firstRejection;
+  }
+  return settled.map((result) => {
+    if (result.status === 'rejected') {
+      throw result.reason;
+    }
+    return result.value;
+  });
+};
+
+export const revokedInstances = async (context) => {
   const callback = async (elements) => {
     logApp.info(`[OPENCTI] Expiration manager will revoke ${elements.length} elements`);
     const concurrentUpdate = async (element) => {
@@ -36,7 +62,7 @@ const revokedInstances = async (context) => {
       }
       await patchAttribute(context, EXPIRATION_MANAGER_USER, element.id, element.entity_type, patch);
     };
-    await promiseMap(elements, concurrentUpdate, ES_MAX_CONCURRENCY);
+    await promiseMapWaitForStarted(elements, concurrentUpdate, ES_MAX_CONCURRENCY);
   };
   const filters = {
     mode: 'and',
@@ -50,7 +76,7 @@ const revokedInstances = async (context) => {
   await elList(context, EXPIRATION_MANAGER_USER, READ_DATA_INDICES, opts);
 };
 
-const expiredAccounts = async (context) => {
+export const expiredAccounts = async (context) => {
   // Execute the cleaning
   const callback = async (elements) => {
     logApp.info(`[OPENCTI] Expiration manager will expire ${elements.length} users`);
@@ -58,7 +84,7 @@ const expiredAccounts = async (context) => {
       const inputs = [{ key: 'account_status', value: [ACCOUNT_STATUS_EXPIRED] }];
       await userEditField(context, EXPIRATION_MANAGER_USER, element.internal_id, inputs);
     };
-    await promiseMap(elements, concurrentUpdate, ES_MAX_CONCURRENCY);
+    await promiseMapWaitForStarted(elements, concurrentUpdate, ES_MAX_CONCURRENCY);
   };
   const filters = {
     mode: 'and',
@@ -73,7 +99,7 @@ const expiredAccounts = async (context) => {
   await elList(context, EXPIRATION_MANAGER_USER, [READ_INDEX_INTERNAL_OBJECTS], opts);
 };
 
-const expireHandler = async () => {
+export const expireHandler = async () => {
   let lock;
   try {
     // Lock the manager
@@ -82,7 +108,9 @@ const expireHandler = async () => {
     const context = executionContext('expiration_manager');
     const revokedInstancesPromise = revokedInstances(context);
     const expiredAccountsPromise = expiredAccounts(context);
-    await Promise.all([revokedInstancesPromise, expiredAccountsPromise]);
+    // Keep the shared manager lock until every started branch settles. A fast
+    // rejection must not let sibling updates escape the ownership window.
+    await waitForAllExpirationPromises([revokedInstancesPromise, expiredAccountsPromise]);
   } catch (e) {
     if (e.name === TYPE_LOCK_ERROR) {
       logApp.debug('[OPENCTI-MODULE] Expiration manager already started by another API');

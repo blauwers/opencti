@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { callWithTimeout, promiseMap, TimeoutError } from '../../../src/utils/promiseUtils';
+import { callWithTimeout, promiseMap, promiseMapWaitForStarted, TimeoutError } from '../../../src/utils/promiseUtils';
 
 describe('Promise utilities: promiseMap', () => {
   it('fills available concurrency slots as soon as an item settles while preserving result order', async () => {
@@ -35,6 +35,49 @@ describe('Promise utilities: promiseMap', () => {
 
   it('rejects invalid concurrency values', async () => {
     await expect(promiseMap([], async () => 'unused', 0)).rejects.toThrow('Promise map concurrency must be a positive integer');
+  });
+});
+
+describe('Promise utilities: promiseMapWaitForStarted', () => {
+  it('waits for already-started mappers before surfacing the first rejection', async () => {
+    const started: number[] = [];
+    let rejectFirst: (reason?: unknown) => void = () => {};
+    let resolveSecond: (value: string) => void = () => {};
+    const firstError = new Error('first mapper failed');
+    const first = new Promise<never>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const second = new Promise<string>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let rejected = false;
+
+    const promise = promiseMapWaitForStarted([0, 1, 2], async (value) => {
+      started.push(value);
+      if (value === 0) return first;
+      if (value === 1) return second;
+      return 'unused';
+    }, 2).catch((reason) => {
+      rejected = true;
+      throw reason;
+    });
+
+    await Promise.resolve();
+    expect(started).toEqual([0, 1]);
+
+    rejectFirst(firstError);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(rejected).toBe(false);
+    expect(started).toEqual([0, 1]);
+
+    resolveSecond('second');
+    await expect(promise).rejects.toBe(firstError);
+    expect(started).toEqual([0, 1]);
+  });
+
+  it('rejects invalid concurrency values', async () => {
+    await expect(promiseMapWaitForStarted([], async () => 'unused', 0)).rejects.toThrow('Promise map concurrency must be a positive integer');
   });
 });
 
