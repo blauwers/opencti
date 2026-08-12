@@ -55,6 +55,11 @@ interface FileToIndexObject {
   uploaded_at: Date | undefined;
 }
 
+export const hasDataRestrictionsUpdate = (patch: UpdateEvent['context']['patch'] | undefined): boolean => {
+  return patch?.some((op) => typeof op.path === 'string'
+    && (op.path.includes('granted_refs') || op.path.includes('object_marking_refs'))) ?? false;
+};
+
 const loadFilesToIndex = async (file: FileToIndexObject) => {
   const content = await getFileContent(file.id, 'base64');
   return {
@@ -107,7 +112,7 @@ export const indexImportedFiles = async (context: AuthContext, indexFromDate: st
     }
   }
 };
-const handleStreamEvents = async (streamEvents: Array<SseEvent<StreamDataEvent>>) => {
+export const handleStreamEvents = async (streamEvents: Array<SseEvent<StreamDataEvent>>) => {
   try {
     if (streamEvents.length === 0) {
       return;
@@ -122,8 +127,7 @@ const handleStreamEvents = async (streamEvents: Array<SseEvent<StreamDataEvent>>
         const entityType = stix.extensions[STIX_EXT_OCTI].type;
         const stixFiles = stix.extensions[STIX_EXT_OCTI].files;
         // test if markings or organization sharing have been updated
-        const isDataRestrictionsUpdate = updateEvent.context?.patch && updateEvent.context.patch
-          .map((op) => op.path && (op.path.includes('granted_refs') || op.path.includes('object_marking_refs')));
+        const isDataRestrictionsUpdate = hasDataRestrictionsUpdate(updateEvent.context?.patch);
         if (stixFiles?.length > 0 && isDataRestrictionsUpdate) {
           // update all indexed files for this entity
           const entity = await internalLoadById(context, SYSTEM_USER, entityId, { type: entityType });
