@@ -20,7 +20,19 @@ import { RELATION_GRANTED_TO, RELATION_OBJECT_MARKING } from '../schema/stixRefR
 import { buildPagination, cursorToOffset, INDEX_FILES, READ_DATA_INDICES_WITHOUT_INTERNAL, READ_INDEX_FILES } from './utils';
 import { DatabaseError } from '../config/errors';
 import { logApp } from '../config/conf';
-import { buildDataRestrictions, elFindByIds, elIndex, elRawCount, elRawDeleteByQuery, elRawSearch, elRawUpdateByQuery, ES_MINIMUM_FIXED_PAGINATION } from './engine';
+import {
+  BULK_TIMEOUT,
+  buildDataRestrictions,
+  elFindByIds,
+  elRawBulk,
+  elRawCount,
+  elRawDeleteByQuery,
+  elRawSearch,
+  elRawUpdateByQuery,
+  ES_MINIMUM_FIXED_PAGINATION,
+  MAX_BULK_BYTES,
+  MAX_BULK_OPERATIONS,
+} from './engine';
 
 const buildIndexFileBody = (documentId, file, entity = null) => {
   const documentBody = {
@@ -45,6 +57,49 @@ const buildIndexFileBody = (documentId, file, entity = null) => {
   return documentBody;
 };
 
+const buildFileBulkBody = (documents) => documents.flatMap((documentBody) => ([
+  { index: { _index: INDEX_FILES, _id: documentBody.internal_id } },
+  R.dissoc('_index', documentBody),
+]));
+
+const getFileBulkDocumentByteLength = (documentBody) => {
+  return buildFileBulkBody([documentBody]).reduce((total, line) => total + Buffer.byteLength(JSON.stringify(line)) + 1, 0);
+};
+
+const splitFileBulkDocuments = (documents) => {
+  const groups = [];
+  let group = [];
+  let groupBytes = 0;
+  documents.forEach((documentBody) => {
+    const documentBytes = getFileBulkDocumentByteLength(documentBody);
+    const exceedsOperationLimit = group.length >= MAX_BULK_OPERATIONS;
+    const exceedsByteLimit = group.length > 0 && groupBytes + documentBytes > MAX_BULK_BYTES;
+    if (group.length > 0 && (exceedsOperationLimit || exceedsByteLimit)) {
+      groups.push(group);
+      group = [];
+      groupBytes = 0;
+    }
+    group.push(documentBody);
+    groupBytes += documentBytes;
+  });
+  if (group.length > 0) {
+    groups.push(group);
+  }
+  return groups;
+};
+
+const getBulkItemError = (item) => Object.values(item ?? {})[0]?.error;
+const getBulkErrorMessage = (error) => error?.message ?? error?.reason;
+const getFailedBulkDocuments = (documents, items = []) => {
+  if (!Array.isArray(items) || items.length !== documents.length) {
+    return documents.map((documentBody) => ({ documentBody, error: new Error('Invalid bulk indexing response shape') }));
+  }
+  return documents.flatMap((documentBody, index) => {
+    const error = getBulkItemError(items[index]);
+    return error ? [{ documentBody, error }] : [];
+  });
+};
+
 export const elIndexFiles = async (context, user, files) => {
   if (!files || files.length === 0) {
     return;
@@ -52,29 +107,61 @@ export const elIndexFiles = async (context, user, files) => {
   const entityIds = files.filter((file) => !!file.entity_id).map((file) => file.entity_id);
   const opts = { indices: READ_DATA_INDICES_WITHOUT_INTERNAL, toMap: true };
   const entitiesMap = await elFindByIds(context, user, entityIds, opts);
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
+  const documents = files.flatMap((file) => {
     const { internal_id, file_data, file_id, entity_id } = file;
-    if (internal_id && file_id && file_data) {
-      const entity = entity_id ? entitiesMap[entity_id] : null;
-      const fileObject = {
-        id: file_id,
-        content: file_data,
-        name: file.name,
-        uploaded_at: file.uploaded_at,
-      };
-      const documentBody = buildIndexFileBody(internal_id, fileObject, entity);
-      try {
-        await elIndex(INDEX_FILES, documentBody, { pipeline: 'attachment' });
-      } catch (err) {
-        // catch & log error
-        logApp.error('Error on file indexing', { cause: err, file_id });
-        // try to index without file content
-        const documentWithoutFileData = R.dissoc('file_data', documentBody);
-        await elIndex(INDEX_FILES, documentWithoutFileData).catch((e) => {
-          logApp.error('Error in fallback file indexing', { message: e.message, cause: e, file_id });
-        });
-      }
+    if (!internal_id || !file_id || !file_data) {
+      return [];
+    }
+    const entity = entity_id ? entitiesMap[entity_id] : null;
+    const fileObject = {
+      id: file_id,
+      content: file_data,
+      name: file.name,
+      uploaded_at: file.uploaded_at,
+    };
+    return [buildIndexFileBody(internal_id, fileObject, entity)];
+  });
+  if (documents.length === 0) {
+    return;
+  }
+
+  const executeBulk = async (docs, pipeline) => {
+    return elRawBulk(context, {
+      body: buildFileBulkBody(docs),
+      ...(pipeline ? { pipeline } : {}),
+      refresh: true,
+      timeout: BULK_TIMEOUT,
+    });
+  };
+
+  const documentGroups = splitFileBulkDocuments(documents);
+  for (let index = 0; index < documentGroups.length; index += 1) {
+    const group = documentGroups[index];
+    let failedDocuments;
+    try {
+      const result = await executeBulk(group, 'attachment');
+      failedDocuments = getFailedBulkDocuments(group, result.items);
+    } catch (err) {
+      failedDocuments = group.map((documentBody) => ({ documentBody, error: err }));
+    }
+
+    if (failedDocuments.length === 0) {
+      continue;
+    }
+    failedDocuments.forEach(({ documentBody, error }) => {
+      logApp.error('Error on file indexing', { cause: error, file_id: documentBody.file_id });
+    });
+    const fallbackDocuments = failedDocuments.map(({ documentBody }) => R.dissoc('file_data', documentBody));
+    try {
+      const fallbackResult = await executeBulk(fallbackDocuments);
+      const fallbackFailures = getFailedBulkDocuments(fallbackDocuments, fallbackResult.items);
+      fallbackFailures.forEach(({ documentBody, error }) => {
+        logApp.error('Error in fallback file indexing', { message: getBulkErrorMessage(error), cause: error, file_id: documentBody.file_id });
+      });
+    } catch (err) {
+      fallbackDocuments.forEach((documentBody) => {
+        logApp.error('Error in fallback file indexing', { message: getBulkErrorMessage(err), cause: err, file_id: documentBody.file_id });
+      });
     }
   }
 };

@@ -32,13 +32,19 @@ const indexFile = async (fileName, mimetype, documentId) => {
     uploaded_at: file.lastModified,
   };
 
+  return { fileToIndex, uploadedFileId: uploadedFile.id };
+};
+
+const indexFileAndLoad = async (fileName, mimetype, documentId) => {
+  const { fileToIndex, uploadedFileId } = await indexFile(fileName, mimetype, documentId);
+
   // index file content
   await elIndexFiles(testContext, ADMIN_USER, [fileToIndex]);
 
   // load file document
   const document = await elLoadById(testContext, ADMIN_USER, documentId, { indices: INDEX_FILES });
 
-  return { document, uploadedFileId: uploadedFile.id };
+  return { document, uploadedFileId };
 };
 
 const testFileIndexing = async (result, mimeType) => {
@@ -63,45 +69,45 @@ describe('Indexing file test', () => {
   let document4;
   it('Should index small pdf file', async () => {
     const mimeType = 'application/pdf';
-    const result = await indexFile('test-report-to-index.pdf', mimeType, 'TEST_FILE_1');
+    const result = await indexFileAndLoad('test-report-to-index.pdf', mimeType, 'TEST_FILE_1');
     await testFileIndexing(result, mimeType);
     document1 = result.document;
   });
   it('Should index large pdf file', async () => {
     const mimeType = 'application/pdf';
-    const result = await indexFile('test-large-report-to-index.pdf', mimeType, 'TEST_FILE_2');
+    const result = await indexFileAndLoad('test-large-report-to-index.pdf', mimeType, 'TEST_FILE_2');
     await testFileIndexing(result, mimeType);
     document2 = result.document;
   });
   it('Should index txt file', async () => {
     const mimeType = 'text/plain';
-    const result = await indexFile('test-file-to-index.txt', mimeType, 'TEST_FILE_3');
+    const result = await indexFileAndLoad('test-file-to-index.txt', mimeType, 'TEST_FILE_3');
     await testFileIndexing(result, mimeType);
   });
   it('Should index csv file', async () => {
     const mimeType = 'text/plain';
-    const result = await indexFile('test-file-to-index.csv', mimeType, 'TEST_FILE_4');
+    const result = await indexFileAndLoad('test-file-to-index.csv', mimeType, 'TEST_FILE_4');
     await testFileIndexing(result, mimeType);
     document4 = result.document;
   });
   it('Should index xls file', async () => {
     const mimeType = 'application/vnd.ms-excel';
-    const result = await indexFile('test-file-to-index.xls', mimeType, 'TEST_FILE_5');
+    const result = await indexFileAndLoad('test-file-to-index.xls', mimeType, 'TEST_FILE_5');
     await testFileIndexing(result, mimeType);
   });
   it('Should index xlsx file', async () => {
     const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-    const result = await indexFile('test-file-to-index.xlsx', mimeType, 'TEST_FILE_6');
+    const result = await indexFileAndLoad('test-file-to-index.xlsx', mimeType, 'TEST_FILE_6');
     await testFileIndexing(result, mimeType);
   });
   it('Should index html file', async () => {
     const mimeType = 'text/html';
-    const result = await indexFile('test-file-to-index.html', mimeType, 'TEST_FILE_7');
+    const result = await indexFileAndLoad('test-file-to-index.html', mimeType, 'TEST_FILE_7');
     await testFileIndexing(result, mimeType);
   });
   it('Should index file with metadata unsupported by the attachment processor config', async () => {
     const mimeType = 'application/pdf';
-    const result = await indexFile('test-report-with-unhandled-metadata-to-index.pdf', mimeType, 'TEST_FILE_8');
+    const result = await indexFileAndLoad('test-report-with-unhandled-metadata-to-index.pdf', mimeType, 'TEST_FILE_8');
     await testFileIndexing(result, mimeType);
   });
   it('Should find document by search query', async () => {
@@ -141,6 +147,18 @@ describe('Indexing file test', () => {
       searchOccurrences: 1,
     };
     await testFilesSearching('control', [expectedFile4, expectedFile2]);
+  });
+  it('Should index multiple files in one attachment bulk', async () => {
+    const mimeType = 'text/plain';
+    const file1 = await indexFile('test-file-to-index.txt', mimeType, 'TEST_FILE_BULK_1');
+    const file2 = await indexFile('test-file-to-index.csv', mimeType, 'TEST_FILE_BULK_2');
+
+    await elIndexFiles(testContext, ADMIN_USER, [file1.fileToIndex, file2.fileToIndex]);
+
+    const document1 = await elLoadById(testContext, ADMIN_USER, file1.fileToIndex.internal_id, { indices: INDEX_FILES });
+    const document2 = await elLoadById(testContext, ADMIN_USER, file2.fileToIndex.internal_id, { indices: INDEX_FILES });
+    await testFileIndexing({ document: document1, uploadedFileId: file1.uploadedFileId }, mimeType);
+    await testFileIndexing({ document: document2, uploadedFileId: file2.uploadedFileId }, mimeType);
   });
 });
 

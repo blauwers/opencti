@@ -97,7 +97,7 @@ export const indexImportedFiles = async (context: AuthContext, indexFromDate: st
         const filesToIndex = await BluePromise.map(filesToLoad, loadFilesToIndex, { concurrency: 5 })
           .catch((error) => logApp.error('[OPENCTI-MODULE] Index manager indexing error', { cause: error, manager: 'FILE_INDEX_MANAGER' }));
 
-        // index all files one by one
+        // Index the loaded chunk in one bounded attachment bulk.
         await elIndexFiles(context, SYSTEM_USER, filesToIndex);
         await waitInSec(1);
       }
