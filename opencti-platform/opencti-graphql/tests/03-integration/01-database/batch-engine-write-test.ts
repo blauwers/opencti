@@ -978,6 +978,29 @@ describe('batch engine writes', () => {
     expect(committed?.name).toBe(directWork.name);
   });
 
+  it('does not retain empty logical ids for typed direct index writes', async () => {
+    const firstWork = buildDirectWork();
+    const secondWork = buildDirectWork();
+
+    await expect(executeBatchMutations([
+      {
+        kind: BatchMutationKind.CreateEntity,
+        executeWrite: async () => {
+          await elIndex(INDEX_HISTORY, firstWork, { context: testContext });
+          await elIndex(INDEX_HISTORY, secondWork, { context: testContext });
+          const state = getBatchExecutionMetadata<{
+            writeLookupsById: Map<unknown, unknown>;
+          }>('engine.writes');
+          const lookupIds = Array.from(state?.writeLookupsById.keys() ?? []);
+          expect(lookupIds).toContain(firstWork.internal_id);
+          expect(lookupIds).toContain(secondWork.internal_id);
+          expect(lookupIds.every((id) => typeof id === 'string' && id.length > 0)).toBe(true);
+          throw new Error('abort direct index lookup batch');
+        },
+      },
+    ])).rejects.toThrow('abort direct index lookup batch');
+  });
+
   it('keeps work Redis initialization outside an aborted batch', async () => {
     let workId: string | undefined;
 

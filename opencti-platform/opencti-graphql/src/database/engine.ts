@@ -2138,7 +2138,7 @@ const normalizeBufferedEngineLookupIds = (ids: Array<string | null | undefined>)
 
 const getBufferedEngineElementLookupIds = (element: Record<string, any>): string[] => {
   if (isNotEmptyField(element.entity_type)) {
-    return getInstanceIds(element);
+    return normalizeBufferedEngineLookupIds(getInstanceIds(element));
   }
   return normalizeBufferedEngineLookupIds([
     element.internal_id,
